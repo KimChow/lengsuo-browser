@@ -1,0 +1,31 @@
+name: Kernel support checks
+
+on:
+  push:
+  pull_request:
+
+permissions:
+  contents: read
+
+jobs:
+  support:
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, windows-latest]
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - name: Source line limits
+        run: python tools/check_line_limit.py
+      - name: Source baseline helper tests
+        run: python -m unittest discover -s tests -v
+      - name: Configure native support in Release
+        run: cmake -S . -B build -DCMAKE_BUILD_TYPE=Release
+      - name: Build native support
+        run: cmake --build build --config Release --parallel 2
+      - name: Native wire tests
+        run: ctest --test-dir build -C Release --output-on-failure

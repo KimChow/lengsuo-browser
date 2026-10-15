@@ -3,7 +3,11 @@ from pathlib import Path
 import subprocess
 import sys
 
-EXTENSIONS = {".rs", ".ts", ".tsx", ".js", ".jsx", ".py", ".sh", ".toml", ".sql", ".md", ".yml", ".yaml", ".json"}
+EXTENSIONS = {
+    ".rs", ".ts", ".tsx", ".js", ".jsx", ".py", ".sh", ".toml", ".sql",
+    ".md", ".yml", ".yaml", ".json", ".c", ".cc", ".cpp", ".h", ".hpp",
+    ".gn", ".gni", ".cmake",
+}
 
 
 def main():
@@ -16,7 +20,7 @@ def main():
     checked = 0
     for name in sorted(set(result.stdout.decode("utf-8").split("\0")) - {""}):
         path = root / name
-        if not path.is_file() or path.suffix not in EXTENSIONS:
+        if not path.is_file() or (path.suffix not in EXTENSIONS and path.name != "CMakeLists.txt"):
             continue
         if "fixtures" in path.relative_to(root).parts or path.name.endswith(".lock"):
             continue
