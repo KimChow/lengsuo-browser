@@ -1,0 +1,12 @@
+{
+  "schema_version": 1,
+  "upstream_url": "https://chromium.googlesource.com/chromium/src.git",
+  "chromium_version": "155.0.8059.85",
+  "chromium_revision": "0e66b94549a8bd85f03fbdf189b752d6e7b63c32",
+  "deps_sha256": "23ef1ed90785da130901961e4f4179b4fc10adac957eee5622d7e67fe4b82ec5",
+  "target_platforms": [
+    "windows",
+    "linux"
+  ],
+  "patches": []
+}
