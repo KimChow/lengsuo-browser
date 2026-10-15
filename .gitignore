@@ -3,3 +3,8 @@ __pycache__/
 /chromium-src/
 /out/
 /evidence/
+/build/
+/native/*.log
+/native/*.o
+/native/*.exe
+/native/*.bin
