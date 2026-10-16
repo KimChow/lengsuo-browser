@@ -111,7 +111,62 @@ ua string bounds/control chars; brand/full list count and field bounds;
 empty-model allowance; mobile flag domain; two-entry catalog; pool binding
 (CatalogMatchesProfile match/mismatch/empty).
 
-Not yet evidence: 1.47 g++/ASan/UBSan rerun, GN source_set compilation,
-Chromium-tree integration. The refactor of profile_wire.cc onto wire_reader.h
-is covered by its unchanged 270-assertion suite locally; Linux rerun still
-pending for both components.
+Not yet evidence at the time of that Windows run: 1.47 g++/ASan/UBSan rerun,
+GN source_set compilation, Chromium-tree integration. The 1.47 rerun was
+completed the same day — see "Research machine 1.47 (catalog + reader)" below.
+
+## Research machine 1.47 (catalog + reader) — g++ rerun (2026-10-16)
+
+Worktree `worker/w2-catalog-sanitize`, directory `native/`. Toolchain
+g++ (Ubuntu 13.3.0-6ubuntu2~24.04.1) 13.3.0, x86_64. Builds into
+`/home/ubuntu/lengsuo-browser-dev/reviews/build-w2` (outside the repo);
+logs in `/home/ubuntu/lengsuo-browser-dev/reviews/`. No repo sources were
+modified for this rerun.
+
+Baseline, full warning set (`-Wall -Wextra -Werror -pedantic -Wconversion
+-Wsign-conversion -O2 -DNDEBUG -I.`):
+
+```text
+g++ ... profile_wire.cc profile_wire_test.cc -o wt-wire
+compile_exit=0  ./wt-wire -> PASS 270 assertions  test_exit=0
+# catalog-147-wire-baseline.log
+
+g++ ... profile_catalog.cc profile_catalog_test.cc -o wt-catalog
+compile_exit=0  ./wt-catalog -> PASS 192 assertions  test_exit=0
+# catalog-147-catalog-baseline.log
+```
+
+Assertion counts match the Windows MSVC `/W4 /WX` run exactly (270/192);
+no platform-dependent code or test changes were needed.
+
+Sanitizers (`-fsanitize=address,undefined -fno-omit-frame-pointer`,
+same warning flags, no `-O2 -DNDEBUG`):
+
+```text
+g++ ... -fsanitize=address,undefined -fno-omit-frame-pointer \
+    profile_wire.cc profile_wire_test.cc -o wt-wire-san
+compile_exit=0  ./wt-wire-san -> PASS 270 assertions  test_exit=0
+# catalog-147-wire-sanitizer.log
+
+g++ ... -fsanitize=address,undefined -fno-omit-frame-pointer \
+    profile_catalog.cc profile_catalog_test.cc -o wt-catalog-san
+compile_exit=0  ./wt-catalog-san -> PASS 192 assertions  test_exit=0
+# catalog-147-catalog-sanitizer.log
+```
+
+No ASan/UBSan diagnostics on any truncated-prefix, oversized, or boundary
+input in either suite.
+
+Red-phase confirmation (catalog): the real `profile_catalog.cc` was left
+untouched; the test was linked instead against a stub
+(`build-w2/catalog_stub.cc`) whose `DecodeCatalog` returns nullopt:
+
+```text
+g++ ... build-w2/catalog_stub.cc profile_catalog_test.cc -o wt-catalog-red
+compile_exit=0  ./wt-catalog-red -> FAIL 3  test_exit=1
+# catalog-147-catalog-red-stub.log
+```
+
+With this, the LBPC1/catalog + wire_reader row of the portability matrix is
+green on both toolchains. Remaining pending evidence is unchanged: GN
+source_set compilation and Chromium-tree integration.
