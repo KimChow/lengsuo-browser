@@ -1,7 +1,22 @@
 # Chromium 155 原生接入边界
 
-状态：固定源码定位已完成，补丁、GN 校验、编译与浏览器运行尚未完成。
+状态：固定源码定位已完成；overlay 与补丁应用工具已实现并在 1.47 隔离目录
+通过全部单测；对真实固定源码树的 GN 校验、编译与浏览器运行尚未完成。
 源码 revision：`0e66b94549a8bd85f03fbdf189b752d6e7b63c32`。
+
+工具链顺序（在固定源码副本上）：
+
+```text
+python3 -m tools.overlay    --source <src> --repository <repo> --lock baseline.json --apply
+python3 -m tools.patch_apply --source <src> --repository <repo> --lock baseline.json --apply
+```
+
+`tools.patch_apply` 校验 baseline 声明的补丁清单与 `patches/` 目录一一
+对应、逐文件 SHA-256 与声明一致、HEAD/origin/tag/VERSION/DEPS 与锁一致，
+然后按文件名顺序应用；若全部补丁已可逆应用则报告 already-applied。
+应用要求工作树无 tracked 改动；apply-check 全通过才开始真正应用。
+它不放置 overlay 源文件（那是 `tools.overlay` 的职责），不执行 GN，
+不编译，不运行浏览器，也不证明依赖已同步。
 
 ## 上游符号
 
