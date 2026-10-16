@@ -78,3 +78,8 @@ wire 中已具备的 `language` 同样不是小步（2026-10-16 撤销验证）�
 覆盖点设计与验证——与 UA/UA-CH 同归 catalog/runner 契约批次。
 曾尝试在 WebPreferences 钩子写入导致编译失败并已撤销恢复
 （reviews/build-b6.log 为证）。
+
+接续（2026-10-16 本地批次）：catalog 值解析契约已定稿并实现 LBPC1
+解码器（`docs/catalog-contract.md`，Windows MSVC 本地红→绿通过），
+UA/UA-CH 注入（0006）的阻塞点解除；注入落地、catalog 加载命令行契约、
+language 覆盖点设计与 1.47 复核仍未完成。

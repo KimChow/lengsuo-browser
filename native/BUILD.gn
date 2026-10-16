@@ -1,4 +1,16 @@
-# Standalone decoder only. Chromium GN integration is not yet validated.
+# Standalone decoders only. Chromium GN integration is not yet validated.
 source_set("profile_wire") {
-  sources = [ "profile_wire.cc", "profile_wire.h" ]
+  sources = [
+    "profile_wire.cc",
+    "profile_wire.h",
+    "wire_reader.h",
+  ]
+}
+
+source_set("profile_catalog") {
+  sources = [
+    "profile_catalog.cc",
+    "profile_catalog.h",
+  ]
+  public_deps = [ ":profile_wire" ]
 }
