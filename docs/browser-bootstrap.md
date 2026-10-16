@@ -4,7 +4,14 @@
 sync → runhooks → overlay 放置 → 4 补丁应用 → gn gen（35981 targets）→
 gn check（两个目标头依赖 OK）→ bootstrap_unittests 编译并 4/4 通过 →
 完整 chrome 构建成功 → headless 真浏览器冒烟通过（正/负/无参数路径）。
-Windows/macOS 构建与浏览器行为矩阵仍未验证，不可声明三平台产品就绪。
+
+Windows：本机构建链路于 2026-10-17 打通——VS2026 便携工具链 +
+SDK 10.0.28000.0（`vs2026_install` 指引）、hermetic Python 正常、
+gn gen（35758 targets，必须 is_component_build=false，见 integration/BUILD.gn
+注释）→ 0001–0005 应用 + 13 文件 overlay → `bootstrap_unittests.exe`
+**5/5 通过**（`D:\lengsuo-build\logs\win-bootstrap-unittests.log`）。
+Windows chrome 完整构建、安装、签名与浏览器行为矩阵仍未验证。
+macOS 构建与浏览器行为矩阵仍未验证，不可声明三平台产品就绪。
 
 ## Linux 真浏览器冒烟（2026-10-16，reviews/browser-smoke.log）
 
