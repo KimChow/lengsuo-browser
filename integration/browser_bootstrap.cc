@@ -86,23 +86,18 @@ bool ApplyTouchPreferences(const ParsedProfile& profile,
   const auto hover = touch ? HoverType::kHoverNone : HoverType::kHoverHoverType;
   const int pointers = static_cast<int>(pointer);
   const int hovers = static_cast<int>(hover);
-  // Locale rides the same hook: the wire's bounded-ASCII language feeds
-  // accept_languages until the catalog contract splits concerns out.
   const bool changed =
       prefs->pointer_events_max_touch_points != profile.max_touch_points ||
       prefs->touch_event_feature_detection_enabled != touch ||
       prefs->available_pointer_types != pointers ||
       prefs->primary_pointer_type != pointer ||
-      prefs->available_hover_types != hovers ||
-      prefs->primary_hover_type != hover ||
-      prefs->intl.accept_languages != profile.language;
+      prefs->available_hover_types != hovers || prefs->primary_hover_type != hover;
   prefs->pointer_events_max_touch_points = profile.max_touch_points;
   prefs->touch_event_feature_detection_enabled = touch;
   prefs->available_pointer_types = pointers;
   prefs->primary_pointer_type = pointer;
   prefs->available_hover_types = hovers;
   prefs->primary_hover_type = hover;
-  prefs->intl.accept_languages = profile.language;
   return changed;
 }
 }  // namespace lengsuo
