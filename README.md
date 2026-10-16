@@ -2,10 +2,12 @@
 
 Chromium 内核独立开发仓。客户端运行器、GPUI 与凭证组件属于 `lengsuo-client`。
 
-2026-10-16：已在研究机 1.47 完成 Linux Chromium 编译，接入画像加载、
+2026-10-17：已在研究机 1.47 完成 Linux Chromium 编译，接入画像加载、
 Touch 与 Screen/DPR；原生接入单测 5/5 通过，并有 Linux 真浏览器冒烟记录。
-这不是完整指纹浏览器；UA/UA-CH 值池解析、其余指纹面、运行器、安装与
-Windows 构建/运行验收仍未完成。详见 [原生接入记录](docs/browser-bootstrap.md)
+Windows 本机构建链路已打通（VS2026+SDK 28000），原生接入单测同套件
+5/5 通过；Windows 完整 chrome 构建/安装/运行验收仍在进行。
+这不是完整指纹浏览器；UA/UA-CH、language、WebRTC 等其余指纹面、
+运行器与安装验收仍未完成。详见 [原生接入记录](docs/browser-bootstrap.md)
 及 [Screen/DPR 记录](docs/batch2-screen-dpr-design.md)。
 
 项目源码公开可查看；项目许可证尚未确定，不宣称已授予开源许可或
