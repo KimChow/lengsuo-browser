@@ -15,6 +15,7 @@ MAPPING = (
     ("native/profile_wire.h", "lengsuo/native/profile_wire.h"),
     ("native/profile_wire.cc", "lengsuo/native/profile_wire.cc"),
     ("native/BUILD.gn", "lengsuo/native/BUILD.gn"),
+    ("native/golden.inc", "lengsuo/native/golden.inc"),
     ("integration/browser_bootstrap.cc", "lengsuo/integration/browser_bootstrap.cc"),
     ("integration/browser_bootstrap.h", "lengsuo/integration/browser_bootstrap.h"),
     ("integration/profile_bootstrap_state.cc",
