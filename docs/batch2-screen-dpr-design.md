@@ -1,7 +1,19 @@
 # 第二批设计：Screen/DPR 画像覆盖机制
 
-状态：设计定稿，补丁未写、未验证。证据来源：1.47 固定源码树
-（`0e66b945`）上 screen-dpr/ua-uach 两份核实笔记（batch2-work/）。
+状态：**已实现并在 Linux 真浏览器验证（2026-10-16）**。0005 补丁在
+固定树干净应用；bootstrap_unittests 5/5 通过（含 ScreenInfos 覆盖用例）；
+chrome 重建后 headless 实测：golden 画像下
+`screen 1920x1080 / dpr 1 / depth 24`，无画像 `800x600` 上游行为不变。
+Windows/macOS 验证仍待各自平台构建。
+
+## 已验证证据（1.47）
+
+- `kernel-0005-check.log`：git apply --check 通过后应用。
+- `build-b4.done` rc=0 + `unittests-b4.log`：5/5 通过。
+- `chrome-b5.done` rc=0：增量重建。
+- headless 实测（reviews/browser-smoke.log 追加）：
+  有画像 `{"mtp":0,"sw":1920,"sh":1080,"dpr":1,"cd":24}`；
+  无画像 `{"mtp":0,"sw":800,"sh":600,"dpr":1,"cd":24}`。
 
 ## 机制选择：browser 侧 WebScreenInfo 供给点覆盖
 
