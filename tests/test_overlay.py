@@ -5,6 +5,7 @@ import io
 import json
 import os
 from pathlib import Path
+import re
 import subprocess
 import tempfile
 import unittest
@@ -238,6 +239,22 @@ class UnsupportedApplyTests(unittest.TestCase):
         self.assertEqual(result["status"], "failed")
         self.assertIn("requires POSIX", result["error"])
         self.assertEqual(result["files"], [])
+
+
+class OverlayMappingInvariant(unittest.TestCase):
+    def test_native_build_sources_all_mapped(self):
+        text = (Path(__file__).resolve().parent.parent
+                / "native/BUILD.gn").read_text()
+        referenced = set()
+        for block in re.findall(r"sources\s*=\s*\[(.*?)\]", text, re.S):
+            referenced |= {item.strip().strip('",') for item in block.split("\n")
+                           if item.strip().strip('",')}
+        mapped = {Path(target).name for _, target in MAPPING
+                  if target.startswith("lengsuo/native/")}
+        self.assertTrue(referenced, "native/BUILD.gn declares no sources")
+        self.assertTrue(referenced <= mapped,
+                        "native/BUILD.gn sources missing from MAPPING: "
+                        + str(referenced - mapped))
 
 if __name__ == "__main__":
     unittest.main()
