@@ -1,0 +1,31 @@
+--- a/content/browser/renderer_host/render_widget_host_view_base.cc
++++ b/content/browser/renderer_host/render_widget_host_view_base.cc
+@@ -42,6 +42,7 @@
+ #include "content/common/features.h"
+ #include "content/public/browser/render_widget_host_view.h"
+ #include "content/public/common/page_visibility_state.h"
++#include "lengsuo/integration/browser_bootstrap.h"
+ #include "third_party/blink/public/common/features.h"
+ #include "third_party/blink/public/mojom/frame/intrinsic_sizing_info.mojom.h"
+ #include "third_party/blink/public/mojom/unbounded_element/unbounded_element.mojom.h"
+@@ -970,6 +970,10 @@
+     // If there is no Screen, create fake ScreenInfos (for tests).
+     screen_infos = display::ScreenInfos(display::ScreenInfo());
+   }
++
++  // Lengsuo: apply the frozen profile's screen geometry, DPR and depth when
++  // a profile was loaded at startup; no profile keeps upstream behavior.
++  lengsuo::ApplyProfileScreenInfos(&screen_infos);
+ 
+   // Set system cursor size separately as it's not a property of screen or
+   // display.
+--- a/content/browser/BUILD.gn
++++ b/content/browser/BUILD.gn
+@@ -355,6 +355,7 @@
+     "//ui/color",
+     "//ui/color:mixers",
+     "//ui/compositor",
++    "//lengsuo/integration:bootstrap",
+     "//ui/display",
+     "//ui/display/types",
+     "//ui/display/util",

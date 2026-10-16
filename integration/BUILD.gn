@@ -8,7 +8,11 @@ source_set("bootstrap") {
     "profile_bootstrap_state.cc",
     "profile_bootstrap_state.h",
   ]
-  public_deps = [ "//base", "//lengsuo/native:profile_wire" ]
+  public_deps = [
+    "//base",
+    "//lengsuo/native:profile_wire",
+    "//ui/display",
+  ]
   deps = [
     "//content/public/common",
     "//third_party/blink/public/common",
@@ -24,6 +28,7 @@ test("bootstrap_unittests") {
     "//testing/gtest",
     "//third_party/blink/public/common",
     "//content/public/common",
+    "//ui/display",
     "//base/test:run_all_unittests",
     "//base/test:test_support",
   ]
