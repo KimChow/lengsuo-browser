@@ -76,16 +76,14 @@ TEST(BrowserBootstrap, GoldenWireInitializesFrozenStateAndAppliesTouch) {
   EXPECT_FALSE(ApplyTouchPreferences(*profile, &prefs));
 }
 TEST(BrowserBootstrap, ScreenInfosOverrideFollowsProfilePresence) {
-  display::ScreenInfos infos(display::ScreenInfo());
-  infos.current().rect = gfx::Rect(0, 0, 800, 600);
-  infos.current().device_scale_factor = 1.f;
+  display::ScreenInfo default_info;
+  default_info.rect = gfx::Rect(0, 0, 800, 600);
+  default_info.device_scale_factor = 1.f;
+  display::ScreenInfos infos(default_info);
   // No profile: upstream values stay untouched.
   EXPECT_FALSE(ApplyProfileScreenInfos(&infos));
   EXPECT_EQ(800, infos.current().rect.width());
   // With the golden profile loaded through the state reader: full override.
-  namespace {
-#include "lengsuo/native/golden.inc"
-  }
   ProfileBootstrapState state;
   ASSERT_TRUE(state.Initialize(true, true,
                                [&]() -> std::optional<std::string> {
