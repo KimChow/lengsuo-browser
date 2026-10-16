@@ -2,6 +2,8 @@
 #include <cstdint>
 #include <span>
 namespace lengsuo {
+ProfileBootstrapState::ProfileBootstrapState() = default;
+ProfileBootstrapState::~ProfileBootstrapState() = default;
 bool ProfileBootstrapState::Initialize(bool requested, bool safe_local_path,
                                        const Reader& read) {
   if (attempted_) return false;
