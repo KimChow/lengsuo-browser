@@ -13,6 +13,10 @@ source_set("bootstrap") {
     "//lengsuo/native:profile_wire",
     "//ui/display",
   ]
+  # The "common" group is required: :common_sources is visibility-restricted
+  # to //content/*. The group resolves to //content only in component builds,
+  # which would cycle through content/browser (0005); builds therefore pin
+  # is_component_build=false in args.gn.
   deps = [
     "//content/public/common",
     "//third_party/blink/public/common",
