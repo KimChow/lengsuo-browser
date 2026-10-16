@@ -1,0 +1,27 @@
+--- a/chrome/browser/chrome_content_browser_client.cc
++++ b/chrome/browser/chrome_content_browser_client.cc
+@@ -3,6 +3,8 @@
+ // found in the LICENSE file.
+ 
+ #include "chrome/browser/chrome_content_browser_client.h"
++
++#include "lengsuo/integration/browser_bootstrap.h"
+ 
+ #include <algorithm>
+ #include <iterator>
+@@ -4885,6 +4887,7 @@
+   for (auto& parts : extra_parts_) {
+     parts->OverrideWebPreferences(web_contents, main_frame_site, web_prefs);
+   }
++  lengsuo::ApplyProfileTouchPreferences(web_prefs);
+ 
+   web_prefs->prefers_default_scrollbar_styles =
+       prefs->GetBoolean(prefs::kPrefersDefaultScrollbarStyles);
+@@ -4966,6 +4969,7 @@
+     prefs_changed |= parts->OverrideWebPreferencesAfterNavigation(
+         web_contents, main_frame_site, web_prefs);
+   }
++  prefs_changed |= lengsuo::ApplyProfileTouchPreferences(web_prefs);
+ 
+   const auto old_in_forced_colors = web_prefs->in_forced_colors;
+   const auto old_is_forced_colors_disabled =

@@ -8,3 +8,4 @@ __pycache__/
 /native/*.o
 /native/*.exe
 /native/*.bin
+.zcode-work/
