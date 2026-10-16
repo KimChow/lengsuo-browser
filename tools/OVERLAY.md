@@ -10,11 +10,16 @@ The default is a read-only plan. Add `--apply` explicitly to publish the files.
 The tool prints a JSON receipt to stdout and returns 1 on failure, 0 on success.
 Capture stdout to retain the receipt, including partial failure state.
 
-The fixed mappings are `native/profile_wire.h`, `native/profile_wire.cc` and
-`native/BUILD.gn` into the corresponding `lengsuo/native/` files in the Chromium
-checkout. The GN label becomes `//lengsuo/native:profile_wire`; its source paths
-remain relative to BUILD.gn, so they need no text substitution. No browser
-BUILD.gn dependency or source hook is added by this tool.
+The fixed mappings place `native/profile_wire.h`, `native/profile_wire.cc`,
+`native/BUILD.gn` and the six integration files (`browser_bootstrap.{cc,h}`,
+`profile_bootstrap_state.{cc,h}`, `browser_bootstrap_unittest.cc`,
+`BUILD.gn`) into the corresponding `lengsuo/` files in the Chromium checkout.
+The standalone `profile_bootstrap_state_test.cc` is intentionally not mapped:
+it only runs in the repository's standalone harness. The GN labels are
+`//lengsuo/native:profile_wire` and `//lengsuo/integration:bootstrap`, both
+reported in the receipt as `gn_targets`; source paths remain relative to
+BUILD.gn, so they need no text substitution. No browser BUILD.gn dependency
+or source hook is added by this tool.
 
 The existing baseline inspector verifies origin, full HEAD, release tag,
 chrome/VERSION and the committed DEPS digest. The source must be the checkout

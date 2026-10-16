@@ -53,6 +53,26 @@ class OverlayTests(unittest.TestCase):
     def run_overlay(self, apply=False):
         return execute(self.source, self.repository, self.lock, apply)
 
+    def test_integration_targets_included(self):
+        destinations = {target for _, target in MAPPING}
+        self.assertTrue(destinations.issuperset({
+            "lengsuo/integration/browser_bootstrap.cc",
+            "lengsuo/integration/browser_bootstrap.h",
+            "lengsuo/integration/profile_bootstrap_state.cc",
+            "lengsuo/integration/profile_bootstrap_state.h",
+            "lengsuo/integration/browser_bootstrap_unittest.cc",
+            "lengsuo/integration/BUILD.gn",
+        }))
+        origins = {origin for origin, _ in MAPPING}
+        self.assertNotIn("integration/profile_bootstrap_state_test.cc", origins)
+
+    def test_gn_targets_receipt(self):
+        result = self.run_overlay()
+        self.assertEqual(result["gn_target"], "//lengsuo/native:profile_wire")
+        self.assertEqual(result["gn_targets"], [
+            "//lengsuo/integration:bootstrap", "//lengsuo/native:profile_wire",
+        ])
+
     def test_read_only_plan_and_exact_receipt(self):
         result = self.run_overlay()
         self.assertEqual(result["status"], "planned")

@@ -15,7 +15,17 @@ MAPPING = (
     ("native/profile_wire.h", "lengsuo/native/profile_wire.h"),
     ("native/profile_wire.cc", "lengsuo/native/profile_wire.cc"),
     ("native/BUILD.gn", "lengsuo/native/BUILD.gn"),
+    ("integration/browser_bootstrap.cc", "lengsuo/integration/browser_bootstrap.cc"),
+    ("integration/browser_bootstrap.h", "lengsuo/integration/browser_bootstrap.h"),
+    ("integration/profile_bootstrap_state.cc",
+     "lengsuo/integration/profile_bootstrap_state.cc"),
+    ("integration/profile_bootstrap_state.h",
+     "lengsuo/integration/profile_bootstrap_state.h"),
+    ("integration/browser_bootstrap_unittest.cc",
+     "lengsuo/integration/browser_bootstrap_unittest.cc"),
+    ("integration/BUILD.gn", "lengsuo/integration/BUILD.gn"),
 )
+GN_TARGETS = ("//lengsuo/integration:bootstrap", "//lengsuo/native:profile_wire")
 MAX_SOURCE = 1024 * 1024
 
 
@@ -120,7 +130,8 @@ def execute(source, repository, lock, apply=False):
     receipt = {"schema_version": 1, "mode": "apply" if apply else "plan",
                "status": "failed", "files": [], "build_verified": False,
                "browser_integrated": False, "cross_file_atomic": False,
-               "gn_target": "//lengsuo/native:profile_wire"}
+               "gn_target": "//lengsuo/native:profile_wire",
+               "gn_targets": list(GN_TARGETS)}
     try:
         if apply and not _supports_apply():
             raise OverlayError("Safe apply requires POSIX no-follow directory APIs")
@@ -172,7 +183,9 @@ def main():
         receipt = execute(args.source, args.repository, read_lock(args.lock), args.apply)
     except (BaselineError, OSError, ValueError) as error:
         receipt = {"status": "failed", "error": str(error), "files": [],
-                   "build_verified": False, "browser_integrated": False}
+                   "build_verified": False, "browser_integrated": False,
+                   "gn_target": "//lengsuo/native:profile_wire",
+                   "gn_targets": list(GN_TARGETS)}
     print(json.dumps(receipt, indent=2))
     return 1 if receipt["status"] == "failed" else 0
 
