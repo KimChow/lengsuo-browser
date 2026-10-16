@@ -59,7 +59,19 @@ WebScreenInfo 产出点替换为画像值。一处覆盖同时满足：
   本批不实现（devtools 打开时以 inspector 为准需要专项验证，
   NOTES 已列为未验证项）。
 
-## ua-uach 面的接续
+## ua-uach 面的接续：被 catalog 解析层阻塞（2026-10-16 定论）
 
-ua-uach NOTES（3.4KB）确认了 navigator_ua.cc / worker 三类 worker
-的接入点存在；其补丁同样由本仓接手起草，风格对齐 0002。
+ua-uach 笔记核实（1.47 固定树）确认了覆盖单点在 browser 进程：
+`ChromeContentBrowserClient::GetUserAgentOverride()`（约 :2009）与
+`GetUserAgentMetadata()`（约 :3125）。
+
+但当前 LBPF1 wire 中 UA 只是池槽位（`slots[5]`），具体 UA 字符串与
+品牌/版本列表由 catalog 解析；解码器明确不解析 catalog
+（native/VERIFICATION.md），且仓纪律禁止伪造品牌/版本值池。
+因此 **UA/UA-CH 覆盖在 catalog 解析契约建立前不能实现**——
+提前实现等于伪造。待办：catalog 值解析契约（runner 提供经授权的
+本地 catalog，browser 校验后注入两出口），再落地 0006。
+
+wire 中已具备且可先行的是 `language`（如 en-US）：
+经第一批 0002 的 OverrideWebPreferences 写 `intl.accept_languages`
+即可端到端验证，作为下一小步。
