@@ -3,6 +3,8 @@
 #include "build/build_config.h"
 #include "third_party/blink/public/common/web_preferences/web_preferences.h"
 #include "testing/gtest/include/gtest/gtest.h"
+#include "ui/display/screen_infos.h"
+#include "ui/gfx/geometry/rect.h"
 namespace {
 #include "lengsuo/native/golden.inc"
 }
@@ -72,5 +74,32 @@ TEST(BrowserBootstrap, GoldenWireInitializesFrozenStateAndAppliesTouch) {
   EXPECT_EQ(2, prefs.available_hover_types);
   EXPECT_EQ(0, prefs.pointer_events_max_touch_points);
   EXPECT_FALSE(ApplyTouchPreferences(*profile, &prefs));
+}
+TEST(BrowserBootstrap, ScreenInfosOverrideFollowsProfilePresence) {
+  display::ScreenInfos infos(display::ScreenInfo());
+  infos.current().rect = gfx::Rect(0, 0, 800, 600);
+  infos.current().device_scale_factor = 1.f;
+  // No profile: upstream values stay untouched.
+  EXPECT_FALSE(ApplyProfileScreenInfos(&infos));
+  EXPECT_EQ(800, infos.current().rect.width());
+  // With the golden profile loaded through the state reader: full override.
+  namespace {
+#include "lengsuo/native/golden.inc"
+  }
+  ProfileBootstrapState state;
+  ASSERT_TRUE(state.Initialize(true, true,
+                               [&]() -> std::optional<std::string> {
+                                 return std::string(
+                                     reinterpret_cast<const char*>(kGolden),
+                                     sizeof(kGolden));
+                               }));
+  ASSERT_NE(nullptr, state.profile());
+  EXPECT_TRUE(ApplyScreenInfos(*state.profile(), &infos));
+  EXPECT_EQ(1920, infos.current().rect.width());
+  EXPECT_EQ(1080, infos.current().rect.height());
+  EXPECT_EQ(0, infos.current().rect.x());
+  EXPECT_EQ(infos.current().rect, infos.current().available_rect);
+  EXPECT_FLOAT_EQ(1.f, infos.current().device_scale_factor);
+  EXPECT_EQ(24, infos.current().depth);
 }
 }  // namespace lengsuo

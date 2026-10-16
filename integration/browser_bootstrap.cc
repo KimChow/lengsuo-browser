@@ -3,6 +3,7 @@
 #include "base/files/file_util.h"
 #include "base/no_destructor.h"
 #include "third_party/blink/public/common/web_preferences/web_preferences.h"
+#include "ui/display/screen_infos.h"
 #include "build/build_config.h"
 #if BUILDFLAG(IS_WIN)
 #include <windows.h>
@@ -53,6 +54,27 @@ bool ApplyProfileTouchPreferences(blink::web_pref::WebPreferences* prefs) {
   const auto* profile = BrowserProfile();
   if (!profile) return false;
   return ApplyTouchPreferences(*profile, prefs);
+}
+bool ApplyScreenInfos(const ParsedProfile& profile,
+                      display::ScreenInfos* infos) {
+  display::ScreenInfo info = infos->current();
+  // The wire stores DPR in milli-units; restore with exact integer math.
+  info.device_scale_factor =
+      static_cast<float>(profile.dpr_milli) / 1000.f;
+  // Single-device model: one screen sized exactly like the profile. The
+  // profile carries no work-area semantics, so available == full rect.
+  const gfx::Rect rect(0, 0, static_cast<int>(profile.width),
+                       static_cast<int>(profile.height));
+  info.rect = rect;
+  info.available_rect = rect;
+  info.depth = profile.color_depth;
+  *infos = display::ScreenInfos(info);
+  return true;
+}
+bool ApplyProfileScreenInfos(display::ScreenInfos* infos) {
+  const auto* profile = BrowserProfile();
+  if (!profile) return false;
+  return ApplyScreenInfos(*profile, infos);
 }
 bool ApplyTouchPreferences(const ParsedProfile& profile,
                            blink::web_pref::WebPreferences* prefs) {
