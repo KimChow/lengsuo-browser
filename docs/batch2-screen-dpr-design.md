@@ -1,10 +1,11 @@
 # 第二批设计：Screen/DPR 画像覆盖机制
 
-状态：**已实现并在 Linux 真浏览器验证（2026-10-16）**。0005 补丁在
-固定树干净应用；bootstrap_unittests 5/5 通过（含 ScreenInfos 覆盖用例）；
-chrome 重建后 headless 实测：golden 画像下
-`screen 1920x1080 / dpr 1 / depth 24`，无画像 `800x600` 上游行为不变。
-Windows/macOS 验证仍待各自平台构建。
+状态：**已实现并在 Linux 与 Windows 真浏览器验证**（Linux 2026-10-16，
+Windows 2026-10-17）。0005 补丁在固定树干净应用；bootstrap_unittests
+5/5 通过（两平台同套件）；headless 实测：golden 画像下
+`screen 1920x1080 / dpr 1 / depth 24`（Windows 冒烟
+`{"mtp":0,"w":1920,"h":1080,"dpr":1,"cd":24}`），无画像 `800x600` 上游
+行为不变。macOS 验证仍待平台构建。
 
 ## 已验证证据（1.47）
 
