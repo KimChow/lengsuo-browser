@@ -9,6 +9,11 @@ namespace lengsuo {
 class ProfileBootstrapState {
  public:
   using Reader = std::function<std::optional<std::string>()>;
+  // Out-of-line: Chromium style requires it for complex members.
+  ProfileBootstrapState();
+  ~ProfileBootstrapState();
+  ProfileBootstrapState(const ProfileBootstrapState&) = delete;
+  ProfileBootstrapState& operator=(const ProfileBootstrapState&) = delete;
   bool Initialize(bool requested, bool safe_local_path, const Reader& read);
   const ParsedProfile* profile() const { return profile_ ? &*profile_ : nullptr; }
  private:
