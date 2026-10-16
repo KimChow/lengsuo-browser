@@ -85,3 +85,33 @@ test_exit=0
 Actual output is retained in `conversion-green.log` and
 `conversion-sanitizer.log`. GCC warning cleanliness is preparation for Windows,
 not evidence of an MSVC build or Chromium GN success. No tools were installed.
+
+## Catalog decoder (LBPC1) — Windows local (2026-10-16)
+
+Component: `profile_catalog.{h,cc}` + shared `wire_reader.h` (extracted from
+profile_wire.cc; profile_wire behavior unchanged, 270 assertions pass).
+Contract and frozen byte layout: `docs/catalog-contract.md`. Golden fixture
+(128 bytes) frozen independently with Python; in-test builders must reproduce
+it byte for byte (first assertion). Synthetic values only, no value pools.
+
+Host: Windows local build machine, VS2022 BuildTools 17.12.4 (vcvars64),
+CMake+Ninja, `/W4 /WX`. Build tree `D:\lengsuo-build\native-catalog`
+(OneDrive repo untouched by builds).
+
+Red (stub `DecodeCatalog` returning nullopt; `catalog-red.log`):
+compile_exit=0, `profile_catalog FAIL 3`, ctest 1 of 2 failed, rc=8.
+
+Green (`catalog-green.log`): `profile_wire PASS 270 assertions`,
+`profile_catalog PASS 192 assertions`, ctest 2/2 passed, rc=0.
+
+Coverage: builder fidelity to frozen golden; every truncated prefix;
+oversized/trailing containers; magic and container_version; pool_version
+charset/bounds; entry count bounds; unknown face; slot range and duplicates;
+ua string bounds/control chars; brand/full list count and field bounds;
+empty-model allowance; mobile flag domain; two-entry catalog; pool binding
+(CatalogMatchesProfile match/mismatch/empty).
+
+Not yet evidence: 1.47 g++/ASan/UBSan rerun, GN source_set compilation,
+Chromium-tree integration. The refactor of profile_wire.cc onto wire_reader.h
+is covered by its unchanged 270-assertion suite locally; Linux rerun still
+pending for both components.
