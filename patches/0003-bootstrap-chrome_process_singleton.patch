@@ -1,0 +1,53 @@
+--- a/chrome/browser/chrome_process_singleton.cc
++++ b/chrome/browser/chrome_process_singleton.cc
+@@ -5,6 +5,10 @@
+ #include "chrome/browser/chrome_process_singleton.h"
+ 
+ #include <utility>
++
++#include "base/command_line.h"
++#include "base/logging.h"
++#include "lengsuo/integration/browser_bootstrap.h"
+ 
+ #include "build/build_config.h"
+ 
+@@ -36,8 +40,23 @@
+ ProcessSingleton::NotifyResult
+     ChromeProcessSingleton::NotifyOtherProcessOrCreate() {
+   CHECK(!is_singleton_instance_);
+-  ProcessSingleton::NotifyResult result =
+-      process_singleton_.NotifyOtherProcessOrCreate();
++  // Managed launches never forward their command line to an old process and
++  // never use NotifyOtherProcessOrCreate's stale/hung-process recovery path.
++  ProcessSingleton::NotifyResult result;
++  if (lengsuo::IsManagedBrowserCommand(*base::CommandLine::ForCurrentProcess())) {
++#if BUILDFLAG(IS_WIN)
++    // Upstream Create() can relaunch via WMI under legacy App-V. Managed
++    // startup does not support that indirection.
++    if (::GetModuleHandle(L"sftldr_wow64.dll") ||
++        ::GetModuleHandle(L"sftldr.dll")) {
++      return ProcessSingleton::PROFILE_IN_USE;
++    }
++#endif
++    result = process_singleton_.Create() ? ProcessSingleton::PROCESS_NONE
++                                        : ProcessSingleton::PROFILE_IN_USE;
++  } else {
++    result = process_singleton_.NotifyOtherProcessOrCreate();
++  }
+   if (result == ProcessSingleton::PROCESS_NONE) {
+     is_singleton_instance_ = true;
+   }
+@@ -138,6 +149,13 @@
+ bool ChromeProcessSingleton::NotificationCallback(
+     base::CommandLine command_line,
+     const base::FilePath& current_directory) {
++  if (lengsuo::IsManagedBrowserCommand(*base::CommandLine::ForCurrentProcess()) ||
++      lengsuo::IsManagedBrowserCommand(command_line)) {
++    // Consume without dispatch: returning false can cause the sender's
++    // singleton recovery logic to treat this browser as unresponsive.
++    LOG(ERROR) << "Lengsuo managed browser refuses singleton command reuse";
++    return true;
++  }
+   DCHECK(notification_callback_);
+   return notification_callback_.Run(std::move(command_line), current_directory);
+ }

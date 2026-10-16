@@ -1,0 +1,10 @@
+--- a/chrome/browser/BUILD.gn
++++ b/chrome/browser/BUILD.gn
+@@ -879,6 +879,7 @@
+   }
+ 
+   deps = [
++    "//lengsuo/integration:bootstrap",
+     ":active_use_util",
+     ":after_startup_task_utils",
+     ":bad_message",

@@ -1,0 +1,30 @@
+import("//testing/test.gni")
+
+# Browser-only dependency. No chrome/browser dependency (avoids a cycle).
+source_set("bootstrap") {
+  sources = [
+    "browser_bootstrap.cc",
+    "browser_bootstrap.h",
+    "profile_bootstrap_state.cc",
+    "profile_bootstrap_state.h",
+  ]
+  public_deps = [ "//base", "//lengsuo/native:profile_wire" ]
+  deps = [
+    "//content/public/common",
+    "//third_party/blink/public/common",
+  ]
+}
+
+test("bootstrap_unittests") {
+  testonly = true
+  sources = [ "browser_bootstrap_unittest.cc" ]
+  deps = [
+    ":bootstrap",
+    "//base",
+    "//testing/gtest",
+    "//third_party/blink/public/common",
+    "//content/public/common",
+    "//base/test:run_all_unittests",
+    "//base/test:test_support",
+  ]
+}
