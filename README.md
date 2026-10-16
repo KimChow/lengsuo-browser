@@ -2,8 +2,11 @@
 
 Chromium 内核独立开发仓。客户端运行器、GPUI 与凭证组件属于 `lengsuo-client`。
 
-2026-10-16：已建立源码基线验证工具与 C++20 原生画像线格式解码器。
-尚无完成构建的定制内核，不代表指纹注入或 Windows 浏览器产品已实现。
+2026-10-16：已在研究机 1.47 完成 Linux Chromium 编译，接入画像加载、
+Touch 与 Screen/DPR；原生接入单测 5/5 通过，并有 Linux 真浏览器冒烟记录。
+这不是完整指纹浏览器；UA/UA-CH 值池解析、其余指纹面、运行器、安装与
+Windows 构建/运行验收仍未完成。详见 [原生接入记录](docs/browser-bootstrap.md)
+及 [Screen/DPR 记录](docs/batch2-screen-dpr-design.md)。
 
 项目源码公开可查看；项目许可证尚未确定，不宣称已授予开源许可或
 已经符合任何免费代码签名服务资格。Chromium 等上游组件保留各自许可。
