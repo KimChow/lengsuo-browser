@@ -2,8 +2,21 @@
 
 状态：Linux 全链路验收已在研究机 1.47 完成（2026-10-16）：固定源码
 sync → runhooks → overlay 放置 → 4 补丁应用 → gn gen（35981 targets）→
-gn check（两个目标头依赖 OK）→ bootstrap_unittests 编译并 4/4 通过。
+gn check（两个目标头依赖 OK）→ bootstrap_unittests 编译并 4/4 通过 →
+完整 chrome 构建成功 → headless 真浏览器冒烟通过（正/负/无参数路径）。
 Windows/macOS 构建与浏览器行为矩阵仍未验证，不可声明三平台产品就绪。
+
+## Linux 真浏览器冒烟（2026-10-16，reviews/browser-smoke.log）
+
+完整 chrome（含本批补丁）headless 验证加载契约：
+
+- 无参数：正常启动（rc=0），上游行为。
+- 有效 147 字节金标画像（touch=0）：正常启动（rc=0），页面实测
+  `{mtp:0, pointer:fine=true, coarse=false, hover:hover=true}`，
+  与"单一设备模型"预期一致；screen 几何/DPR 保持上游（本批未接入）。
+- 非法 wire / 超长文件 / 相对路径：全部拒绝启动（rc=5），不回退不伪造。
+
+Base 单测（4/4）+ 真浏览器正负路径构成第一批 Linux 验收证据链。
 
 基线：`0e66b94549a8bd85f03fbdf189b752d6e7b63c32`（Chromium 155）。
 本批只接入无凭据 LBPF1 早期加载和 Touch WebPreferences。
