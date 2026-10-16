@@ -72,6 +72,9 @@ ua-uach 笔记核实（1.47 固定树）确认了覆盖单点在 browser 进程�
 提前实现等于伪造。待办：catalog 值解析契约（runner 提供经授权的
 本地 catalog，browser 校验后注入两出口），再落地 0006。
 
-wire 中已具备且可先行的是 `language`（如 en-US）：
-经第一批 0002 的 OverrideWebPreferences 写 `intl.accept_languages`
-即可端到端验证，作为下一小步。
+wire 中已具备的 `language` 同样不是小步（2026-10-16 撤销验证）：
+`accept_languages` 位于 **RendererPreferences**（155 的 WebPreferences
+无语言字段），其桌面填充链在 profile/l10n 偏好机制内，需要独立的
+覆盖点设计与验证——与 UA/UA-CH 同归 catalog/runner 契约批次。
+曾尝试在 WebPreferences 钩子写入导致编译失败并已撤销恢复
+（reviews/build-b6.log 为证）。
