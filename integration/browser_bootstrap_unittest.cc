@@ -3,6 +3,9 @@
 #include "build/build_config.h"
 #include "third_party/blink/public/common/web_preferences/web_preferences.h"
 #include "testing/gtest/include/gtest/gtest.h"
+namespace {
+#include "lengsuo/native/golden.inc"
+}
 namespace lengsuo {
 TEST(BrowserBootstrap, RefusesEmptyRelativeTraversalAndNetworkPaths) {
   EXPECT_FALSE(IsSafeProfilePath(base::FilePath()));
@@ -42,5 +45,32 @@ TEST(BrowserBootstrap, TouchPreferencesAreConsistentAndIdempotent) {
     EXPECT_EQ(hover, static_cast<int>(prefs.primary_hover_type));
     EXPECT_FALSE(ApplyTouchPreferences(profile, &prefs));
   }
+}
+TEST(BrowserBootstrap, GoldenWireInitializesFrozenStateAndAppliesTouch) {
+  ProfileBootstrapState state;
+  int reads = 0;
+  const auto reader = [&]() -> std::optional<std::string> {
+    ++reads;
+    return std::string(reinterpret_cast<const char*>(kGolden), sizeof(kGolden));
+  };
+  ASSERT_TRUE(state.Initialize(true, true, reader));
+  const auto* profile = state.profile();
+  ASSERT_NE(nullptr, profile);
+  EXPECT_EQ(1, reads);
+  EXPECT_EQ(0u, profile->max_touch_points);
+  EXPECT_EQ(1920u, profile->width);
+  EXPECT_EQ(1080u, profile->height);
+  EXPECT_EQ(Platform::Windows, profile->platform);
+  EXPECT_EQ("env-1", profile->environment_id);
+  EXPECT_FALSE(state.Initialize(true, true, reader));
+  EXPECT_EQ(profile, state.profile());
+  EXPECT_EQ(1, reads);
+  // Touch=0 maps to fine pointer and hover through the shared applicator.
+  blink::web_pref::WebPreferences prefs;
+  EXPECT_TRUE(ApplyTouchPreferences(*profile, &prefs));
+  EXPECT_EQ(4, prefs.available_pointer_types);
+  EXPECT_EQ(2, prefs.available_hover_types);
+  EXPECT_EQ(0, prefs.pointer_events_max_touch_points);
+  EXPECT_FALSE(ApplyTouchPreferences(*profile, &prefs));
 }
 }  // namespace lengsuo

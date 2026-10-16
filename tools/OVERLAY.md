@@ -11,9 +11,10 @@ The tool prints a JSON receipt to stdout and returns 1 on failure, 0 on success.
 Capture stdout to retain the receipt, including partial failure state.
 
 The fixed mappings place `native/profile_wire.h`, `native/profile_wire.cc`,
-`native/BUILD.gn` and the six integration files (`browser_bootstrap.{cc,h}`,
-`profile_bootstrap_state.{cc,h}`, `browser_bootstrap_unittest.cc`,
-`BUILD.gn`) into the corresponding `lengsuo/` files in the Chromium checkout.
+`native/BUILD.gn`, `native/golden.inc` and the six integration files
+(`browser_bootstrap.{cc,h}`, `profile_bootstrap_state.{cc,h}`,
+`browser_bootstrap_unittest.cc`, `BUILD.gn`) into the corresponding `lengsuo/`
+files in the Chromium checkout.
 The standalone `profile_bootstrap_state_test.cc` is intentionally not mapped:
 it only runs in the repository's standalone harness. The GN labels are
 `//lengsuo/native:profile_wire` and `//lengsuo/integration:bootstrap`, both

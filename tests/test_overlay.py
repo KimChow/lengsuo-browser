@@ -62,6 +62,7 @@ class OverlayTests(unittest.TestCase):
             "lengsuo/integration/profile_bootstrap_state.h",
             "lengsuo/integration/browser_bootstrap_unittest.cc",
             "lengsuo/integration/BUILD.gn",
+            "lengsuo/native/golden.inc",
         }))
         origins = {origin for origin, _ in MAPPING}
         self.assertNotIn("integration/profile_bootstrap_state_test.cc", origins)
