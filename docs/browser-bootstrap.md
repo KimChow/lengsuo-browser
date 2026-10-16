@@ -1,11 +1,23 @@
 # Browser bootstrap 与 Touch 首批接入
 
-状态：补丁已生成，固定源码临时副本 apply-check 通过；尚未通过
-Chromium GN、编译、Windows 或浏览器运行验收，不可启用为完整指纹产品。
+状态：Linux 全链路验收已在研究机 1.47 完成（2026-10-16）：固定源码
+sync → runhooks → overlay 放置 → 4 补丁应用 → gn gen（35981 targets）→
+gn check（两个目标头依赖 OK）→ bootstrap_unittests 编译并 4/4 通过。
+Windows/macOS 构建与浏览器行为矩阵仍未验证，不可声明三平台产品就绪。
 
 基线：`0e66b94549a8bd85f03fbdf189b752d6e7b63c32`（Chromium 155）。
 本批只接入无凭据 LBPF1 早期加载和 Touch WebPreferences。
 Screen、DPR、UA/UA-CH、GPU、字体、Canvas、Audio 等尚未原生接入。
+
+期间发现并修复的集成问题（均有 1.47 日志证据，见 reviews/ 目录）：
+
+- `tools/overlay` 对声明补丁的 baseline 会拒绝；已加显式
+  `--allow-patched-baseline` 门禁（提交 77f5f9d）。
+- `ProfileBootstrapState` 需要外联 ctor/dtor（Chromium find-bad-constructs
+  插件要求，standalone 编译无法暴露；提交 553df4c）。
+- assert 型 standalone 测试不得以 NDEBUG 编译，否则测试体整体消失。
+- depot_tools 直接 `python3 gclient.py` 调用会跳过 bootstrap，导致 gn
+  wrapper 缺 `python3_bin_reldir.txt`；以 `bootstrap_python3` 函数修复。
 
 ## 源码核对与补丁
 
@@ -64,25 +76,30 @@ Singleton 在 `chrome/app/chrome_main_delegate.cc` 中获得，早于上述加�
 这不是完整的跨进程错误回传协议。后续须专项验证 Windows/Linux 同画像、
 异画像、无画像发送方、并发启动与旧锁情况，不能声称已完成 singleton 验收。
 
-## 验证证据与待执行
+## 验证证据与已执行项
 
 隔离目录：`/home/ubuntu/lengsuo-browser-dev/integration-review`。
 审查日志目录：`/home/ubuntu/lengsuo-browser-dev/reviews`。
 
+已执行（全部在 1.47，2026-10-16）：
+
 - standalone 状态用例覆盖 opt-out 不读、非法路径不读、读取失败、空、
-  超长、非法 wire、成功后不可变、失败后不可替换；普通编译及 ASan/UBSan通过。
-- 新接口缺失实现时 link red 已记录；该 red 只证明缺符号，不是浏览器行为复现。
-- 四个 patch 在独立固定源码副本 `git apply --check` 和 `git diff --check` 通过。
-- Chromium base 单测已编写，尚未编译或运行；不把 standalone 代替 base/API 验收。
+  超长、非法 wire、成功后不可变、失败后不可替换；普通编译及 ASan/UBSan
+  通过（`fix-cycle` 前后两轮）。
+- 四个 patch 对真实固定源码树应用成功（`kernel-patches.exit.json`
+  status=applied）；重跑报告 already-applied，幂等成立。
+- `tools.overlay --apply` 将 10 个文件放置到源码根 `lengsuo/` 下
+  （`kernel-overlay-refresh.json`）。
+- `gn gen out/lengsuo`：Done. Made 35981 targets（`gn-gen.log`）。
+- `gn check` 两个目标：Header dependency check OK
+  （`gn-check-integration/native.exit.json`）。
+- `autoninja bootstrap_unittests`：编译通过（`build-bootstrap-unittests.log`）。
+- `bootstrap_unittests`：4/4 通过，含金标画像成功加载/冻结/Touch 应用
+  用例（`bootstrap-unittests-run.log`）。
 
-DEPS 就绪后，overlay 准备并应用后执行（本批未执行）：
+尚未执行，不得以上述任何一项替代：
 
-```text
-gn gen out/lengsuo
-gn check out/lengsuo //lengsuo/integration:bootstrap
-autoninja -C out/lengsuo bootstrap_unittests chrome
-out/lengsuo/bootstrap_unittests
-```
-
-之后必须运行真实浏览器矩阵、Windows 安装/签名验证。所有待执行项均不以
-补丁能应用、接口存在或原生状态单测通过替代。
+- 真实浏览器启动与 Touch 媒体查询行为矩阵（含 OOPIF、BFCache、prerender）。
+- Windows 构建、安装、签名与运行；macOS 构建。
+- Screen/DPR/UA-CH/WebGPU 等其余指纹面的接入。
+- 网络隔离门禁下的端到端画像隔离验证。
