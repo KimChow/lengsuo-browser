@@ -96,7 +96,9 @@ TEST(BrowserBootstrap, ScreenInfosOverrideFollowsProfilePresence) {
   EXPECT_EQ(1920, infos.current().rect.width());
   EXPECT_EQ(1080, infos.current().rect.height());
   EXPECT_EQ(0, infos.current().rect.x());
-  EXPECT_EQ(infos.current().rect, infos.current().available_rect);
+  EXPECT_EQ(0, infos.current().rect.y());
+  EXPECT_EQ(1920, infos.current().available_rect.width());
+  EXPECT_EQ(1080, infos.current().available_rect.height());
   EXPECT_FLOAT_EQ(1.f, infos.current().device_scale_factor);
   EXPECT_EQ(24, infos.current().depth);
 }
