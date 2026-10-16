@@ -74,6 +74,17 @@ class OverlayTests(unittest.TestCase):
             "//lengsuo/integration:bootstrap", "//lengsuo/native:profile_wire",
         ])
 
+    def test_patched_baseline_requires_explicit_override(self):
+        self.lock["patches"] = [{"path": "patches/0001-x.patch", "sha256": "0" * 64}]
+        self.assertEqual(self.run_overlay(True)["status"], "failed")
+        self.assertFalse((self.source / "lengsuo").exists())
+        result = execute(self.source, self.repository, self.lock, True,
+                         allow_patched_baseline=True)
+        self.assertEqual(result["status"], "applied")
+        again = execute(self.source, self.repository, self.lock, False,
+                        allow_patched_baseline=True)
+        self.assertEqual(again["status"], "planned")
+
     def test_read_only_plan_and_exact_receipt(self):
         result = self.run_overlay()
         self.assertEqual(result["status"], "planned")

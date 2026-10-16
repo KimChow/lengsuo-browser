@@ -24,9 +24,12 @@ or source hook is added by this tool.
 
 The existing baseline inspector verifies origin, full HEAD, release tag,
 chrome/VERSION and the committed DEPS digest. The source must be the checkout
-root, not a nested directory. Nonempty baseline patch lists are refused: this
-tool is an overlay applicator, not a general patch executor. Existing baseline
-checks are reused without weakening them.
+root, not a nested directory. A baseline that declares patches is rejected
+unless `--allow-patched-baseline` (or the `allow_patched_baseline` argument)
+is passed explicitly: patches belong to `tools.patch_apply`, and the override
+only authorizes source placement alongside a reviewed patch sequence — it
+never applies or skips patches itself. Existing baseline checks are reused
+without weakening them.
 
 Each receipt entry contains exact bytes' SHA-256, size, fixed source/destination
 paths, and create/created/identical action. Different existing content, modified

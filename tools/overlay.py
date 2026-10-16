@@ -127,7 +127,7 @@ def _atomic_add(root, name, data):
         os.close(directory)
 
 
-def execute(source, repository, lock, apply=False):
+def execute(source, repository, lock, apply=False, allow_patched_baseline=False):
     receipt = {"schema_version": 1, "mode": "apply" if apply else "plan",
                "status": "failed", "files": [], "build_verified": False,
                "browser_integrated": False, "cross_file_atomic": False,
@@ -144,7 +144,9 @@ def execute(source, repository, lock, apply=False):
         receipt["baseline"] = inspect_checkout(source, lock)
         if Path(_git(source, "rev-parse", "--show-toplevel").decode().strip()) != source:
             raise OverlayError("Source must be the checkout root")
-        if lock["patches"]:
+        if lock["patches"] and not allow_patched_baseline:
+            # Patched baselines are applied by tools.patch_apply; placement
+            # here needs the explicit override so patches are never ignored.
             raise OverlayError("Baseline patches require a separate reviewed applicator")
         pending = []
         for origin, destination in MAPPING:
@@ -179,9 +181,11 @@ def main():
     parser.add_argument("--repository", type=Path, required=True)
     parser.add_argument("--lock", type=Path, required=True)
     parser.add_argument("--apply", action="store_true")
+    parser.add_argument("--allow-patched-baseline", action="store_true")
     args = parser.parse_args()
     try:
-        receipt = execute(args.source, args.repository, read_lock(args.lock), args.apply)
+        receipt = execute(args.source, args.repository, read_lock(args.lock),
+                          args.apply, args.allow_patched_baseline)
     except (BaselineError, OSError, ValueError) as error:
         receipt = {"status": "failed", "error": str(error), "files": [],
                    "build_verified": False, "browser_integrated": False,
