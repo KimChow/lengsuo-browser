@@ -35,6 +35,7 @@ TEST(BrowserBootstrap, TouchPreferencesAreConsistentAndIdempotent) {
   for (int points : {0, 1, 5, 10}) {
     ParsedProfile profile;
     profile.max_touch_points = points;
+    profile.language = "en-US";
     blink::web_pref::WebPreferences prefs;
     ApplyTouchPreferences(profile, &prefs);
     EXPECT_EQ(points, prefs.pointer_events_max_touch_points);
@@ -43,9 +44,10 @@ TEST(BrowserBootstrap, TouchPreferencesAreConsistentAndIdempotent) {
     const int hover = points ? 1 : 2;
     EXPECT_EQ(pointer, prefs.available_pointer_types);
     EXPECT_EQ(pointer, static_cast<int>(prefs.primary_pointer_type));
-    EXPECT_EQ(hover, prefs.available_hover_types);
-    EXPECT_EQ(hover, static_cast<int>(prefs.primary_hover_type));
-    EXPECT_FALSE(ApplyTouchPreferences(profile, &prefs));
+  EXPECT_EQ(hover, prefs.available_hover_types);
+  EXPECT_EQ(hover, static_cast<int>(prefs.primary_hover_type));
+  EXPECT_EQ("en-US", prefs.intl.accept_languages);
+  EXPECT_FALSE(ApplyTouchPreferences(profile, &prefs));
   }
 }
 TEST(BrowserBootstrap, GoldenWireInitializesFrozenStateAndAppliesTouch) {
