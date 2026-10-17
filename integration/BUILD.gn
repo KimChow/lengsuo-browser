@@ -19,6 +19,7 @@ source_set("bootstrap") {
   # which would cycle through content/browser (0005); builds therefore pin
   # is_component_build=false in args.gn.
   deps = [
+    "//third_party/icu",
     "//content/public/common",
     "//third_party/blink/public/common",
   ]
