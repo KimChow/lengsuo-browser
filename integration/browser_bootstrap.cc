@@ -3,6 +3,7 @@
 #include "base/files/file_util.h"
 #include "base/no_destructor.h"
 #include "third_party/blink/public/common/web_preferences/web_preferences.h"
+#include "third_party/blink/public/common/user_agent/user_agent_metadata.h"
 #include "ui/display/screen_infos.h"
 #include "build/build_config.h"
 #if BUILDFLAG(IS_WIN)
@@ -14,9 +15,22 @@ ProfileBootstrapState& State() {
   static base::NoDestructor<ProfileBootstrapState> state;
   return *state;
 }
+std::optional<std::string> ReadWire(const base::FilePath& path) {
+  // Runner owns this local file and must prevent replacement/redirection.
+  // Bounded reads are not wall-clock timeouts or authorization checks.
+  base::File::Info info;
+  if (base::IsLink(path) || !base::GetFileInfo(path, &info) || info.is_directory ||
+      info.is_symbolic_link || info.size < 1 || info.size > 4096)
+    return std::nullopt;
+  std::string bytes;
+  if (!base::ReadFileToStringWithMaxSize(path, &bytes, 4096))
+    return std::nullopt;
+  return bytes;
+}
 }  // namespace
 bool IsManagedBrowserCommand(const base::CommandLine& command) {
-  return command.HasSwitch(kProfileWireSwitch);
+  return command.HasSwitch(kProfileWireSwitch) ||
+         command.HasSwitch(kCatalogWireSwitch);
 }
 bool IsSafeProfilePath(const base::FilePath& path) {
   if (path.empty() || !path.IsAbsolute() || path.IsNetwork() ||
@@ -33,23 +47,32 @@ bool IsSafeProfilePath(const base::FilePath& path) {
   return true;
 }
 bool InitializeBrowserProfile(const base::CommandLine& command) {
-  const bool requested = IsManagedBrowserCommand(command);
+  const bool requested = command.HasSwitch(kProfileWireSwitch);
   const auto path = command.GetSwitchValuePath(kProfileWireSwitch);
-  return State().Initialize(requested, IsSafeProfilePath(path), [&]()
-      -> std::optional<std::string> {
-    // Runner owns this local file and must prevent replacement/redirection.
-    // The bounded read is not a wall-clock timeout or an authorization check.
-    base::File::Info info;
-    if (base::IsLink(path) || !base::GetFileInfo(path, &info) || info.is_directory ||
-        info.is_symbolic_link || info.size < 1 || info.size > 4096)
-      return std::nullopt;
-    std::string bytes;
-    if (!base::ReadFileToStringWithMaxSize(path, &bytes, 4096))
-      return std::nullopt;
-    return bytes;
-  });
+  if (!State().Initialize(requested, IsSafeProfilePath(path),
+                          [&]() { return ReadWire(path); })) return false;
+  const auto catalog_path = command.GetSwitchValuePath(kCatalogWireSwitch);
+  return State().InitializeCatalog(command.HasSwitch(kCatalogWireSwitch),
+      IsSafeProfilePath(catalog_path), [&]() { return ReadWire(catalog_path); });
 }
 const ParsedProfile* BrowserProfile() { return State().profile(); }
+const CatalogUaEntry* BrowserUa() { return State().ua(); }
+bool ApplyUaMetadata(const CatalogUaEntry& entry,
+                     blink::UserAgentMetadata* metadata) {
+  metadata->brand_version_list.clear();
+  for (const auto& brand : entry.brands)
+    metadata->brand_version_list.emplace_back(brand.name, brand.version);
+  metadata->brand_full_version_list.clear();
+  for (const auto& brand : entry.full_versions)
+    metadata->brand_full_version_list.emplace_back(brand.name, brand.version);
+  metadata->platform = entry.platform;
+  metadata->platform_version = entry.platform_version;
+  metadata->architecture = entry.architecture;
+  metadata->bitness = entry.bitness;
+  metadata->model = entry.model;
+  metadata->mobile = entry.mobile;
+  return true;
+}
 bool ApplyProfileTouchPreferences(blink::web_pref::WebPreferences* prefs) {
   const auto* profile = BrowserProfile();
   if (!profile) return false;

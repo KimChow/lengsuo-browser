@@ -5,10 +5,113 @@
 #include "testing/gtest/include/gtest/gtest.h"
 #include "ui/display/screen_infos.h"
 #include "ui/gfx/geometry/rect.h"
+#include "third_party/blink/public/common/user_agent/user_agent_metadata.h"
 namespace {
 #include "lengsuo/native/golden.inc"
+constexpr unsigned char kGoldenCatalog[] = {
+    76,  66,  80,  67,  49,  0,   0,   0,   1,   0,   2,   112,
+    49,  0,   1,   0,   2,   117, 97,  0,   0,   0,   7,   0,
+    19,  83,  121, 110, 116, 104, 47,  49,  46,  48,  32,  84,
+    101, 115, 116, 32,  69,  110, 118, 55,  2,   0,   5,   65,
+    108, 112, 104, 97,  0,   3,   49,  46,  50,  0,   4,   66,
+    101, 116, 97,  0,   3,   51,  46,  52,  2,   0,   5,   65,
+    108, 112, 104, 97,  0,   7,   49,  46,  50,  46,  55,  46,
+    56,  0,   4,   66,  101, 116, 97,  0,   7,   51,  46,  52,
+    46,  57,  46,  48,  0,   6,   84,  101, 115, 116, 79,  83,
+    0,   6,   49,  48,  46,  48,  46,  48,  0,   3,   120, 56,
+    54,  0,   2,   54,  52,  0,   0,   0};
+std::string CatalogWire() {
+  return std::string(reinterpret_cast<const char*>(kGoldenCatalog),
+                     sizeof(kGoldenCatalog));
+}
 }
 namespace lengsuo {
+TEST(BrowserBootstrap, CatalogBindingFreezesAndRejectsInvalidOrMissingSlot) {
+  for (int scenario : {0, 1, 2, 3, 4, 5}) {
+    ProfileBootstrapState state;
+    ASSERT_TRUE(state.Initialize(true, true, []() -> std::optional<std::string> {
+      return std::string(reinterpret_cast<const char*>(kGolden), sizeof(kGolden));
+    }));
+    auto wire = CatalogWire();
+    if (scenario == 1) wire[12] = '2';  // Different pool p2.
+    if (scenario == 2) wire[22] = 8;    // Different UA slot.
+    if (scenario == 3) wire.clear();
+    if (scenario == 4) wire.resize(4097, 'x');
+    if (scenario == 5) wire = "bad";
+    int reads = 0;
+    const bool initialized = state.InitializeCatalog(true, true,
+        [&]() -> std::optional<std::string> { ++reads; return wire; });
+    EXPECT_EQ(scenario == 0, initialized);
+    EXPECT_EQ(1, reads);
+    if (scenario == 0) {
+      ASSERT_NE(nullptr, state.ua());
+      EXPECT_EQ("Synth/1.0 Test Env7", state.ua()->ua_string);
+    } else {
+      EXPECT_EQ(nullptr, state.ua());
+    }
+    const auto* frozen = state.ua();
+    EXPECT_FALSE(state.InitializeCatalog(true, true,
+        []() -> std::optional<std::string> { return CatalogWire(); }));
+    EXPECT_EQ(frozen, state.ua());
+  }
+}
+TEST(BrowserBootstrap, UaMetadataUsesEveryCatalogFieldAndPreservesAbsentFields) {
+  auto bytes = CatalogWire();
+  auto catalog = DecodeCatalog(std::span<const std::uint8_t>(
+      reinterpret_cast<const std::uint8_t*>(bytes.data()), bytes.size()));
+  ASSERT_TRUE(catalog);
+  blink::UserAgentMetadata metadata;
+  metadata.full_version = "upstream";
+  metadata.wow64 = true;
+  metadata.form_factors = {"Desktop"};
+  metadata.brand_version_list.emplace_back("old", "0");
+  ASSERT_TRUE(ApplyUaMetadata(catalog->ua_entries[0], &metadata));
+  ASSERT_EQ(2u, metadata.brand_version_list.size());
+  EXPECT_EQ("Alpha", metadata.brand_version_list[0].brand);
+  EXPECT_EQ("1.2", metadata.brand_version_list[0].version);
+  ASSERT_EQ(2u, metadata.brand_full_version_list.size());
+  EXPECT_EQ("Beta", metadata.brand_full_version_list[1].brand);
+  EXPECT_EQ("3.4.9.0", metadata.brand_full_version_list[1].version);
+  EXPECT_EQ("TestOS", metadata.platform);
+  EXPECT_EQ("10.0.0", metadata.platform_version);
+  EXPECT_EQ("x86", metadata.architecture);
+  EXPECT_EQ("64", metadata.bitness);
+  EXPECT_TRUE(metadata.model.empty());
+  EXPECT_FALSE(metadata.mobile);
+  EXPECT_EQ("upstream", metadata.full_version);
+  EXPECT_TRUE(metadata.wow64);
+  EXPECT_EQ(std::vector<std::string>({"Desktop"}), metadata.form_factors);
+  auto entry = catalog->ua_entries[0];
+  entry.mobile = true;
+  entry.model = "Synthetic phone";
+  entry.full_versions.clear();
+  EXPECT_TRUE(ApplyUaMetadata(entry, &metadata));
+  EXPECT_TRUE(metadata.mobile);
+  EXPECT_EQ("Synthetic phone", metadata.model);
+  EXPECT_TRUE(metadata.brand_full_version_list.empty());
+}
+
+TEST(BrowserBootstrap, CatalogRequiresProfileAndSafePathAndCannotBeRetried) {
+  ProfileBootstrapState absent;
+  int reads = 0;
+  auto reader = [&]() -> std::optional<std::string> {
+    ++reads;
+    return "invalid";
+  };
+  EXPECT_FALSE(absent.InitializeCatalog(true, true, reader));
+  EXPECT_EQ(0, reads);
+  EXPECT_EQ(nullptr, absent.ua());
+  EXPECT_FALSE(absent.InitializeCatalog(false, false, reader));
+  ProfileBootstrapState state;
+  ASSERT_TRUE(state.Initialize(true, true, []() -> std::optional<std::string> {
+    return std::string(reinterpret_cast<const char*>(kGolden), sizeof(kGolden));
+  }));
+  EXPECT_FALSE(state.InitializeCatalog(true, false, reader));
+  EXPECT_EQ(0, reads);
+  EXPECT_FALSE(state.InitializeCatalog(true, true, reader));
+  EXPECT_EQ(0, reads);
+  EXPECT_EQ(nullptr, state.ua());
+}
 TEST(BrowserBootstrap, RefusesEmptyRelativeTraversalAndNetworkPaths) {
   EXPECT_FALSE(IsSafeProfilePath(base::FilePath()));
   EXPECT_FALSE(IsSafeProfilePath(base::FilePath(FILE_PATH_LITERAL("profile.bin"))));

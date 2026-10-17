@@ -1,4 +1,4 @@
-# Standalone decoders only. Chromium GN integration is not yet validated.
+# Decoder source sets. Chromium integration evidence lives in VERIFICATION.md.
 source_set("profile_wire") {
   sources = [
     "profile_wire.cc",

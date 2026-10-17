@@ -323,6 +323,22 @@ int main() {
   Check(!lengsuo::CatalogMatchesProfile(*golden, ProfileWithPool("p2")));
   Check(!lengsuo::CatalogMatchesProfile(*golden, ProfileWithPool("")));
 
+  auto selected_profile = ProfileWithPool("p1");
+  selected_profile.slots[5] = 7;
+  Check(lengsuo::ResolveCatalogUa(*golden, selected_profile) ==
+        &golden->ua_entries[0]);
+  selected_profile.slots[0] = 7;
+  selected_profile.slots[5] = 8;
+  Check(lengsuo::ResolveCatalogUa(*golden, selected_profile) == nullptr);
+  selected_profile.slots[5] = 7;
+  selected_profile.pool_version = "p2";
+  Check(lengsuo::ResolveCatalogUa(*golden, selected_profile) == nullptr);
+  // Public parsed structs must not let ambiguous programmatic input resolve.
+  auto ambiguous = *golden;
+  ambiguous.ua_entries.push_back(ambiguous.ua_entries[0]);
+  selected_profile.pool_version = "p1";
+  Check(lengsuo::ResolveCatalogUa(ambiguous, selected_profile) == nullptr);
+
   std::cout << "PASS " << checks << " assertions\n";
   return 0;
 }
