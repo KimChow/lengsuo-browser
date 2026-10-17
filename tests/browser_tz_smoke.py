@@ -7,6 +7,7 @@ import os
 import re
 import subprocess
 import threading
+import importlib.util
 from pathlib import Path
 
 p = argparse.ArgumentParser()
@@ -34,6 +35,13 @@ document.querySelector('#result').textContent=JSON.stringify({main:probe(),worke
 </script>'''
 worker_script = 'postMessage({tz:Intl.DateTimeFormat().resolvedOptions().timeZone,offset:new Date().getTimezoneOffset()});'
 
+probe = "({tz:Intl.DateTimeFormat().resolvedOptions().timeZone,winter:new Date('2020-01-01T12:00:00Z').getTimezoneOffset(),summer:new Date('2020-07-01T12:00:00Z').getTimezoneOffset()})"
+page = page.replace('({tz:Intl.DateTimeFormat().resolvedOptions().timeZone,offset:new Date().getTimezoneOffset()})', probe)
+worker_script = 'postMessage('+probe+');'
+spec = importlib.util.spec_from_file_location('wire_fixture', a.repo/'tests/golden_v2/gen_golden_v2.py')
+encoder = importlib.util.module_from_spec(spec)
+spec.loader.exec_module(encoder)
+
 class Handler(http.server.BaseHTTPRequestHandler):
     def log_message(self, *args):
         pass
@@ -51,7 +59,7 @@ threading.Thread(target=server.serve_forever, daemon=True).start()
 url = 'http://127.0.0.1:'+str(server.server_port)+'/'
 results = []
 
-def run(name, flags, expected):
+def run(name, flags, expected, zone=None, offsets=None):
     # Keep owned test directories for diagnosis; do not touch other profiles.
     directory = root/name
     directory.mkdir(exist_ok=False)
@@ -70,13 +78,13 @@ def run(name, flags, expected):
         assert match, (name, completed.stdout)
         value = json.loads(html.unescape(match.group(1)))
         assert 'error' not in value, value
-        if name in ('managed', 'profile-only'):
+        if name in ('managed', 'profile-only') or zone:
             # Golden wire carries timezone "UTC": Date and Intl must agree
             # on the profile zone in the main frame and in workers.
-            assert value['main']['tz'] == 'UTC', value
-            assert value['main']['offset'] == 0, value
-            assert value['worker']['tz'] == 'UTC', value
-            assert value['worker']['offset'] == 0, value
+            target = {'tz':zone or 'UTC', 'winter':(offsets or (0,0))[0],
+                      'summer':(offsets or (0,0))[1]}
+            assert value['main'] == target, value
+            assert value['worker'] == target, value
         else:
             # Upstream case: valid non-empty host zone, worker in sync.
             assert value['main']['tz'], value
@@ -86,6 +94,16 @@ def run(name, flags, expected):
     print(json.dumps(result), flush=True)
 
 try:
+    run('upstream', [], 0)
+    for zone, offsets in [('America/New_York',(300,240)),
+                          ('Europe/London',(0,-60)), ('Etc/GMT-8',(-480,-480)),
+                          ('UTC',(0,0)), ('Mars/Olympus',None), ('GMT+08:00',None)]:
+        name = zone.replace('/','-').replace(':','-')
+        wire = root/(name+'.wire')
+        wire.write_bytes(bytes(encoder.build({**encoder.FIELDS,
+            'schema_version':1, 'timezone':zone})))
+        run(name, ['--lengsuo-profile-wire='+str(wire)],
+            0 if offsets else 5, zone if offsets else None, offsets)
     flags = ['--lengsuo-profile-wire='+str(profile), '--lengsuo-catalog-wire='+str(catalog)]
     run('managed', flags, 0)
     run('profile-only', [flags[0]], 0)

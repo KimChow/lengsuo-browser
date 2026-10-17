@@ -73,6 +73,8 @@ bool InitializeBrowserProfile(const base::CommandLine& command) {
   const auto path = command.GetSwitchValuePath(kProfileWireSwitch);
   if (!State().Initialize(requested, IsSafeProfilePath(path),
                           [&]() { return ReadWire(path); })) return false;
+  if (const auto* profile = BrowserProfile();
+      profile && !IsValidProfileTimezone(profile->timezone)) return false;
   const auto catalog_path = command.GetSwitchValuePath(kCatalogWireSwitch);
   return State().InitializeCatalog(command.HasSwitch(kCatalogWireSwitch),
       IsSafeProfilePath(catalog_path), [&]() { return ReadWire(catalog_path); });

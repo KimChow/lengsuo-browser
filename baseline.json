@@ -36,6 +36,10 @@
     {
       "path": "patches/0007-profile-language.patch",
       "sha256": "c542abf1cced06caf6ebd891b0e57af9d3783420747cfa224da976a6bbd95ed3"
+    },
+    {
+      "path": "patches/0008-profile-timezone.patch",
+      "sha256": "867b3e70ae9588986f9eace97a2354da14c2821ff370bb6b2ca487b0f56a33c5"
     }
   ]
 }
