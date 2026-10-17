@@ -20,6 +20,7 @@ Cookie/LocalStorage 目录隔离、重启持久化与清理回归双平台各 10
 新增 ICU 时区校验和 WebRTC 偏好辅助函数，双平台启动单测 14/14 通过，
 WebRTC运行时接入仍待验收，见[辅助函数记录](docs/browser-preference-helpers.md)。
 时区补丁0008已通过Linux和Windows页面与Dedicated Worker的15条用例，含冬夏偏移与非法时区拒启，见[时区记录](docs/timezone-runtime.md)。
+SharedWorker和ServiceWorker时区扩展回归亦已双平台通过，见[Worker记录](docs/timezone-worker-contexts.md)。
 这不是完整指纹浏览器；UA高熵缺项、语言标签全集、时区扩展上下文、WebRTC等其余指纹面、
 运行器与安装验收仍未完成。详见 [原生接入记录](docs/browser-bootstrap.md)
 及 [Screen/DPR 记录](docs/batch2-screen-dpr-design.md)。UA/UA-CH 已验证字段
