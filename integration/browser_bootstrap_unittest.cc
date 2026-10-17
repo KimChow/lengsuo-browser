@@ -1,6 +1,9 @@
 // Requires Chromium base/gtest build; standalone tests live separately.
 #include "lengsuo/integration/browser_bootstrap.h"
 #include "build/build_config.h"
+#include "components/content_settings/core/common/content_settings_pattern.h"
+#include "third_party/blink/public/common/peerconnection/webrtc_ip_handling_url_entry.h"
+#include "third_party/blink/public/common/renderer_preferences/renderer_preferences.h"
 #include "third_party/blink/public/common/web_preferences/web_preferences.h"
 #include "testing/gtest/include/gtest/gtest.h"
 #include "ui/display/screen_infos.h"
@@ -26,6 +29,16 @@ std::string CatalogWire() {
 }
 }
 namespace lengsuo {
+TEST(BrowserBootstrap, TimezoneSystemIdsRejectUnknownAndUnsafeInput) {
+  for (auto zone : {"UTC", "America/New_York", "Europe/London", "Etc/GMT-8"})
+    EXPECT_TRUE(IsValidProfileTimezone(zone)) << zone;
+  for (auto zone : {"", "Mars/Olympus", "GMT+08:00", " UTC", "UTC ", "UTC\n"})
+    EXPECT_FALSE(IsValidProfileTimezone(zone)) << zone;
+  EXPECT_FALSE(IsValidProfileTimezone(std::string(65, 'a')));
+  EXPECT_FALSE(IsValidProfileTimezone(std::string_view("UTC\0junk", 8)));
+  EXPECT_FALSE(IsValidProfileTimezone("\xc3\xa9"));
+}
+
 TEST(BrowserBootstrap, RejectsSchemaTwoUntilPolicyInjectionIsAccepted) {
   std::string wire(reinterpret_cast<const char*>(kGolden), sizeof(kGolden));
   wire[8] = 2;
@@ -193,6 +206,124 @@ TEST(BrowserBootstrap, GoldenWireInitializesFrozenStateAndAppliesTouch) {
   EXPECT_EQ(0, prefs.pointer_events_max_touch_points);
   EXPECT_FALSE(ApplyTouchPreferences(*profile, &prefs));
 }
+namespace {
+// RendererPreferences seeded the way a hostile/default Chrome process can
+// arrive: non-empty per-origin overrides, a non-empty mDNS local-IP
+// exemption list, and a custom UDP port range. Tests must never start from
+// freshly default-empty lists (docs/webrtc-contract-review.md gate 2).
+blink::RendererPreferences WebRtcHostilePrefs() {
+  blink::mojom::WebRtcIpHandlingPolicy policies[] = {
+      blink::mojom::WebRtcIpHandlingPolicy::kDefaultPublicInterfaceOnly,
+      blink::mojom::WebRtcIpHandlingPolicy::kDefault};
+  blink::RendererPreferences prefs;
+  prefs.webrtc_ip_handling_policy =
+      blink::mojom::WebRtcIpHandlingPolicy::kDefaultPublicAndPrivateInterfaces;
+  for (auto policy : policies) {
+    blink::WebRtcIpHandlingUrlEntry entry;
+    entry.url_pattern =
+        ContentSettingsPattern::FromString("https://override.test/*");
+    entry.handling = policy;
+    prefs.webrtc_ip_handling_urls.push_back(entry);
+  }
+  prefs.webrtc_local_ips_allowed_urls = {"https://exempt.test",
+                                         "https://intranet.test"};
+  prefs.webrtc_udp_min_port = 10000;
+  prefs.webrtc_udp_max_port = 10010;
+  return prefs;
+}
+}  // namespace
+
+TEST(BrowserBootstrap, WebRtcPolicyAbsentKeepsHostilePrefsUntouched) {
+  // Schema 1 wire: no policy statement, so upstream fields must survive
+  // exactly, including the per-origin overrides and mDNS exemptions.
+  ParsedProfile profile;
+  EXPECT_EQ(std::nullopt, profile.webrtc_policy);
+  auto prefs = WebRtcHostilePrefs();
+  const auto expected = prefs.webrtc_ip_handling_urls.size();
+  EXPECT_FALSE(ApplyWebRtcPolicy(profile, &prefs));
+  EXPECT_EQ(expected, prefs.webrtc_ip_handling_urls.size());
+  EXPECT_EQ(2u, prefs.webrtc_local_ips_allowed_urls.size());
+  EXPECT_EQ(10000, prefs.webrtc_udp_min_port);
+  EXPECT_EQ(10010, prefs.webrtc_udp_max_port);
+  // The golden schema 1 fixture decodes to nullopt as well.
+  auto decoded = DecodeProfile(std::span<const std::uint8_t>(
+      reinterpret_cast<const std::uint8_t*>(kGolden), sizeof(kGolden)));
+  ASSERT_TRUE(decoded);
+  ASSERT_EQ(1u, decoded->schema_version);
+  EXPECT_EQ(std::nullopt, decoded->webrtc_policy);
+  EXPECT_FALSE(ApplyWebRtcPolicy(*decoded, &prefs));
+}
+
+TEST(BrowserBootstrap, WebRtcPolicyExplicit0To3ClearsOverridesAndRetainsPorts) {
+  using blink::mojom::WebRtcIpHandlingPolicy;
+  // Anchors: enum order in third_party/blink/public/mojom/peerconnection/
+  // webrtc_ip_handling_policy.mojom:10-15 and the branch table in
+  // third_party/blink/renderer/modules/peerconnection/
+  // peer_connection_dependency_factory.cc (1052-1075).
+  const std::array<WebRtcIpHandlingPolicy, 4> expected = {
+      WebRtcIpHandlingPolicy::kDefault,
+      WebRtcIpHandlingPolicy::kDefaultPublicAndPrivateInterfaces,
+      WebRtcIpHandlingPolicy::kDefaultPublicInterfaceOnly,
+      WebRtcIpHandlingPolicy::kDisableNonProxiedUdp};
+  for (std::uint8_t value = 0; value <= 3; ++value) {
+    ParsedProfile profile;
+    profile.webrtc_policy = value;
+    auto prefs = WebRtcHostilePrefs();
+    EXPECT_TRUE(ApplyWebRtcPolicy(profile, &prefs))
+        << "value " << static_cast<int>(value);
+    EXPECT_EQ(expected.at(value), prefs.webrtc_ip_handling_policy);
+    // Effective-policy contract: profile policy takes priority, so both the
+    // per-origin override table and the mDNS exemption list are cleared.
+    EXPECT_TRUE(prefs.webrtc_ip_handling_urls.empty());
+    EXPECT_TRUE(prefs.webrtc_local_ips_allowed_urls.empty());
+    // Retained, unrelated to policy selection.
+    EXPECT_EQ(10000, prefs.webrtc_udp_min_port);
+    EXPECT_EQ(10010, prefs.webrtc_udp_max_port);
+    // Idempotent second application reports no change.
+    EXPECT_FALSE(ApplyWebRtcPolicy(profile, &prefs));
+  }
+}
+
+TEST(BrowserBootstrap, WebRtcPolicyInvalidValueRejectedWithoutMutation) {
+  // In-memory invalid values (a decoder-constructed profile must never
+  // carry these, but the helper guards anyway): prefs are unchanged.
+  for (std::uint8_t value : {std::uint8_t{4}, std::uint8_t{128},
+                             std::uint8_t{255}}) {
+    ParsedProfile profile;
+    profile.webrtc_policy = value;
+    auto prefs = WebRtcHostilePrefs();
+    const auto policy = prefs.webrtc_ip_handling_policy;
+    EXPECT_FALSE(ApplyWebRtcPolicy(profile, &prefs))
+        << "value " << static_cast<int>(value);
+    EXPECT_EQ(policy, prefs.webrtc_ip_handling_policy);
+    EXPECT_EQ(2u, prefs.webrtc_ip_handling_urls.size());
+    EXPECT_EQ(2u, prefs.webrtc_local_ips_allowed_urls.size());
+    EXPECT_EQ(10000, prefs.webrtc_udp_min_port);
+    EXPECT_EQ(10010, prefs.webrtc_udp_max_port);
+  }
+}
+
+TEST(BrowserBootstrap, ProfileWebRtcWrapperFollowsProfilePresence) {
+  auto prefs = WebRtcHostilePrefs();
+  const auto policy = prefs.webrtc_ip_handling_policy;
+  // No profile loaded (real-browser path before initialization): the
+  // wrapper is a no-op reporting false.
+  EXPECT_FALSE(ApplyProfileWebRtcPolicy(&prefs));
+  EXPECT_EQ(policy, prefs.webrtc_ip_handling_policy);
+  EXPECT_EQ(2u, prefs.webrtc_ip_handling_urls.size());
+  // With the golden schema 1 profile frozen into state: still a no-op.
+  ProfileBootstrapState state;
+  ASSERT_TRUE(state.Initialize(true, true,
+      [&]() -> std::optional<std::string> {
+        return std::string(reinterpret_cast<const char*>(kGolden),
+                           sizeof(kGolden));
+      }));
+  ASSERT_NE(nullptr, state.profile());
+  EXPECT_FALSE(ApplyWebRtcPolicy(*state.profile(), &prefs));
+  EXPECT_EQ(policy, prefs.webrtc_ip_handling_policy);
+  EXPECT_EQ(2u, prefs.webrtc_local_ips_allowed_urls.size());
+}
+
 TEST(BrowserBootstrap, ScreenInfosOverrideFollowsProfilePresence) {
   display::ScreenInfo default_info;
   default_info.rect = gfx::Rect(0, 0, 800, 600);

@@ -17,6 +17,8 @@ Linux 构建树恢复后已重新通过完整构建、8 项启动测试和 9 项
 避免静默忽略未验收的 WebRTC 策略，见[组件验收](docs/webrtc-schema2-native.md)。
 Cookie/LocalStorage 目录隔离、重启持久化与清理回归双平台各 10/10 通过，
 见[存储回归记录](docs/storage-isolation-runtime.md)。
+新增 ICU 时区校验和 WebRTC 偏好辅助函数，双平台启动单测 14/14 通过，
+运行时接入仍待验收，见[辅助函数记录](docs/browser-preference-helpers.md)。
 这不是完整指纹浏览器；UA高熵缺项、语言标签全集、时区、WebRTC等其余指纹面、
 运行器与安装验收仍未完成。详见 [原生接入记录](docs/browser-bootstrap.md)
 及 [Screen/DPR 记录](docs/batch2-screen-dpr-design.md)。UA/UA-CH 已验证字段
