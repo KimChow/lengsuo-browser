@@ -190,3 +190,12 @@ the catalog source set. All eight Chromium bootstrap tests passed on both
 platforms, and `gn check out/lengsuo //lengsuo/*` passed on 1.47.
 Real-browser evidence and outstanding UA limitations are tracked in
 `docs/batch3-ua-uach-design.md`; decoder checks alone do not prove injection.
+
+## Schema 2 decoder and browser gate (2026-10-17)
+
+Wire assertions increase to 299; catalog remains 196; the independent v2
+suite adds 218. Release CTest is 3/3 on Linux and Windows, and independent
+Python/Rust fixture parity is 6/6 on each platform. Chromium startup
+explicitly rejects v2 until policy injection is accepted; this is not
+WebRTC protection. Commands, red/green evidence and runtime limitations
+are in [the component record](../docs/webrtc-schema2-native.md).

@@ -14,7 +14,9 @@ bool ProfileBootstrapState::Initialize(bool requested, bool safe_local_path,
   if (!wire || wire->empty() || wire->size() > 4096) return false;
   auto parsed = DecodeProfile(std::span<const std::uint8_t>(
       reinterpret_cast<const std::uint8_t*>(wire->data()), wire->size()));
-  if (!parsed) return false;
+  // The standalone decoder supports schema 2, but browser-side WebRTC policy
+  // injection is not accepted yet. Never silently ignore an explicit policy.
+  if (!parsed || parsed->schema_version != 1) return false;
   profile_ = std::move(parsed);
   return true;
 }

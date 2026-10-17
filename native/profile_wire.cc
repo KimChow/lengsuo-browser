@@ -19,7 +19,8 @@ std::optional<ParsedProfile> DecodeProfile(
     }
   }
   ParsedProfile profile;
-  if (!reader.Number(profile.schema_version, 4) || profile.schema_version != 1 ||
+  if (!reader.Number(profile.schema_version, 4) ||
+      !InRange(profile.schema_version, 1, 2) ||
       !reader.Number(profile.noise_version, 4) || profile.noise_version != 1 ||
       !reader.Text(profile.environment_id, 64, true) ||
       !reader.Text(profile.pool_version, 64, true)) {
@@ -57,8 +58,19 @@ std::optional<ParsedProfile> DecodeProfile(
     return std::nullopt;
   }
   profile.max_touch_points = static_cast<std::uint8_t>(value);
-  if (!reader.Text(profile.language, 35) || !reader.Text(profile.timezone, 64) ||
-      !reader.Number(value, 2) || value != 7) {
+  if (!reader.Text(profile.language, 35) || !reader.Text(profile.timezone, 64)) {
+    return std::nullopt;
+  }
+  // Schema 2 carries one webrtc policy byte after timezone and before the
+  // slot table (W3 layout, docs/webrtc-schema2-native.md);
+  // schema 1 offsets are unchanged and carry no statement.
+  if (profile.schema_version == 2) {
+    if (!reader.Number(value, 1) || value > 3) {
+      return std::nullopt;
+    }
+    profile.webrtc_policy = static_cast<std::uint8_t>(value);
+  }
+  if (!reader.Number(value, 2) || value != 7) {
     return std::nullopt;
   }
   constexpr std::array<std::string_view, 7> names = {

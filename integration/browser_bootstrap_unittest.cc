@@ -26,6 +26,21 @@ std::string CatalogWire() {
 }
 }
 namespace lengsuo {
+TEST(BrowserBootstrap, RejectsSchemaTwoUntilPolicyInjectionIsAccepted) {
+  std::string wire(reinterpret_cast<const char*>(kGolden), sizeof(kGolden));
+  wire[8] = 2;
+  wire.insert(65, 1, static_cast<char>(3));
+  auto parsed = DecodeProfile(std::span<const std::uint8_t>(
+      reinterpret_cast<const std::uint8_t*>(wire.data()), wire.size()));
+  ASSERT_TRUE(parsed);
+  ASSERT_EQ(2u, parsed->schema_version);
+  ProfileBootstrapState state;
+  EXPECT_FALSE(state.Initialize(true, true,
+      [&]() -> std::optional<std::string> { return wire; }));
+  EXPECT_EQ(nullptr, state.profile());
+  EXPECT_FALSE(state.Initialize(true, true,
+      [&]() -> std::optional<std::string> { return wire; }));
+}
 TEST(BrowserBootstrap, CatalogBindingFreezesAndRejectsInvalidOrMissingSlot) {
   for (int scenario : {0, 1, 2, 3, 4, 5}) {
     ProfileBootstrapState state;
