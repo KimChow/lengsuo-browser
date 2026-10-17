@@ -1,5 +1,11 @@
 # Canonical wire decoder verification
 
+Current status (2026-10-17): the sections below retain historical batch
+results. Current wire/catalog suites pass on Linux and Windows; Chromium
+bootstrap, full builds and UA/language runtime evidence are linked in
+[the recovery record](../docs/linux-tree-recovery.md). Earlier statements
+that Windows or GN had not run describe their original batch only.
+
 This component decodes LBPF1 only. It does not resolve pool catalog values,
 verify signatures or leases, inject Chromium settings, or prove fingerprint
 behavior. Language/timezone validation is bounded printable ASCII, not full
