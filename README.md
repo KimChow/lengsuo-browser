@@ -6,6 +6,7 @@ Chromium 内核独立开发仓。客户端运行器、GPUI 与凭证组件属于
 Touch 与 Screen/DPR；Windows 本机亦完成完整 chrome 构建（VS2026 +
 SDK 28000），原生接入单测两平台同套件 5/5 通过，Linux 与 Windows
 真浏览器冒烟均通过（正/负/无参数路径）。
+Screen/DPR、Touch 新增双平台实际浏览器回归，各 3/3 通过，见[测试记录](docs/screen-touch-runtime-verification.md)。
 第三批已将 catalog 的 UA/UA-CH 字段接通：两平台完整 chrome 编译及8项
 原生接入测试通过，真实页面、Dedicated Worker与HTTP请求头一致性通过。
 Linux 构建树恢复后已重新通过完整构建、8 项启动测试和 9 项浏览器验收，
