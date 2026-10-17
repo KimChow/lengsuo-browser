@@ -12,6 +12,7 @@ from pathlib import Path
 p = argparse.ArgumentParser()
 for field in ('chrome', 'repo', 'work'):
     p.add_argument('--'+field, type=Path, required=True)
+p.add_argument('--check-language', action='store_true')
 a = p.parse_args()
 a.work.mkdir(parents=True, exist_ok=True)
 root = a.work.resolve()
@@ -21,7 +22,11 @@ def fixture(file, name):
     return bytes(map(int, re.findall(r'\d+', payload)))
 
 profile = root/'profile.wire'
-profile.write_bytes(fixture(a.repo/'native/golden.inc', 'kGolden'))
+profile_bytes = fixture(a.repo/'native/golden.inc', 'kGolden')
+if a.check_language:
+    assert profile_bytes.count(b'en-US') == 1
+    profile_bytes = profile_bytes.replace(b'en-US', b'fr-FR')
+profile.write_bytes(profile_bytes)
 catalog = root/'catalog.wire'
 raw = fixture(a.repo/'native/profile_catalog_test.cc', 'kGoldenCatalog')
 catalog.write_bytes(raw)
@@ -31,10 +36,10 @@ const hints=['architecture','bitness','model','platformVersion','fullVersionList
 const h=await navigator.userAgentData.getHighEntropyValues(hints);
 const net=await (await fetch('/echo')).json();
 const worker=await new Promise((resolve,reject)=>{const w=new Worker('/worker.js');w.onmessage=e=>{w.terminate();resolve(e.data)};w.onerror=e=>reject(Error(e.message));setTimeout(()=>reject(Error('worker timeout')),4000)});
-document.querySelector('#result').textContent=JSON.stringify({ua:navigator.userAgent,brands:navigator.userAgentData.brands,mobile:navigator.userAgentData.mobile,platform:navigator.userAgentData.platform,high:h,net,worker});
+document.querySelector('#result').textContent=JSON.stringify({ua:navigator.userAgent,language:navigator.language,languages:navigator.languages,locale:new Intl.DateTimeFormat().resolvedOptions().locale,brands:navigator.userAgentData.brands,mobile:navigator.userAgentData.mobile,platform:navigator.userAgentData.platform,high:h,net,worker});
 }catch(e){document.querySelector('#result').textContent=JSON.stringify({error:String(e)})}})();
 </script>'''
-worker_script = '''(async()=>{try{postMessage({ua:navigator.userAgent,high:await navigator.userAgentData.getHighEntropyValues(['architecture','bitness','model','platformVersion','fullVersionList'])})}catch(e){postMessage({error:String(e)})}})();'''
+worker_script = '''(async()=>{try{postMessage({ua:navigator.userAgent,language:navigator.language,languages:navigator.languages,locale:new Intl.DateTimeFormat().resolvedOptions().locale,high:await navigator.userAgentData.getHighEntropyValues(['architecture','bitness','model','platformVersion','fullVersionList'])})}catch(e){postMessage({error:String(e)})}})();'''
 
 class Handler(http.server.BaseHTTPRequestHandler):
     def log_message(self, *args):
@@ -42,7 +47,7 @@ class Handler(http.server.BaseHTTPRequestHandler):
 
     def do_GET(self):
         data = (json.dumps({k.lower(): v for k, v in self.headers.items()
-            if k.lower() == 'user-agent' or k.lower().startswith('sec-ch-ua')})
+            if k.lower() in ('user-agent', 'accept-language') or k.lower().startswith('sec-ch-ua')})
             if self.path == '/echo' else worker_script if self.path == '/worker.js' else page).encode()
         self.send_response(200)
         self.send_header('Content-Type', 'application/json' if self.path == '/echo' else 'text/javascript' if self.path == '/worker.js' else 'text/html')
@@ -77,6 +82,14 @@ def run(name, flags, expected):
         assert 'error' not in value, value
         assert value['net']['user-agent'] == value['ua'], value
         assert value['worker']['ua'] == value['ua'], value
+        if a.check_language and name in ('managed', 'profile-only'):
+            assert value['language'] == 'fr-FR', value
+            assert value['languages'] == ['fr-FR'], value
+            assert value['worker']['language'] == 'fr-FR', value
+            assert value['worker']['languages'] == ['fr-FR'], value
+            assert value['locale'] == 'fr-FR', value
+            assert value['worker']['locale'] == 'fr-FR', value
+            assert value['net']['accept-language'] == 'fr-FR,fr;q=0.9', value
         if name == 'managed':
             assert value['ua'] == 'Synth/1.0 Test Env7', value
             assert value['net']['user-agent'] == value['ua'], value
