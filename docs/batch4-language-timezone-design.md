@@ -103,6 +103,22 @@ TimeZoneController override 由 content 层触发）
 
 ### 5.1 bootstrap_unittests 用例
 
-### 5.2 真浏览器验证矩阵
+（W6 实现批次补充：画像 timezone 注入的冻结/拒启用例，对齐
+language 批次的 startup-reject 契约。）
+
+### 5.2 真浏览器验证矩阵（已就绪，红相已留证 2026-10-17）
+
+验收脚本 `tests/browser_tz_smoke.py`（与 browser_ua_smoke.py 同构：
+仅绑定 127.0.0.1、合成画像、测试目录保留诊断）：主页 frame 与
+Dedicated Worker 双探测 `Intl.DateTimeFormat().resolvedOptions().timeZone`
+与 `Date.getTimezoneOffset()`；managed/profile-only 两案断言画像
+`UTC/0`（golden wire 携带 timezone=UTC），upstream 案断言宿主时区
+非空且 worker 与主页一致，负路径 6 条（catalog 单独出现/错池/缺槽/
+损坏/空/相对路径）全部 rc=5。
+
+Windows 红相证据：`D:\lengsuo-build\logs\win-tz-smoke-red.log`——
+当前 chrome.exe（0006/0007 态）managed 案实测
+`{'tz': 'Asia/Shanghai', 'offset': -480}`（宿主值），断言失败，
+证明脚本测得到画像 timezone 的缺失；0008 落地后同脚本应 9/9 通过。
 
 ## 6. 明确不做清单
