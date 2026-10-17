@@ -84,3 +84,10 @@ wire 中已具备的 `language` 同样不是小步（2026-10-16 撤销验证）�
 解码器（`docs/catalog-contract.md`，Windows MSVC 本地红→绿通过），
 UA/UA-CH 注入（0006）的阻塞点解除；注入落地、catalog 加载命令行契约、
 language 覆盖点设计与 1.47 复核仍未完成。
+
+## 2026-10-17 接续状态
+
+Screen/DPR 与 Touch 已新增 Linux/Windows 各 3/3 的真实浏览器回归，
+命令、观测与限制见[测试记录](screen-touch-runtime-verification.md)。
+以下历史接续事项中的 UA/UA-CH 与 language 已有后续实现与验收，
+当前状态见[UA 记录](batch3-ua-uach-design.md)和[语言记录](batch4-language.md)。
