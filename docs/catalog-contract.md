@@ -1,9 +1,10 @@
 # catalog 值解析契约（LBPC1）
 
-状态：**解码器已实现并在本地 Windows（MSVC /W4 /WX）测试通过**（2026-10-16）：
-`profile_catalog` 192 断言 + 重构后 `profile_wire` 270 断言不变，红→绿证据见
-`native/VERIFICATION.md`。1.47 的 g++/sanitizer 复核与 browser 注入（0006）
-尚未执行，不得据此宣称 UA/UA-CH 覆盖已可用。
+状态（2026-10-17）：LBPC1 解码器及 UA 绑定已实现，catalog 196 断言、
+wire 270 断言；Linux/Windows 原生 CTest 各 2/2 通过。0006 已接通
+UA/UA-CH，双平台完整 Chrome 与真实浏览器用例通过；范围与缺项见
+[UA 记录](batch3-ua-uach-design.md) 和 [恢复验收](linux-tree-recovery.md)。
+这不代表其余指纹面或完整浏览器产品完成。
 
 ## 背景
 
