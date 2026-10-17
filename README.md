@@ -8,7 +8,9 @@ SDK 28000），原生接入单测两平台同套件 5/5 通过，Linux 与 Windo
 真浏览器冒烟均通过（正/负/无参数路径）。
 第三批已将 catalog 的 UA/UA-CH 字段接通：两平台完整 chrome 编译及8项
 原生接入测试通过，真实页面、Dedicated Worker与HTTP请求头一致性通过。
-这不是完整指纹浏览器；UA高熵缺项、language、WebRTC 等其余指纹面、
+第四批接通画像语言：页面、Dedicated Worker、默认Intl locale与HTTP语言头
+两平台实测一致，9条运行用例通过，见[语言记录](docs/batch4-language.md)。
+这不是完整指纹浏览器；UA高熵缺项、语言标签全集、时区、WebRTC等其余指纹面、
 运行器与安装验收仍未完成。详见 [原生接入记录](docs/browser-bootstrap.md)
 及 [Screen/DPR 记录](docs/batch2-screen-dpr-design.md)。UA/UA-CH 已验证字段
 及未覆盖范围见 [第三批记录](docs/batch3-ua-uach-design.md)。

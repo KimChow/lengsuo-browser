@@ -1,0 +1,116 @@
+--- a/chrome/browser/renderer_preferences_util.cc
++++ b/chrome/browser/renderer_preferences_util.cc
+@@ -3,6 +3,8 @@
+ // found in the LICENSE file.
+ 
+ #include "chrome/browser/renderer_preferences_util.h"
++
++#include "lengsuo/integration/browser_bootstrap.h"
+ 
+ #include <stdint.h>
+ 
+@@ -100,6 +102,8 @@
+ 
+ std::string GetLanguageListForProfile(Profile* profile,
+                                       const std::string& language_list) {
++  if (const auto* browser_profile = lengsuo::BrowserProfile())
++    return browser_profile->language;
+   return content::ReduceAcceptLanguageUtils::GetLanguagesWithMaxCount(
+       profile->IsOffTheRecord()
+           ? language::GetIncognitoLanguageList(language_list)
+--- a/chrome/browser/net/profile_network_context_service.cc
++++ b/chrome/browser/net/profile_network_context_service.cc
+@@ -3,6 +3,8 @@
+ // found in the LICENSE file.
+ 
+ #include "chrome/browser/net/profile_network_context_service.h"
++
++#include "lengsuo/integration/browser_bootstrap.h"
+ 
+ #include <memory>
+ #include <string>
+@@ -719,6 +721,8 @@
+ }
+ 
+ std::string ProfileNetworkContextService::ComputeAcceptLanguage() const {
++  if (const auto* browser_profile = lengsuo::BrowserProfile())
++    return ComputeAcceptLanguageFromPref(browser_profile->language);
+   return ComputeAcceptLanguageFromPref(
+       content::ReduceAcceptLanguageUtils::GetLanguagesWithMaxCount(
+           profile_->IsOffTheRecord() ? language::GetIncognitoLanguageList(
+--- a/chrome/browser/chrome_content_browser_client.cc
++++ b/chrome/browser/chrome_content_browser_client.cc
+@@ -3295,6 +3295,8 @@
+ 
+ std::string ChromeContentBrowserClient::GetAcceptLangs(
+     content::BrowserContext* context) {
++  if (const auto* browser_profile = lengsuo::BrowserProfile())
++    return browser_profile->language;
+   Profile* profile = Profile::FromBrowserContext(context);
+   return profile->GetPrefs()->GetString(language::prefs::kAcceptLanguages);
+ }
+--- a/chrome/browser/net/BUILD.gn
++++ b/chrome/browser/net/BUILD.gn
+@@ -166,6 +166,7 @@
+   ]
+ 
+   deps = [
++    "//lengsuo/integration:bootstrap",
+     ":key_pinning_proto",
+     "//base:build_time",
+     "//chrome/browser:browser_features",
+--- a/chrome/browser/chrome_content_browser_client.cc
++++ b/chrome/browser/chrome_content_browser_client.cc
+@@ -9104,6 +9104,8 @@
+ bool ChromeContentBrowserClient::ShouldReduceAcceptLanguage(
+     content::BrowserContext* browser_context) {
+   DCHECK_CURRENTLY_ON(BrowserThread::UI);
++  // Managed profiles freeze one explicit language; do not negotiate from host prefs.
++  if (lengsuo::BrowserProfile()) return false;
+   const PrefService::Preference* pref =
+       Profile::FromBrowserContext(browser_context)
+           ->GetPrefs()
+--- a/chrome/browser/chrome_content_browser_client.cc
++++ b/chrome/browser/chrome_content_browser_client.cc
+@@ -3287,6 +3287,8 @@
+ }
+ 
+ std::string ChromeContentBrowserClient::GetApplicationLocale() {
++  if (const auto* browser_profile = lengsuo::BrowserProfile())
++    return browser_profile->language;
+   if (BrowserThread::CurrentlyOn(BrowserThread::IO)) {
+     return GetIOThreadApplicationLocale();
+   }
+--- a/chrome/browser/chrome_content_browser_client.cc
++++ b/chrome/browser/chrome_content_browser_client.cc
+@@ -2895,6 +2895,12 @@
+ void ChromeContentBrowserClient::AppendExtraCommandLineSwitches(
+     base::CommandLine* command_line,
+     int child_process_id) {
++  if (command_line->GetSwitchValueASCII(switches::kProcessType) ==
++      switches::kRendererProcess) {
++    if (const auto* browser_profile = lengsuo::BrowserProfile())
++      command_line->AppendSwitchASCII("lengsuo-managed-language",
++                                      browser_profile->language);
++  }
+   crash_keys::AppendStringAnnotationsCommandLineSwitch(command_line);
+ #if BUILDFLAG(IS_MAC)
+   std::unique_ptr<metrics::ClientInfo> client_info =
+--- a/content/renderer/renderer_main.cc
++++ b/content/renderer/renderer_main.cc
+@@ -155,6 +155,15 @@
+ 
+   const base::CommandLine& command_line = *parameters.command_line;
+ 
++  // Browser passes only the frozen language, never the profile file or secrets.
++  // Linux zygote children inherit ICU state; --lang alone does not reset it.
++  if (command_line.HasSwitch("lengsuo-managed-language")) {
++    const auto locale =
++        command_line.GetSwitchValueASCII("lengsuo-managed-language");
++    if (locale.empty()) return 1;
++    base::i18n::SetICUDefaultLocale(locale);
++  }
++
+ #if BUILDFLAG(IS_MAC)
+   base::apple::ScopedNSAutoreleasePool* pool = parameters.autorelease_pool;
+ #endif  // BUILDFLAG(IS_MAC)

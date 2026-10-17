@@ -32,6 +32,10 @@
     {
       "path": "patches/0006-browser-ua-catalog.patch",
       "sha256": "b489ab552a3816cdc176121452fbbab9a8a9c5bfa8dafaa7a46b597df98b2ad6"
+    },
+    {
+      "path": "patches/0007-profile-language.patch",
+      "sha256": "c542abf1cced06caf6ebd891b0e57af9d3783420747cfa224da976a6bbd95ed3"
     }
   ]
 }
