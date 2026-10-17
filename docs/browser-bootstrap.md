@@ -30,7 +30,9 @@ Base 单测（4/4）+ 真浏览器正负路径构成第一批 Linux 验收证据
 
 基线：`0e66b94549a8bd85f03fbdf189b752d6e7b63c32`（Chromium 155）。
 本批只接入无凭据 LBPF1 早期加载和 Touch WebPreferences。
-Screen、DPR、UA/UA-CH、GPU、字体、Canvas、Audio 等尚未原生接入。
+第一批完成时 Screen/DPR 尚未接入；第二批已接入并通过两平台基础冒烟。
+第三批已完成 catalog 携带的 UA/UA-CH 字段基础接入，详见
+`batch3-ua-uach-design.md`；GPU、字体、Canvas、Audio 等仍未完成原生接入。
 
 期间发现并修复的集成问题（均有 1.47 日志证据，见 reviews/ 目录）：
 
@@ -123,6 +125,8 @@ Singleton 在 `chrome/app/chrome_main_delegate.cc` 中获得，早于上述加�
 尚未执行，不得以上述任何一项替代：
 
 - 真实浏览器启动与 Touch 媒体查询行为矩阵（含 OOPIF、BFCache、prerender）。
-- Windows 构建、安装、签名与运行；macOS 构建。
-- Screen/DPR/UA-CH/WebGPU 等其余指纹面的接入。
+- Windows 安装、签名与升级；macOS 构建。Windows 完整构建和基础运行
+  冒烟已于 2026-10-17 通过，见本页开头；不代表扩展运行矩阵验收通过。
+- UA高熵缺项/WebGPU 等其余指纹面的完整接入；Screen/DPR 已完成基础接入，
+  扩展矩阵见第二批记录。
 - 网络隔离门禁下的端到端画像隔离验证。

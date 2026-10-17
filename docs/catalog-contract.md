@@ -45,6 +45,9 @@ EOF                        不允许尾随字节
 
 - `CatalogMatchesProfile`：catalog 与画像的 `pool_version` 必须相等才可
   配套注入；空 pool_version 一律不匹配。
+- `ResolveCatalogUa`：仅解析 `profile.slots[5]` 对应的唯一条目；错池、
+  缺失或重复匹配均返回空指针。返回值借用 catalog，使用期间须保持其
+  生命周期与不可变性。原生单测 196 项断言，Windows MSVC Release 已通过。
 - catalog 内容不含凭据；签名授权、catalog 成员验证与环境网络隔离仍由
   生产 runner 负责（与画像 wire 同一边界）。browser 端只做结构校验与
   pool 绑定，不校验来源真实性。
@@ -58,14 +61,15 @@ EOF                        不允许尾随字节
   与 LBPF1 同一有界读取纪律）。
 - `native/wire_reader.h`：自 profile_wire.cc 抽取的共享游标；`profile_wire`
   270 断言原样通过，证明重构无行为变化。
-- GN 侧 `native/BUILD.gn` 已加 `profile_catalog` source_set，但 GN 集成
-  编译尚未验证。
+- GN 侧 `native/BUILD.gn` 的 `profile_catalog` source_set 已进入两平台
+  Chromium bootstrap 单测编译，8/8通过；Linux 完整 chrome 编译通过。
 
 ## 后续（本契约解锁的工作）
 
-1. 0006 补丁：在固定树把 `CatalogUaEntry` 注入 UA/UA-CH 两出口；
-   无画像或无匹配 catalog 条目时保持上游。
-2. catalog 文件的加载命令行与安全路径契约（对齐画像 wire 的
-   `--lengsuo-profile-wire` 纪律）。
+1. 0006 补丁已在固定树接通 UA/UA-CH 两出口，加载与路径纪律对齐
+   `--lengsuo-profile-wire`。无 catalog 保持上游；显式错误或缺槽位 catalog
+   拒启，详见 `docs/batch3-ua-uach-design.md` 的实测范围。
+2. catalog 仍只携带 UA 面；其余维度的类型、加载与一致性验收待完成。
 3. language 的 RendererPreferences/profile-l10n 覆盖点设计（独立小批）。
-4. 1.47 g++/ASan/UBSan 复核 + GN 编译，之后才能声明跨平台成立。
+4. 两平台完整浏览器已通过同批9条 UA 运行用例，完整指纹与扩展上下文
+   验收仍待完成；组件单测不能代替这些运行证据。

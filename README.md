@@ -6,9 +6,12 @@ Chromium 内核独立开发仓。客户端运行器、GPUI 与凭证组件属于
 Touch 与 Screen/DPR；Windows 本机亦完成完整 chrome 构建（VS2026 +
 SDK 28000），原生接入单测两平台同套件 5/5 通过，Linux 与 Windows
 真浏览器冒烟均通过（正/负/无参数路径）。
-这不是完整指纹浏览器；UA/UA-CH、language、WebRTC 等其余指纹面、
+第三批已将 catalog 的 UA/UA-CH 字段接通：两平台完整 chrome 编译及8项
+原生接入测试通过，真实页面、Dedicated Worker与HTTP请求头一致性通过。
+这不是完整指纹浏览器；UA高熵缺项、language、WebRTC 等其余指纹面、
 运行器与安装验收仍未完成。详见 [原生接入记录](docs/browser-bootstrap.md)
-及 [Screen/DPR 记录](docs/batch2-screen-dpr-design.md)。
+及 [Screen/DPR 记录](docs/batch2-screen-dpr-design.md)。UA/UA-CH 已验证字段
+及未覆盖范围见 [第三批记录](docs/batch3-ua-uach-design.md)。
 
 项目源码公开可查看；项目许可证尚未确定，不宣称已授予开源许可或
 已经符合任何免费代码签名服务资格。Chromium 等上游组件保留各自许可。
@@ -30,7 +33,8 @@ ctest --test-dir build -C Release --output-on-failure
 工作树干净、补丁已应用、源码已编译或发行包可信。
 
 不在 OneDrive 工作区下载 Chromium 构建树。开发与测试在研究机 1.47 的
-隔离目录进行；Windows 实际构建和运行另行验收。发布签名服务尚未确定。
+隔离目录进行；Windows 已通过本机完整编译和基础运行冒烟，扩展运行矩阵、
+安装与升级仍待验收。发布签名服务尚未确定。
 
 GitHub Actions 在 Linux/Windows 检查支持组件与测试，不构建整个 Chromium。
 原生解码器接口、验证范围与尚缺内容见 [原生验证记录](native/VERIFICATION.md)。

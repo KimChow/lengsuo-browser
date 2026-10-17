@@ -5,13 +5,18 @@
 #include "lengsuo/integration/profile_bootstrap_state.h"
 namespace blink::web_pref { struct WebPreferences; }
 namespace display { struct ScreenInfos; }
+namespace blink { struct UserAgentMetadata; }
 namespace lengsuo {
 inline constexpr char kProfileWireSwitch[] = "lengsuo-profile-wire";
+inline constexpr char kCatalogWireSwitch[] = "lengsuo-catalog-wire";
 bool IsManagedBrowserCommand(const base::CommandLine& command);
 bool IsSafeProfilePath(const base::FilePath& path);
 // Called exactly once from BrowserMainParts before BrowserProcess creation.
 bool InitializeBrowserProfile(const base::CommandLine& command);
 const ParsedProfile* BrowserProfile();
+const CatalogUaEntry* BrowserUa();
+bool ApplyUaMetadata(const CatalogUaEntry& entry,
+                     blink::UserAgentMetadata* metadata);
 // Returns true only when preferences actually change.
 bool ApplyTouchPreferences(const ParsedProfile& profile,
                            blink::web_pref::WebPreferences* prefs);

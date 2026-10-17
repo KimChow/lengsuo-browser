@@ -167,6 +167,20 @@ compile_exit=0  ./wt-catalog-red -> FAIL 3  test_exit=1
 # catalog-147-catalog-red-stub.log
 ```
 
-With this, the LBPC1/catalog + wire_reader row of the portability matrix is
-green on both toolchains. Remaining pending evidence is unchanged: GN
-source_set compilation and Chromium-tree integration.
+With this, the LBPC1/catalog + wire_reader row of the portability matrix was
+green on both toolchains at that revision.
+
+## UA resolution and startup binding (2026-10-17)
+
+`ResolveCatalogUa` adds four assertions (catalog total: 196), covering exact
+UA-slot selection, wrong pool, missing slot and ambiguous in-memory entries.
+MSVC Release CTest passed both native suites. On 1.47 g++ 13, all 196 catalog
+assertions passed with conversion warnings and ASan/UBSan enabled. The separate
+startup state harness also passed with ASan/UBSan, including exact binding and
+one-shot initialization. Tests first failed on missing resolver/startup APIs.
+
+GN `bootstrap_unittests` and complete Linux/Windows `chrome` now compile with
+the catalog source set. All eight Chromium bootstrap tests passed on both
+platforms, and `gn check out/lengsuo //lengsuo/*` passed on 1.47.
+Real-browser evidence and outstanding UA limitations are tracked in
+`docs/batch3-ua-uach-design.md`; decoder checks alone do not prove injection.

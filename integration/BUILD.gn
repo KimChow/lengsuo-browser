@@ -11,6 +11,7 @@ source_set("bootstrap") {
   public_deps = [
     "//base",
     "//lengsuo/native:profile_wire",
+    "//lengsuo/native:profile_catalog",
     "//ui/display",
   ]
   # The "common" group is required: :common_sources is visibility-restricted

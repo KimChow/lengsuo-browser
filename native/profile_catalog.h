@@ -45,5 +45,9 @@ std::optional<ParsedCatalog> DecodeCatalog(std::span<const std::uint8_t> bytes);
 // Binding check: a catalog may only serve a profile from the same pool.
 bool CatalogMatchesProfile(const ParsedCatalog& catalog,
                            const ParsedProfile& profile);
+// Returns a borrowed entry only for an exact pool and unique UA-slot match.
+// The caller must keep the catalog alive and immutable while using the entry.
+const CatalogUaEntry* ResolveCatalogUa(const ParsedCatalog& catalog,
+                                      const ParsedProfile& profile);
 }  // namespace lengsuo
 #endif

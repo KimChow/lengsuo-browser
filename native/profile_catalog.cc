@@ -95,4 +95,15 @@ bool CatalogMatchesProfile(const ParsedCatalog& catalog,
   return !catalog.pool_version.empty() &&
          catalog.pool_version == profile.pool_version;
 }
+const CatalogUaEntry* ResolveCatalogUa(const ParsedCatalog& catalog,
+                                      const ParsedProfile& profile) {
+  if (!CatalogMatchesProfile(catalog, profile)) return nullptr;
+  const CatalogUaEntry* selected = nullptr;
+  for (const auto& entry : catalog.ua_entries) {
+    if (entry.slot != profile.slots[5]) continue;
+    if (selected) return nullptr;
+    selected = &entry;
+  }
+  return selected;
+}
 }  // namespace lengsuo

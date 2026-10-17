@@ -1,7 +1,10 @@
 # 第三批设计：UA/UA-CH 画像覆盖
 
-状态：**设计定稿（2026-10-16，基于本地 Windows 固定树逐行核实）**，
-实现未开始；catalog 解码契约见 `docs/catalog-contract.md`（已落地）。
+状态：**UA 字段基础接入已验证（2026-10-17）**。0006 补丁和 catalog
+启动加载已进入 Linux、Windows 完整 chrome 编译，两平台原生单测8/8通过；
+主页面、Dedicated Worker 与 HTTP 请求头的字段一致性已实测通过。
+该结论只覆盖下列 catalog 字段，不代表完整指纹浏览器验收通过。
+catalog 解码契约见 `docs/catalog-contract.md`（已落地）。
 本批被 0001–0005 已验证的 bootstrap 状态机制直接支撑。
 
 ## 注入出口（155 固定树核实，修正 1.47 笔记的旧行号）
@@ -63,11 +66,37 @@
 1. 无 catalog：UA 覆盖函数返回空指针/上游行为，出口直通 embedder。
 2. 有 catalog 且绑定成功：slot 命中解析，字段逐一映射。
 3. pool 不一致：初始化拒绝，进程内不可替换。
-4. 无匹配 slot 条目：出口保持上游（catalog 合法但槽位缺失是授权问题，
-   由 runner 侧契约负责，browser 不猜）。
+4. 显式提供 catalog 却无匹配 slot 条目：拒绝启动，避免把失败的显式
+   画像配置当作上游成功启动。catalog 单独出现而没有 profile 也拒启。
+5. 空、超长、损坏、错池 catalog 拒启；成功或失败后均不可替换状态。
+6. 字段映射覆盖已有列表、清空空列表，保留 catalog 未携带的上游字段。
 
-红→绿流程要求 bootstrap_unittests 先编译失败/断言失败再实现 0006 补丁；
-本地 Windows 构建进行中，1.47 需复跑同套件。
+新增 resolver/startup API 用例先编译失败，修复后通过；Windows 旧 chrome
+在真实页面用例中仍返回 HeadlessChrome/155，上游值断言失败；新版本通过。
+
+## 复现与证据
+
+两平台执行同一仓内测试脚本（每次指定新的仓外 work 目录）：
+
+```text
+python tests/browser_ua_smoke.py --chrome /absolute/path/to/chrome --repo /absolute/path/to/lengsuo-browser --work /absolute/path/to/new-test-directory
+```
+
+脚本只绑定127.0.0.1临时端口、使用合成画像及值池，测试目录保留以供诊断。
+主页面、Worker的 UA/brands/platform/fullVersionList/architecture/bitness 等
+读取值与实际 HTTP User-Agent / Sec-CH-UA-* 对照；不使用外部检测站评分。
+正负路径：完整画像与 catalog、无参数、仅画像、仅 catalog、错池、缺槽位、
+损坏、空文件、相对路径，共9条；有效3条rc=0，非法6条rc=5。
+
+- Windows：`D:/lengsuo-build/ua-smoke-win/summary.json`，9条通过；
+  完整浏览器增量构建 `logs/ua-win-chrome-build.log`，退出0。
+- Linux：`reviews/ua-chrome-build.exit.json` rc=0，原生单测日志
+  `reviews/ua-bootstrap-tests.log`；真实运行收据在 `reviews/ua-smoke-run3/`。
+- catalog 196断言：Windows MSVC Release、1.47 g++及ASan/UBSan通过。
+
+本批未覆盖 Service Worker、Shared Worker、iframe/OOPIF、DevTools覆盖与
+浏览器恢复矩阵；full_version/wow64/form_factors仍保留上游，不能宣称完整
+高熵画像一致性。未来catalog升级须显式补齐这些字段和相应回归用例。
 
 ## 明确不做
 

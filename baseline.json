@@ -9,10 +9,29 @@
     "linux"
   ],
   "patches": [
-    {"path": "patches/0001-bootstrap-chrome_browser_main.patch", "sha256": "432eae8e340082a6812eab204c9657ba6e74bdd3a6f620408ab0b00d74085133"},
-    {"path": "patches/0002-bootstrap-chrome_content_browser_client.patch", "sha256": "578706d6810eec025eae87b111c6330e9a87026b177b165368f3285fc909a19a"},
-    {"path": "patches/0003-bootstrap-chrome_process_singleton.patch", "sha256": "2e17b987e3c5b21cc33c2356a0d2b0a81755d0d0055ec5ccccd3709cfbe14e5c"},
-    {"path": "patches/0004-bootstrap-BUILD.patch", "sha256": "61c4da5f8a3a4e4a6ec70d5208aade6b14bd338462422ee052f5bad24e927740"},
-    {"path": "patches/0005-content-screen-profile.patch", "sha256": "971217e4ebc95f0d484bf1b8d02e2980df9251c414cb291d2120a67e58ab21e5"}
+    {
+      "path": "patches/0001-bootstrap-chrome_browser_main.patch",
+      "sha256": "432eae8e340082a6812eab204c9657ba6e74bdd3a6f620408ab0b00d74085133"
+    },
+    {
+      "path": "patches/0002-bootstrap-chrome_content_browser_client.patch",
+      "sha256": "578706d6810eec025eae87b111c6330e9a87026b177b165368f3285fc909a19a"
+    },
+    {
+      "path": "patches/0003-bootstrap-chrome_process_singleton.patch",
+      "sha256": "2e17b987e3c5b21cc33c2356a0d2b0a81755d0d0055ec5ccccd3709cfbe14e5c"
+    },
+    {
+      "path": "patches/0004-bootstrap-BUILD.patch",
+      "sha256": "61c4da5f8a3a4e4a6ec70d5208aade6b14bd338462422ee052f5bad24e927740"
+    },
+    {
+      "path": "patches/0005-content-screen-profile.patch",
+      "sha256": "971217e4ebc95f0d484bf1b8d02e2980df9251c414cb291d2120a67e58ab21e5"
+    },
+    {
+      "path": "patches/0006-browser-ua-catalog.patch",
+      "sha256": "b489ab552a3816cdc176121452fbbab9a8a9c5bfa8dafaa7a46b597df98b2ad6"
+    }
   ]
 }
