@@ -29,3 +29,5 @@ jobs:
         run: cmake --build build --config Release --parallel 2
       - name: Native wire tests
         run: ctest --test-dir build -C Release --output-on-failure
+      - name: Independent Python and Rust golden parity
+        run: python tests/check_golden_parity.py

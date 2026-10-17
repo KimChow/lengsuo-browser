@@ -36,6 +36,9 @@ struct ParsedProfile {
   std::string timezone;
   // audio, canvas, client_rects, fonts, gpu, ua, webgl, in canonical order.
   std::array<std::uint32_t, 7> slots{};
+  // Schema 2 only: blink WebRtcIpHandlingPolicy enum value 0..3. Schema 1
+  // profiles carry no statement (nullopt) and leave upstream behavior.
+  std::optional<std::uint8_t> webrtc_policy;
 };
 
 // All malformed input returns nullopt; no partially parsed profile escapes.

@@ -13,6 +13,8 @@ Linux 构建树恢复后已重新通过完整构建、8 项启动测试和 9 项
 见[恢复验收记录](docs/linux-tree-recovery.md)。
 第四批接通画像语言：页面、Dedicated Worker、默认Intl locale与HTTP语言头
 两平台实测一致，9条运行用例通过，见[语言记录](docs/batch4-language.md)。
+原生解码组件已支持 schema 2 并加入跨语言金标；浏览器暂拒绝 v2，
+避免静默忽略未验收的 WebRTC 策略，见[组件验收](docs/webrtc-schema2-native.md)。
 这不是完整指纹浏览器；UA高熵缺项、语言标签全集、时区、WebRTC等其余指纹面、
 运行器与安装验收仍未完成。详见 [原生接入记录](docs/browser-bootstrap.md)
 及 [Screen/DPR 记录](docs/batch2-screen-dpr-design.md)。UA/UA-CH 已验证字段

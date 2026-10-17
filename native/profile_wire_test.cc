@@ -35,6 +35,17 @@ Bytes::iterator At(Bytes& bytes, std::size_t offset) {
   return bytes.begin() + static_cast<Bytes::difference_type>(offset);
 }
 
+// Schema 2: identical schema 1 framing with schema_version=2 and one webrtc
+// policy byte (WebRTCIPHandlingPolicy enum 0..3) inserted after the timezone
+// text and before slot_count (W3 layout). Schema 1 offsets [0, 65) are
+// unchanged; the slot table shifts one byte later.
+Bytes Schema2(const Bytes& golden, std::uint8_t policy) {
+  Bytes bytes = golden;
+  Number(bytes, 5, 2, 4);
+  bytes.insert(At(bytes, 65), policy);
+  return bytes;
+}
+
 int main() {
   const Bytes golden(std::begin(kGolden), std::end(kGolden));
   auto profile = lengsuo::DecodeProfile(golden);
@@ -176,5 +187,59 @@ int main() {
   entries.insert(entries.end(), At(bytes, 67), At(bytes, 78));
   std::copy(entries.begin(), entries.end(), At(bytes, 67));
   Bad(bytes);
+  // --- Schema 2: schema 1 framing plus one webrtc policy byte inserted
+  // after the timezone text and before slot_count (W3 layout). ---
+  for (const std::uint8_t policy : {
+               static_cast<std::uint8_t>(0), static_cast<std::uint8_t>(1),
+               static_cast<std::uint8_t>(2), static_cast<std::uint8_t>(3)}) {
+    auto decoded = lengsuo::DecodeProfile(Schema2(golden, policy));
+    Check(decoded.has_value());
+    Check(decoded->schema_version == 2);
+    Check(decoded->webrtc_policy.has_value() &&
+          *decoded->webrtc_policy == policy);
+    // Schema 1 payload fields are unchanged under schema 2.
+    Check(decoded->environment_id == "env-1" && decoded->language == "en-US" &&
+          decoded->timezone == "UTC" && decoded->width == 1920 &&
+          decoded->max_touch_points == 0 &&
+          decoded->slots == std::array<std::uint32_t, 7>{3, 1, 5, 4, 6, 7, 2});
+  }
+  // Schema 1 still decodes and carries no webrtc statement.
+  {
+    auto s1 = lengsuo::DecodeProfile(golden);
+    Check(s1.has_value() && s1->schema_version == 1 &&
+          !s1->webrtc_policy.has_value());
+  }
+  for (auto policy : {4, 255}) {
+    Bad(Schema2(golden, static_cast<std::uint8_t>(policy)));
+  }
+  // Schema 2 with the policy byte (offset 65, after timezone) removed:
+  // the remaining stream is 147 bytes of schema-1 framing plus the v2
+  // version field — it must not decode.
+  {
+    auto bytes2 = Schema2(golden, 2);
+    bytes2.erase(At(bytes2, 65));
+    Bad(bytes2);
+  }
+  // Duplicated policy byte (extra copy after the designated one).
+  {
+    auto bytes2 = Schema2(golden, 2);
+    bytes2.insert(At(bytes2, 66), 2);
+    Bad(bytes2);
+  }
+  // Trailing byte after the slot table of a schema 2 stream.
+  {
+    auto bytes2 = Schema2(golden, 2);
+    bytes2.push_back(0);
+    Bad(bytes2);
+  }
+  // Unknown schema versions.
+  for (auto version : {0u, 3u, 4u, 0xffffffffu}) {
+    bytes = golden;
+    Number(bytes, 5, version, 4);
+    Bad(bytes);
+    bytes = Schema2(golden, 1);
+    Number(bytes, 5, version, 4);
+    Bad(bytes);
+  }
   std::cout << "PASS " << checks << " assertions\n";
 }
