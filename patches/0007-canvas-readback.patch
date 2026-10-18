@@ -1,0 +1,193 @@
+diff --git a/chrome/browser/chrome_content_browser_client.cc b/chrome/browser/chrome_content_browser_client.cc
+index 19045777b3..86d1f6c0e3 100644
+--- a/chrome/browser/chrome_content_browser_client.cc
++++ b/chrome/browser/chrome_content_browser_client.cc
+@@ -4,6 +4,8 @@
+ 
+ #include "chrome/browser/chrome_content_browser_client.h"
+ 
++#include "lengsuo/integration/browser_bootstrap.h"
++
+ #include <algorithm>
+ #include <iterator>
+ #include <map>
+@@ -2893,6 +2895,26 @@ void MaybeAppendBlinkSettingsSwitchForFieldTrial(
+ void ChromeContentBrowserClient::AppendExtraCommandLineSwitches(
+     base::CommandLine* command_line,
+     int child_process_id) {
++  if (command_line->GetSwitchValueASCII(switches::kProcessType) ==
++      switches::kRendererProcess) {
++    if (const auto* browser_profile = lengsuo::BrowserProfile()) {
++      command_line->AppendSwitchASCII("lengsuo-managed-language",
++                                      browser_profile->language);
++      command_line->AppendSwitchASCII("lengsuo-managed-timezone",
++                                      browser_profile->timezone);
++      {
++        std::uint64_t canvas_seed = 0;
++        for (const std::uint8_t b : browser_profile->noise_seed) {
++          canvas_seed = (canvas_seed << 8) | b;
++        }
++        command_line->AppendSwitchASCII(
++            "lengsuo-managed-canvas",
++            base::StringPrintf("%016llx:%u",
++                               static_cast<unsigned long long>(canvas_seed),
++                               browser_profile->slots[1]));
++      }
++    }
++  }
+   crash_keys::AppendStringAnnotationsCommandLineSwitch(command_line);
+ #if BUILDFLAG(IS_MAC)
+   std::unique_ptr<metrics::ClientInfo> client_info =
+@@ -3285,6 +3307,8 @@ ChromeContentBrowserClient::GetQuarantineConnectionCallback() {
+ }
+ 
+ std::string ChromeContentBrowserClient::GetApplicationLocale() {
++  if (const auto* browser_profile = lengsuo::BrowserProfile())
++    return browser_profile->language;
+   if (BrowserThread::CurrentlyOn(BrowserThread::IO)) {
+     return GetIOThreadApplicationLocale();
+   }
+@@ -3293,6 +3317,8 @@ std::string ChromeContentBrowserClient::GetApplicationLocale() {
+ 
+ std::string ChromeContentBrowserClient::GetAcceptLangs(
+     content::BrowserContext* context) {
++  if (const auto* browser_profile = lengsuo::BrowserProfile())
++    return browser_profile->language;
+   Profile* profile = Profile::FromBrowserContext(context);
+   return profile->GetPrefs()->GetString(language::prefs::kAcceptLanguages);
+ }
+@@ -4885,6 +4911,7 @@ void ChromeContentBrowserClient::OverrideWebPreferences(
+   for (auto& parts : extra_parts_) {
+     parts->OverrideWebPreferences(web_contents, main_frame_site, web_prefs);
+   }
++  lengsuo::ApplyProfileTouchPreferences(web_prefs);
+ 
+   web_prefs->prefers_default_scrollbar_styles =
+       prefs->GetBoolean(prefs::kPrefersDefaultScrollbarStyles);
+@@ -4966,6 +4993,7 @@ bool ChromeContentBrowserClient::OverrideWebPreferencesAfterNavigation(
+     prefs_changed |= parts->OverrideWebPreferencesAfterNavigation(
+         web_contents, main_frame_site, web_prefs);
+   }
++  prefs_changed |= lengsuo::ApplyProfileTouchPreferences(web_prefs);
+ 
+   const auto old_in_forced_colors = web_prefs->in_forced_colors;
+   const auto old_is_forced_colors_disabled =
+@@ -7727,12 +7755,17 @@ std::string ChromeContentBrowserClient::GetProduct() {
+ }
+ 
+ std::string ChromeContentBrowserClient::GetUserAgent() {
++  if (const auto* ua = lengsuo::BrowserUa())
++    return ua->ua_string;
+   return embedder_support::GetUserAgent();
+ }
+ 
+ blink::UserAgentMetadata ChromeContentBrowserClient::GetUserAgentMetadata() {
+   DCHECK_CURRENTLY_ON(BrowserThread::UI);
+-  return embedder_support::GetUserAgentMetadata();
++  auto metadata = embedder_support::GetUserAgentMetadata();
++  if (const auto* ua = lengsuo::BrowserUa())
++    lengsuo::ApplyUaMetadata(*ua, &metadata);
++  return metadata;
+ }
+ 
+ std::optional<gfx::ImageSkia> ChromeContentBrowserClient::GetProductLogo() {
+@@ -9093,6 +9126,8 @@ bool ChromeContentBrowserClient::IsBlobUrlPartitioningEnabled(
+ bool ChromeContentBrowserClient::ShouldReduceAcceptLanguage(
+     content::BrowserContext* browser_context) {
+   DCHECK_CURRENTLY_ON(BrowserThread::UI);
++  // Managed profiles freeze one explicit language; do not negotiate from host prefs.
++  if (lengsuo::BrowserProfile()) return false;
+   const PrefService::Preference* pref =
+       Profile::FromBrowserContext(browser_context)
+           ->GetPrefs()
+diff --git a/content/renderer/BUILD.gn b/content/renderer/BUILD.gn
+index 6a40348748..66022beadb 100644
+--- a/content/renderer/BUILD.gn
++++ b/content/renderer/BUILD.gn
+@@ -228,6 +228,7 @@ target(link_target_type, "renderer") {
+   ]
+ 
+   deps = [
++    "//lengsuo/native:canvas_noise",
+     "//base",
+     "//base:i18n",
+     "//build:chromecast_buildflags",
+diff --git a/content/renderer/renderer_main.cc b/content/renderer/renderer_main.cc
+index 2fd21f7ee5..f045157d4e 100644
+--- a/content/renderer/renderer_main.cc
++++ b/content/renderer/renderer_main.cc
+@@ -89,6 +89,8 @@
+ #include "mojo/public/cpp/bindings/lib/test_random_mojo_delays.h"
+ #endif
+ 
++#include "lengsuo/native/canvas_apply.h"
++
+ namespace content {
+ namespace {
+ 
+@@ -155,6 +157,19 @@ int RendererMain(MainFunctionParams parameters) {
+ 
+   const base::CommandLine& command_line = *parameters.command_line;
+ 
++  // Browser passes only the frozen language, never the profile file or secrets.
++  // Linux zygote children inherit ICU state; --lang alone does not reset it.
++  if (command_line.HasSwitch("lengsuo-managed-canvas")) {
++    lengsuo::InitCanvasNoiseFromSwitch(
++        command_line.GetSwitchValueASCII("lengsuo-managed-canvas").c_str());
++  }
++  if (command_line.HasSwitch("lengsuo-managed-language")) {
++    const auto locale =
++        command_line.GetSwitchValueASCII("lengsuo-managed-language");
++    if (locale.empty()) return 1;
++    base::i18n::SetICUDefaultLocale(locale);
++  }
++
+ #if BUILDFLAG(IS_MAC)
+   base::apple::ScopedNSAutoreleasePool* pool = parameters.autorelease_pool;
+ #endif  // BUILDFLAG(IS_MAC)
+diff --git a/third_party/blink/renderer/modules/canvas/BUILD.gn b/third_party/blink/renderer/modules/canvas/BUILD.gn
+index 1d29be2717..1d4cbfe4f8 100644
+--- a/third_party/blink/renderer/modules/canvas/BUILD.gn
++++ b/third_party/blink/renderer/modules/canvas/BUILD.gn
+@@ -58,6 +58,7 @@ blink_modules_sources("canvas") {
+   ]
+ 
+   deps = [
++    "//lengsuo/native:canvas_noise",
+     "//third_party/blink/renderer/modules/webcodecs",
+     "//third_party/blink/renderer/modules/webgpu",
+   ]
+diff --git a/third_party/blink/renderer/modules/canvas/canvas2d/base_rendering_context_2d.cc b/third_party/blink/renderer/modules/canvas/canvas2d/base_rendering_context_2d.cc
+index 89fcf5f32b..8fb5972c49 100644
+--- a/third_party/blink/renderer/modules/canvas/canvas2d/base_rendering_context_2d.cc
++++ b/third_party/blink/renderer/modules/canvas/canvas2d/base_rendering_context_2d.cc
+@@ -108,6 +108,7 @@
+ #include "third_party/blink/renderer/platform/wtf/text/wtf_string.h"
+ #include "ui/gfx/geometry/skia_conversions.h"
+ #include "ui/gfx/geometry/vector2d_f.h"
++#include "lengsuo/native/canvas_apply.h"
+ 
+ // Including "base/time/time.h" triggers a bug in IWYU.
+ // https://github.com/include-what-you-use/include-what-you-use/issues/1122
+@@ -518,6 +519,21 @@ ImageData* BaseRenderingContext2D::getImageDataInternal(
+     }
+   }
+ 
++  // Lengsuo: apply profile canvas noise to the readback buffer. No-op
++  // unless the browser passed --lengsuo-managed-canvas. alpha=0 pixels
++  // are preserved; per-channel |delta| <= 13.
++  if (image_data && sw > 0 && sh > 0) {
++    SkPixmap lengsuo_noise_pixmap = image_data->GetSkPixmap();
++    // ImageData is always RGBA8888 by spec; this Linux build's kN32 is BGRA,
++    // so comparing against kN32 wrongly skips the noise on every readback.
++    if (lengsuo_noise_pixmap.addr() &&
++        lengsuo_noise_pixmap.info().colorType() == kRGBA_8888_SkColorType) {
++      lengsuo::ApplyProfileCanvasNoise(
++          const_cast<void*>(lengsuo_noise_pixmap.addr()),
++          static_cast<uint32_t>(sw), static_cast<uint32_t>(sh),
++          static_cast<uint64_t>(lengsuo_noise_pixmap.rowBytes()));
++    }
++  }
+   return image_data;
+ }
+ 
