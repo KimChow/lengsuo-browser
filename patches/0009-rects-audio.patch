@@ -1,0 +1,92 @@
+diff --git a/third_party/blink/renderer/core/dom/element.cc b/third_party/blink/renderer/core/dom/element.cc
+index 91d23907c2..2b39439f23 100644
+--- a/third_party/blink/renderer/core/dom/element.cc
++++ b/third_party/blink/renderer/core/dom/element.cc
+@@ -326,6 +326,7 @@
+ #include "ui/accessibility/ax_mode.h"
+ #include "ui/gfx/geometry/rect_conversions.h"
+ #include "ui/gfx/geometry/transform.h"
++#include "lengsuo/native/fp_overrides.h"
+ 
+ namespace blink {
+ 
+@@ -3388,9 +3389,16 @@ DOMRectList* Element::getClientRects() {
+   }
+   LayoutObject* element_layout_object = GetLayoutObject();
+   DCHECK(element_layout_object);
++  // Lengsuo: sub-pixel deterministic jitter on x/y (fingerprint surface).
++  const float lengsuo_jitter =
++      static_cast<float>(lengsuo::fp::RectsJitterPx());
+   for (auto& rect : rects) {
+     GetDocument().AdjustRectForScrollAndAbsoluteZoom(rect,
+                                                      *element_layout_object);
++    if (lengsuo_jitter != 0.0f) {
++      rect.set_x(rect.x() + lengsuo_jitter);
++      rect.set_y(rect.y() - lengsuo_jitter);
++    }
+   }
+   return MakeGarbageCollected<DOMRectList>(rects);
+ }
+@@ -3475,6 +3483,12 @@ gfx::RectF Element::GetBoundingClientRectNoLifecycleUpdate() const {
+   DCHECK(element_layout_object);
+   GetDocument().AdjustRectForScrollAndAbsoluteZoom(result,
+                                                    *element_layout_object);
++  const float lengsuo_jitter =
++      static_cast<float>(lengsuo::fp::RectsJitterPx());
++  if (lengsuo_jitter != 0.0f) {
++    result.set_x(result.x() + lengsuo_jitter);
++    result.set_y(result.y() - lengsuo_jitter);
++  }
+   return result;
+ }
+ 
+diff --git a/third_party/blink/renderer/modules/webaudio/offline_audio_context.cc b/third_party/blink/renderer/modules/webaudio/offline_audio_context.cc
+index 4604be68ad..1e33c0a722 100644
+--- a/third_party/blink/renderer/modules/webaudio/offline_audio_context.cc
++++ b/third_party/blink/renderer/modules/webaudio/offline_audio_context.cc
+@@ -49,6 +49,7 @@
+ #include "third_party/blink/renderer/platform/wtf/cross_thread_functional.h"
+ #include "third_party/blink/renderer/platform/wtf/math_extras.h"
+ #include "third_party/blink/renderer/platform/wtf/text/strcat.h"
++#include "lengsuo/native/fp_overrides.h"
+ 
+ namespace blink {
+ 
+@@ -439,6 +440,37 @@ void OfflineAudioContext::FireCompletionEvent() {
+ 
+     // Call the offline rendering completion event listener and resolve the
+     // promise too.
++    // Lengsuo: deterministic per-sample perturbation on the rendered audio
++    // buffer (fingerprint surface). No-op unless the audio slot is set.
++    {
++      const std::uint64_t lengsuo_audio_seed = lengsuo::fp::AudioSeed();
++      if (lengsuo_audio_seed != 0 && rendered_buffer) {
++        const unsigned lengsuo_channels = rendered_buffer->numberOfChannels();
++        for (unsigned ch = 0; ch < lengsuo_channels; ++ch) {
++          NotShared<DOMFloat32Array> lengsuo_channel =
++              rendered_buffer->getChannelData(ch);
++          if (!lengsuo_channel) {
++            continue;
++          }
++          // base::span<float> keeps -Wunsafe-buffer-usage clean (bounds-
++          // checked indexing via operator[] on span is allowed).
++          base::span<float> lengsuo_span =
++              lengsuo_channel->AsSpan();
++          const unsigned lengsuo_len = rendered_buffer->length();
++          std::uint64_t lengsuo_state =
++              lengsuo_audio_seed ^ (static_cast<std::uint64_t>(ch) *
++                                    0xC2B2AE3D27D4EB4FULL);
++          for (unsigned k = 0; k < lengsuo_len && k < lengsuo_span.size(); ++k) {
++            lengsuo_state ^= lengsuo_state << 13;
++            lengsuo_state ^= lengsuo_state >> 7;
++            lengsuo_state ^= lengsuo_state << 17;
++            lengsuo_span[k] += static_cast<float>(
++                (static_cast<double>(lengsuo_state >> 11) / 9007199254740992.0 -
++                 0.5) * 2e-7);
++          }
++        }
++      }
++    }
+     DispatchEvent(*OfflineAudioCompletionEvent::Create(rendered_buffer));
+     complete_resolver_->Resolve(rendered_buffer);
+   } else {
