@@ -1,0 +1,65 @@
+<!doctype html><meta charset="utf-8"><title>fp-lab</title>
+<pre id="out">running…</pre>
+<canvas id="c" width="200" height="60"></canvas>
+<script>
+const out = [];
+const log = (k, v) => out.push(k.padEnd(24) + JSON.stringify(v));
+
+// --- 基础指纹面 ---
+log('hardwareConcurrency', navigator.hardwareConcurrency);
+log('deviceMemory', navigator.deviceMemory);
+log('language', navigator.language);
+log('languages', navigator.languages);
+log('timezone', Intl.DateTimeFormat().resolvedOptions().timeZone);
+log('tzOffsetMin', new Date('2026-01-15').getTimezoneOffset());
+log('userAgent', navigator.userAgent);
+
+// --- WebGL ---
+const gl = document.createElement('canvas').getContext('webgl');
+log('gl.VENDOR', gl.getParameter(gl.VENDOR));
+log('gl.RENDERER', gl.getParameter(gl.RENDERER));
+const dbg = gl.getExtension('WEBGL_debug_renderer_info');
+log('gl.UNMASKED_VENDOR', dbg ? gl.getParameter(dbg.UNMASKED_VENDOR_WEBGL) : null);
+log('gl.UNMASKED_RENDERER', dbg ? gl.getParameter(dbg.UNMASKED_RENDERER_WEBGL) : null);
+log('MAX_TEXTURE_SIZE', gl.getParameter(gl.MAX_TEXTURE_SIZE));
+log('MAX_VERTEX_ATTRIBS', gl.getParameter(gl.MAX_VERTEX_ATTRIBS));
+log('MAX_VARYING_VECTORS', gl.getParameter(gl.MAX_VARYING_VECTORS));
+log('MAX_COMBINED_TEX_UNITS', gl.getParameter(gl.MAX_COMBINED_TEXTURE_IMAGE_UNITS));
+// 状态参数：必须等于标准值，不能被偏置
+log('ACTIVE_TEXTURE(33984)', gl.getParameter(gl.ACTIVE_TEXTURE));
+log('VIEWPORT', gl.getParameter(gl.VIEWPORT));
+
+// --- Canvas ---
+const c2 = document.getElementById('c').getContext('2d');
+c2.fillStyle = '#38761d'; c2.fillRect(0, 0, 120, 40);
+c2.fillStyle = '#fff'; c2.font = '16px sans-serif'; c2.fillText('fingerprint', 6, 28);
+const px = c2.getImageData(0, 0, 120, 40).data;
+let sum = 0; for (let i = 0; i < px.length; i++) sum = (sum * 31 + px[i]) >>> 0;
+log('canvasHash', sum);
+
+// --- ClientRects ---
+const d = document.createElement('div');
+d.style.cssText = 'position:absolute;left:13.37px;top:7.11px;width:100.5px;height:20px';
+document.body.appendChild(d);
+log('boundingRect', [d.getBoundingClientRect().x, d.getBoundingClientRect().y]);
+
+// --- Audio ---
+(async () => {
+  const off = new OfflineAudioContext(1, 4410, 44100);
+  const osc = off.createOscillator();
+  osc.frequency.value = 1000;
+  osc.connect(off.destination); osc.start();
+  const buf = await off.startRendering();
+  const data = buf.getChannelData(0);
+  let acc = 0;
+  for (let i = 450; i < 500; i++) acc += Math.abs(data[i]);
+  out.push('audioAccum'.padEnd(24) + acc.toPrecision(12));
+  render();
+})();
+
+function render() {
+  document.getElementById('out').textContent = out.join('\n');
+  window.__FP_LAB__ = out.join('\n');
+}
+render();
+</script>

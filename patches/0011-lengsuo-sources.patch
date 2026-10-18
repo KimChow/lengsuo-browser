@@ -1,0 +1,1859 @@
+diff --git a/lengsuo/integration/BUILD.gn b/lengsuo/integration/BUILD.gn
+new file mode 100644
+index 0000000000..1433ce22bf
+--- /dev/null
++++ b/lengsuo/integration/BUILD.gn
+@@ -0,0 +1,41 @@
++import("//testing/test.gni")
++
++# Browser-only dependency. No chrome/browser dependency (avoids a cycle).
++source_set("bootstrap") {
++  sources = [
++    "browser_bootstrap.cc",
++    "browser_bootstrap.h",
++    "profile_bootstrap_state.cc",
++    "profile_bootstrap_state.h",
++  ]
++  public_deps = [
++    "//base",
++    "//lengsuo/native:profile_wire",
++    "//lengsuo/native:profile_catalog",
++    "//ui/display",
++  ]
++  # The "common" group is required: :common_sources is visibility-restricted
++  # to //content/*. The group resolves to //content only in component builds,
++  # which would cycle through content/browser (0005); builds therefore pin
++  # is_component_build=false in args.gn.
++  deps = [
++    "//third_party/icu",
++    "//content/public/common",
++    "//third_party/blink/public/common",
++  ]
++}
++
++test("bootstrap_unittests") {
++  testonly = true
++  sources = [ "browser_bootstrap_unittest.cc" ]
++  deps = [
++    ":bootstrap",
++    "//base",
++    "//testing/gtest",
++    "//third_party/blink/public/common",
++    "//content/public/common",
++    "//ui/display",
++    "//base/test:run_all_unittests",
++    "//base/test:test_support",
++  ]
++}
+diff --git a/lengsuo/integration/browser_bootstrap.cc b/lengsuo/integration/browser_bootstrap.cc
+new file mode 100644
+index 0000000000..ff5c2f6f66
+--- /dev/null
++++ b/lengsuo/integration/browser_bootstrap.cc
+@@ -0,0 +1,181 @@
++#include "lengsuo/integration/browser_bootstrap.h"
++#include <string>
++#include "third_party/icu/source/i18n/unicode/timezone.h"
++#include "base/files/file_util.h"
++#include "base/no_destructor.h"
++// renderer_preferences.h pulls in the mojom WebRtcIpHandlingPolicy enum.
++#include "third_party/blink/public/common/renderer_preferences/renderer_preferences.h"
++#include "third_party/blink/public/common/web_preferences/web_preferences.h"
++#include "third_party/blink/public/common/user_agent/user_agent_metadata.h"
++#include "ui/display/screen_infos.h"
++#include "build/build_config.h"
++#if BUILDFLAG(IS_WIN)
++#include <windows.h>
++#endif
++namespace lengsuo {
++bool IsValidProfileTimezone(std::string_view zone) {
++  // Bounded ASCII-only token, then a real system zone through ICU canonical
++  // lookup. Unknown, non-system (e.g. format-only) and malformed IDs fail.
++  if (zone.empty() || zone.size() > 64) return false;
++  for (const char byte : zone) {
++    if (static_cast<unsigned char>(byte) < 33 ||
++        static_cast<unsigned char>(byte) > 126)
++      return false;
++  }
++  UErrorCode status = U_ZERO_ERROR;
++  UBool system = false;
++  icu::UnicodeString canonical;
++  icu::TimeZone::getCanonicalID(
++      icu::UnicodeString::fromUTF8(
++          icu::StringPiece(zone.data(), static_cast<int32_t>(zone.size()))),
++      canonical, system, status);
++  return U_SUCCESS(status) && system;
++}
++
++namespace {
++ProfileBootstrapState& State() {
++  static base::NoDestructor<ProfileBootstrapState> state;
++  return *state;
++}
++std::optional<std::string> ReadWire(const base::FilePath& path) {
++  // Runner owns this local file and must prevent replacement/redirection.
++  // Bounded reads are not wall-clock timeouts or authorization checks.
++  base::File::Info info;
++  if (base::IsLink(path) || !base::GetFileInfo(path, &info) || info.is_directory ||
++      info.is_symbolic_link || info.size < 1 || info.size > 4096)
++    return std::nullopt;
++  std::string bytes;
++  if (!base::ReadFileToStringWithMaxSize(path, &bytes, 4096))
++    return std::nullopt;
++  return bytes;
++}
++}  // namespace
++bool IsManagedBrowserCommand(const base::CommandLine& command) {
++  return command.HasSwitch(kProfileWireSwitch) ||
++         command.HasSwitch(kCatalogWireSwitch);
++}
++bool IsSafeProfilePath(const base::FilePath& path) {
++  if (path.empty() || !path.IsAbsolute() || path.IsNetwork() ||
++      path.ReferencesParent()) return false;
++#if BUILDFLAG(IS_WIN)
++  // Reject UNC, device namespaces and mapped network drives. Only a local
++  // fixed drive is supported for this first Windows integration.
++  const auto& value = path.value();
++  if (value.size() < 3 || value[1] != L':' ||
++      (value[2] != L'\\' && value[2] != L'/')) return false;
++  std::wstring root = value.substr(0, 3);
++  if (::GetDriveTypeW(root.c_str()) != DRIVE_FIXED) return false;
++#endif
++  return true;
++}
++bool InitializeBrowserProfile(const base::CommandLine& command) {
++  const bool requested = command.HasSwitch(kProfileWireSwitch);
++  const auto path = command.GetSwitchValuePath(kProfileWireSwitch);
++  if (!State().Initialize(requested, IsSafeProfilePath(path),
++                          [&]() { return ReadWire(path); })) return false;
++  if (const auto* profile = BrowserProfile();
++      profile && !IsValidProfileTimezone(profile->timezone)) return false;
++  const auto catalog_path = command.GetSwitchValuePath(kCatalogWireSwitch);
++  return State().InitializeCatalog(command.HasSwitch(kCatalogWireSwitch),
++      IsSafeProfilePath(catalog_path), [&]() { return ReadWire(catalog_path); });
++}
++const ParsedProfile* BrowserProfile() { return State().profile(); }
++const CatalogUaEntry* BrowserUa() { return State().ua(); }
++const CatalogGpuEntry* BrowserGpu() { return State().gpu(); }
++bool ApplyUaMetadata(const CatalogUaEntry& entry,
++                     blink::UserAgentMetadata* metadata) {
++  metadata->brand_version_list.clear();
++  for (const auto& brand : entry.brands)
++    metadata->brand_version_list.emplace_back(brand.name, brand.version);
++  metadata->brand_full_version_list.clear();
++  for (const auto& brand : entry.full_versions)
++    metadata->brand_full_version_list.emplace_back(brand.name, brand.version);
++  metadata->platform = entry.platform;
++  metadata->platform_version = entry.platform_version;
++  metadata->architecture = entry.architecture;
++  metadata->bitness = entry.bitness;
++  metadata->model = entry.model;
++  metadata->mobile = entry.mobile;
++  return true;
++}
++bool ApplyProfileTouchPreferences(blink::web_pref::WebPreferences* prefs) {
++  const auto* profile = BrowserProfile();
++  if (!profile) return false;
++  return ApplyTouchPreferences(*profile, prefs);
++}
++bool ApplyScreenInfos(const ParsedProfile& profile,
++                      display::ScreenInfos* infos) {
++  display::ScreenInfo info = infos->current();
++  // The wire stores DPR in milli-units; restore with exact integer math.
++  info.device_scale_factor =
++      static_cast<float>(profile.dpr_milli) / 1000.f;
++  // Single-device model: one screen sized exactly like the profile. The
++  // profile carries no work-area semantics, so available == full rect.
++  const gfx::Rect rect(0, 0, static_cast<int>(profile.width),
++                       static_cast<int>(profile.height));
++  info.rect = rect;
++  info.available_rect = rect;
++  info.depth = profile.color_depth;
++  *infos = display::ScreenInfos(info);
++  return true;
++}
++bool ApplyProfileScreenInfos(display::ScreenInfos* infos) {
++  const auto* profile = BrowserProfile();
++  if (!profile) return false;
++  return ApplyScreenInfos(*profile, infos);
++}
++bool ApplyWebRtcPolicy(const ParsedProfile& profile,
++                       blink::RendererPreferences* prefs) {
++  // Schema 1 statement (nullopt): upstream behavior stays untouched.
++  if (!profile.webrtc_policy) return false;
++  using blink::mojom::WebRtcIpHandlingPolicy;
++  WebRtcIpHandlingPolicy policy;
++  // Checked switch over the wire range 0..3; anything else is rejected
++  // here without mutating prefs (the wire decoder already gates this).
++  switch (*profile.webrtc_policy) {
++    case 0: policy = WebRtcIpHandlingPolicy::kDefault; break;
++    case 1: policy = WebRtcIpHandlingPolicy::kDefaultPublicAndPrivateInterfaces; break;
++    case 2: policy = WebRtcIpHandlingPolicy::kDefaultPublicInterfaceOnly; break;
++    case 3: policy = WebRtcIpHandlingPolicy::kDisableNonProxiedUdp; break;
++    default: return false;
++  }
++  const bool changed = prefs->webrtc_ip_handling_policy != policy ||
++                       !prefs->webrtc_ip_handling_urls.empty() ||
++                       !prefs->webrtc_local_ips_allowed_urls.empty();
++  // Explicit profile policy takes priority: per-origin overrides and the
++  // mDNS local-IP exemption list are cleared. UDP port range is retained.
++  prefs->webrtc_ip_handling_policy = policy;
++  prefs->webrtc_ip_handling_urls.clear();
++  prefs->webrtc_local_ips_allowed_urls.clear();
++  return changed;
++}
++bool ApplyProfileWebRtcPolicy(blink::RendererPreferences* prefs) {
++  const auto* profile = BrowserProfile();
++  if (!profile) return false;
++  return ApplyWebRtcPolicy(*profile, prefs);
++}
++bool ApplyTouchPreferences(const ParsedProfile& profile,
++                           blink::web_pref::WebPreferences* prefs) {
++  const bool touch = profile.max_touch_points != 0;
++  using blink::mojom::PointerType;
++  using blink::mojom::HoverType;
++  const auto pointer = touch ? PointerType::kPointerCoarseType
++                             : PointerType::kPointerFineType;
++  const auto hover = touch ? HoverType::kHoverNone : HoverType::kHoverHoverType;
++  const int pointers = static_cast<int>(pointer);
++  const int hovers = static_cast<int>(hover);
++  const bool changed =
++      prefs->pointer_events_max_touch_points != profile.max_touch_points ||
++      prefs->touch_event_feature_detection_enabled != touch ||
++      prefs->available_pointer_types != pointers ||
++      prefs->primary_pointer_type != pointer ||
++      prefs->available_hover_types != hovers || prefs->primary_hover_type != hover;
++  prefs->pointer_events_max_touch_points = profile.max_touch_points;
++  prefs->touch_event_feature_detection_enabled = touch;
++  prefs->available_pointer_types = pointers;
++  prefs->primary_pointer_type = pointer;
++  prefs->available_hover_types = hovers;
++  prefs->primary_hover_type = hover;
++  return changed;
++}
++}  // namespace lengsuo
+diff --git a/lengsuo/integration/browser_bootstrap.h b/lengsuo/integration/browser_bootstrap.h
+new file mode 100644
+index 0000000000..978452cfaf
+--- /dev/null
++++ b/lengsuo/integration/browser_bootstrap.h
+@@ -0,0 +1,50 @@
++#ifndef LENGSUO_INTEGRATION_BROWSER_BOOTSTRAP_H_
++#define LENGSUO_INTEGRATION_BROWSER_BOOTSTRAP_H_
++#include <string_view>
++#include "base/command_line.h"
++#include "base/files/file_path.h"
++#include "lengsuo/integration/profile_bootstrap_state.h"
++namespace blink::web_pref { struct WebPreferences; }
++namespace display { struct ScreenInfos; }
++namespace blink { struct UserAgentMetadata; struct RendererPreferences; }
++namespace lengsuo {
++// ICU-recognized system zones only; does not override renderer timezone.
++bool IsValidProfileTimezone(std::string_view zone);
++inline constexpr char kProfileWireSwitch[] = "lengsuo-profile-wire";
++inline constexpr char kCatalogWireSwitch[] = "lengsuo-catalog-wire";
++bool IsManagedBrowserCommand(const base::CommandLine& command);
++bool IsSafeProfilePath(const base::FilePath& path);
++// Called exactly once from BrowserMainParts before BrowserProcess creation.
++bool InitializeBrowserProfile(const base::CommandLine& command);
++const ParsedProfile* BrowserProfile();
++const CatalogUaEntry* BrowserUa();
++// GPU face for the active profile's gpu slot, or nullptr when the loaded
++// catalog carries no GPU section or has no matching entry (upstream faces
++// then stay untouched).
++const CatalogGpuEntry* BrowserGpu();
++bool ApplyUaMetadata(const CatalogUaEntry& entry,
++                     blink::UserAgentMetadata* metadata);
++// Returns true only when preferences actually change.
++bool ApplyTouchPreferences(const ParsedProfile& profile,
++                           blink::web_pref::WebPreferences* prefs);
++bool ApplyProfileTouchPreferences(blink::web_pref::WebPreferences* prefs);
++// Replaces screen geometry/DPR/depth with the profile values.
++bool ApplyScreenInfos(const ParsedProfile& profile,
++                      display::ScreenInfos* infos);
++// Profile-aware wrapper; returns false (upstream untouched) when no
++// profile is loaded.
++bool ApplyProfileScreenInfos(display::ScreenInfos* infos);
++// In-memory helper only: applies ParsedProfile::webrtc_policy to
++// RendererPreferences. nullopt (schema 1) leaves everything untouched.
++// Explicit 0..3 maps by checked switch onto mojom WebRtcIpHandlingPolicy,
++// clears webrtc_ip_handling_urls and webrtc_local_ips_allowed_urls (the
++// profile policy takes priority over per-origin overrides and mDNS local-IP
++// exemptions) and retains webrtc_udp_min_port/max_port. Invalid in-memory
++// values are rejected without mutation. Returns true only on change.
++// Loading a schema 2 profile into the browser remains gated: startup still
++// rejects v2 until runtime/network acceptance is complete.
++bool ApplyWebRtcPolicy(const ParsedProfile& profile,
++                       blink::RendererPreferences* prefs);
++bool ApplyProfileWebRtcPolicy(blink::RendererPreferences* prefs);
++}  // namespace lengsuo
++#endif
+diff --git a/lengsuo/integration/browser_bootstrap_unittest.cc b/lengsuo/integration/browser_bootstrap_unittest.cc
+new file mode 100644
+index 0000000000..b657c89ea7
+--- /dev/null
++++ b/lengsuo/integration/browser_bootstrap_unittest.cc
+@@ -0,0 +1,354 @@
++// Requires Chromium base/gtest build; standalone tests live separately.
++#include "lengsuo/integration/browser_bootstrap.h"
++#include "build/build_config.h"
++#include "components/content_settings/core/common/content_settings_pattern.h"
++#include "third_party/blink/public/common/peerconnection/webrtc_ip_handling_url_entry.h"
++#include "third_party/blink/public/common/renderer_preferences/renderer_preferences.h"
++#include "third_party/blink/public/common/web_preferences/web_preferences.h"
++#include "testing/gtest/include/gtest/gtest.h"
++#include "ui/display/screen_infos.h"
++#include "ui/gfx/geometry/rect.h"
++#include "third_party/blink/public/common/user_agent/user_agent_metadata.h"
++namespace {
++#include "lengsuo/native/golden.inc"
++constexpr unsigned char kGoldenCatalog[] = {
++    76,  66,  80,  67,  49,  0,   0,   0,   1,   0,   2,   112,
++    49,  0,   1,   0,   2,   117, 97,  0,   0,   0,   7,   0,
++    19,  83,  121, 110, 116, 104, 47,  49,  46,  48,  32,  84,
++    101, 115, 116, 32,  69,  110, 118, 55,  2,   0,   5,   65,
++    108, 112, 104, 97,  0,   3,   49,  46,  50,  0,   4,   66,
++    101, 116, 97,  0,   3,   51,  46,  52,  2,   0,   5,   65,
++    108, 112, 104, 97,  0,   7,   49,  46,  50,  46,  55,  46,
++    56,  0,   4,   66,  101, 116, 97,  0,   7,   51,  46,  52,
++    46,  57,  46,  48,  0,   6,   84,  101, 115, 116, 79,  83,
++    0,   6,   49,  48,  46,  48,  46,  48,  0,   3,   120, 56,
++    54,  0,   2,   54,  52,  0,   0,   0};
++std::string CatalogWire() {
++  return std::string(reinterpret_cast<const char*>(kGoldenCatalog),
++                     sizeof(kGoldenCatalog));
++}
++}
++namespace lengsuo {
++TEST(BrowserBootstrap, TimezoneSystemIdsRejectUnknownAndUnsafeInput) {
++  for (auto zone : {"UTC", "America/New_York", "Europe/London", "Etc/GMT-8"})
++    EXPECT_TRUE(IsValidProfileTimezone(zone)) << zone;
++  for (auto zone : {"", "Mars/Olympus", "GMT+08:00", " UTC", "UTC ", "UTC\n"})
++    EXPECT_FALSE(IsValidProfileTimezone(zone)) << zone;
++  EXPECT_FALSE(IsValidProfileTimezone(std::string(65, 'a')));
++  EXPECT_FALSE(IsValidProfileTimezone(std::string_view("UTC\0junk", 8)));
++  EXPECT_FALSE(IsValidProfileTimezone("\xc3\xa9"));
++}
++
++TEST(BrowserBootstrap, RejectsSchemaTwoUntilPolicyInjectionIsAccepted) {
++  std::string wire(reinterpret_cast<const char*>(kGolden), sizeof(kGolden));
++  wire[8] = 2;
++  wire.insert(65, 1, static_cast<char>(3));
++  auto parsed = DecodeProfile(std::span<const std::uint8_t>(
++      reinterpret_cast<const std::uint8_t*>(wire.data()), wire.size()));
++  ASSERT_TRUE(parsed);
++  ASSERT_EQ(2u, parsed->schema_version);
++  ProfileBootstrapState state;
++  EXPECT_FALSE(state.Initialize(true, true,
++      [&]() -> std::optional<std::string> { return wire; }));
++  EXPECT_EQ(nullptr, state.profile());
++  EXPECT_FALSE(state.Initialize(true, true,
++      [&]() -> std::optional<std::string> { return wire; }));
++}
++TEST(BrowserBootstrap, CatalogBindingFreezesAndRejectsInvalidOrMissingSlot) {
++  for (int scenario : {0, 1, 2, 3, 4, 5}) {
++    ProfileBootstrapState state;
++    ASSERT_TRUE(state.Initialize(true, true, []() -> std::optional<std::string> {
++      return std::string(reinterpret_cast<const char*>(kGolden), sizeof(kGolden));
++    }));
++    auto wire = CatalogWire();
++    if (scenario == 1) wire[12] = '2';  // Different pool p2.
++    if (scenario == 2) wire[22] = 8;    // Different UA slot.
++    if (scenario == 3) wire.clear();
++    if (scenario == 4) wire.resize(4097, 'x');
++    if (scenario == 5) wire = "bad";
++    int reads = 0;
++    const bool initialized = state.InitializeCatalog(true, true,
++        [&]() -> std::optional<std::string> { ++reads; return wire; });
++    EXPECT_EQ(scenario == 0, initialized);
++    EXPECT_EQ(1, reads);
++    if (scenario == 0) {
++      ASSERT_NE(nullptr, state.ua());
++      EXPECT_EQ("Synth/1.0 Test Env7", state.ua()->ua_string);
++    } else {
++      EXPECT_EQ(nullptr, state.ua());
++    }
++    const auto* frozen = state.ua();
++    EXPECT_FALSE(state.InitializeCatalog(true, true,
++        []() -> std::optional<std::string> { return CatalogWire(); }));
++    EXPECT_EQ(frozen, state.ua());
++  }
++}
++TEST(BrowserBootstrap, UaMetadataUsesEveryCatalogFieldAndPreservesAbsentFields) {
++  auto bytes = CatalogWire();
++  auto catalog = DecodeCatalog(std::span<const std::uint8_t>(
++      reinterpret_cast<const std::uint8_t*>(bytes.data()), bytes.size()));
++  ASSERT_TRUE(catalog);
++  blink::UserAgentMetadata metadata;
++  metadata.full_version = "upstream";
++  metadata.wow64 = true;
++  metadata.form_factors = {"Desktop"};
++  metadata.brand_version_list.emplace_back("old", "0");
++  ASSERT_TRUE(ApplyUaMetadata(catalog->ua_entries[0], &metadata));
++  ASSERT_EQ(2u, metadata.brand_version_list.size());
++  EXPECT_EQ("Alpha", metadata.brand_version_list[0].brand);
++  EXPECT_EQ("1.2", metadata.brand_version_list[0].version);
++  ASSERT_EQ(2u, metadata.brand_full_version_list.size());
++  EXPECT_EQ("Beta", metadata.brand_full_version_list[1].brand);
++  EXPECT_EQ("3.4.9.0", metadata.brand_full_version_list[1].version);
++  EXPECT_EQ("TestOS", metadata.platform);
++  EXPECT_EQ("10.0.0", metadata.platform_version);
++  EXPECT_EQ("x86", metadata.architecture);
++  EXPECT_EQ("64", metadata.bitness);
++  EXPECT_TRUE(metadata.model.empty());
++  EXPECT_FALSE(metadata.mobile);
++  EXPECT_EQ("upstream", metadata.full_version);
++  EXPECT_TRUE(metadata.wow64);
++  EXPECT_EQ(std::vector<std::string>({"Desktop"}), metadata.form_factors);
++  auto entry = catalog->ua_entries[0];
++  entry.mobile = true;
++  entry.model = "Synthetic phone";
++  entry.full_versions.clear();
++  EXPECT_TRUE(ApplyUaMetadata(entry, &metadata));
++  EXPECT_TRUE(metadata.mobile);
++  EXPECT_EQ("Synthetic phone", metadata.model);
++  EXPECT_TRUE(metadata.brand_full_version_list.empty());
++}
++
++TEST(BrowserBootstrap, CatalogRequiresProfileAndSafePathAndCannotBeRetried) {
++  ProfileBootstrapState absent;
++  int reads = 0;
++  auto reader = [&]() -> std::optional<std::string> {
++    ++reads;
++    return "invalid";
++  };
++  EXPECT_FALSE(absent.InitializeCatalog(true, true, reader));
++  EXPECT_EQ(0, reads);
++  EXPECT_EQ(nullptr, absent.ua());
++  EXPECT_FALSE(absent.InitializeCatalog(false, false, reader));
++  ProfileBootstrapState state;
++  ASSERT_TRUE(state.Initialize(true, true, []() -> std::optional<std::string> {
++    return std::string(reinterpret_cast<const char*>(kGolden), sizeof(kGolden));
++  }));
++  EXPECT_FALSE(state.InitializeCatalog(true, false, reader));
++  EXPECT_EQ(0, reads);
++  EXPECT_FALSE(state.InitializeCatalog(true, true, reader));
++  EXPECT_EQ(0, reads);
++  EXPECT_EQ(nullptr, state.ua());
++}
++TEST(BrowserBootstrap, RefusesEmptyRelativeTraversalAndNetworkPaths) {
++  EXPECT_FALSE(IsSafeProfilePath(base::FilePath()));
++  EXPECT_FALSE(IsSafeProfilePath(base::FilePath(FILE_PATH_LITERAL("profile.bin"))));
++  EXPECT_FALSE(IsSafeProfilePath(base::FilePath(FILE_PATH_LITERAL("//server/share/p.bin"))));
++  EXPECT_FALSE(IsSafeProfilePath(base::FilePath(FILE_PATH_LITERAL("/tmp/../p.bin"))));
++#if BUILDFLAG(IS_WIN)
++  EXPECT_FALSE(IsSafeProfilePath(base::FilePath(FILE_PATH_LITERAL("\\\\server\\share\\p.bin"))));
++  EXPECT_FALSE(IsSafeProfilePath(base::FilePath(FILE_PATH_LITERAL("\\\\?\\C:\\p.bin"))));
++#endif
++}
++TEST(BrowserBootstrap, SwitchPresenceDoesNotImplyValidPathOrAuthorization) {
++  base::CommandLine command(base::CommandLine::NO_PROGRAM);
++  EXPECT_FALSE(IsManagedBrowserCommand(command));
++  command.AppendSwitch(kProfileWireSwitch);
++  EXPECT_TRUE(IsManagedBrowserCommand(command));
++  EXPECT_FALSE(InitializeBrowserProfile(command));
++  EXPECT_EQ(nullptr, BrowserProfile());
++  // Failed startup cannot be replaced by a later no-profile initialization.
++  base::CommandLine other(base::CommandLine::NO_PROGRAM);
++  EXPECT_FALSE(InitializeBrowserProfile(other));
++  EXPECT_EQ(nullptr, BrowserProfile());
++}
++TEST(BrowserBootstrap, TouchPreferencesAreConsistentAndIdempotent) {
++  for (int points : {0, 1, 5, 10}) {
++    ParsedProfile profile;
++    profile.max_touch_points = points;
++    blink::web_pref::WebPreferences prefs;
++    ApplyTouchPreferences(profile, &prefs);
++    EXPECT_EQ(points, prefs.pointer_events_max_touch_points);
++    EXPECT_EQ(points != 0, prefs.touch_event_feature_detection_enabled);
++    const int pointer = points ? 2 : 4;
++    const int hover = points ? 1 : 2;
++    EXPECT_EQ(pointer, prefs.available_pointer_types);
++    EXPECT_EQ(pointer, static_cast<int>(prefs.primary_pointer_type));
++    EXPECT_EQ(hover, prefs.available_hover_types);
++    EXPECT_EQ(hover, static_cast<int>(prefs.primary_hover_type));
++    EXPECT_FALSE(ApplyTouchPreferences(profile, &prefs));
++  }
++}
++TEST(BrowserBootstrap, GoldenWireInitializesFrozenStateAndAppliesTouch) {
++  ProfileBootstrapState state;
++  int reads = 0;
++  const auto reader = [&]() -> std::optional<std::string> {
++    ++reads;
++    return std::string(reinterpret_cast<const char*>(kGolden), sizeof(kGolden));
++  };
++  ASSERT_TRUE(state.Initialize(true, true, reader));
++  const auto* profile = state.profile();
++  ASSERT_NE(nullptr, profile);
++  EXPECT_EQ(1, reads);
++  EXPECT_EQ(0u, profile->max_touch_points);
++  EXPECT_EQ(1920u, profile->width);
++  EXPECT_EQ(1080u, profile->height);
++  EXPECT_EQ(Platform::Windows, profile->platform);
++  EXPECT_EQ("env-1", profile->environment_id);
++  EXPECT_FALSE(state.Initialize(true, true, reader));
++  EXPECT_EQ(profile, state.profile());
++  EXPECT_EQ(1, reads);
++  // Touch=0 maps to fine pointer and hover through the shared applicator.
++  blink::web_pref::WebPreferences prefs;
++  EXPECT_TRUE(ApplyTouchPreferences(*profile, &prefs));
++  EXPECT_EQ(4, prefs.available_pointer_types);
++  EXPECT_EQ(2, prefs.available_hover_types);
++  EXPECT_EQ(0, prefs.pointer_events_max_touch_points);
++  EXPECT_FALSE(ApplyTouchPreferences(*profile, &prefs));
++}
++namespace {
++// RendererPreferences seeded the way a hostile/default Chrome process can
++// arrive: non-empty per-origin overrides, a non-empty mDNS local-IP
++// exemption list, and a custom UDP port range. Tests must never start from
++// freshly default-empty lists (docs/webrtc-contract-review.md gate 2).
++blink::RendererPreferences WebRtcHostilePrefs() {
++  blink::mojom::WebRtcIpHandlingPolicy policies[] = {
++      blink::mojom::WebRtcIpHandlingPolicy::kDefaultPublicInterfaceOnly,
++      blink::mojom::WebRtcIpHandlingPolicy::kDefault};
++  blink::RendererPreferences prefs;
++  prefs.webrtc_ip_handling_policy =
++      blink::mojom::WebRtcIpHandlingPolicy::kDefaultPublicAndPrivateInterfaces;
++  for (auto policy : policies) {
++    blink::WebRtcIpHandlingUrlEntry entry;
++    entry.url_pattern =
++        ContentSettingsPattern::FromString("https://override.test/*");
++    entry.handling = policy;
++    prefs.webrtc_ip_handling_urls.push_back(entry);
++  }
++  prefs.webrtc_local_ips_allowed_urls = {"https://exempt.test",
++                                         "https://intranet.test"};
++  prefs.webrtc_udp_min_port = 10000;
++  prefs.webrtc_udp_max_port = 10010;
++  return prefs;
++}
++}  // namespace
++
++TEST(BrowserBootstrap, WebRtcPolicyAbsentKeepsHostilePrefsUntouched) {
++  // Schema 1 wire: no policy statement, so upstream fields must survive
++  // exactly, including the per-origin overrides and mDNS exemptions.
++  ParsedProfile profile;
++  EXPECT_EQ(std::nullopt, profile.webrtc_policy);
++  auto prefs = WebRtcHostilePrefs();
++  const auto expected = prefs.webrtc_ip_handling_urls.size();
++  EXPECT_FALSE(ApplyWebRtcPolicy(profile, &prefs));
++  EXPECT_EQ(expected, prefs.webrtc_ip_handling_urls.size());
++  EXPECT_EQ(2u, prefs.webrtc_local_ips_allowed_urls.size());
++  EXPECT_EQ(10000, prefs.webrtc_udp_min_port);
++  EXPECT_EQ(10010, prefs.webrtc_udp_max_port);
++  // The golden schema 1 fixture decodes to nullopt as well.
++  auto decoded = DecodeProfile(std::span<const std::uint8_t>(
++      reinterpret_cast<const std::uint8_t*>(kGolden), sizeof(kGolden)));
++  ASSERT_TRUE(decoded);
++  ASSERT_EQ(1u, decoded->schema_version);
++  EXPECT_EQ(std::nullopt, decoded->webrtc_policy);
++  EXPECT_FALSE(ApplyWebRtcPolicy(*decoded, &prefs));
++}
++
++TEST(BrowserBootstrap, WebRtcPolicyExplicit0To3ClearsOverridesAndRetainsPorts) {
++  using blink::mojom::WebRtcIpHandlingPolicy;
++  // Anchors: enum order in third_party/blink/public/mojom/peerconnection/
++  // webrtc_ip_handling_policy.mojom:10-15 and the branch table in
++  // third_party/blink/renderer/modules/peerconnection/
++  // peer_connection_dependency_factory.cc (1052-1075).
++  const std::array<WebRtcIpHandlingPolicy, 4> expected = {
++      WebRtcIpHandlingPolicy::kDefault,
++      WebRtcIpHandlingPolicy::kDefaultPublicAndPrivateInterfaces,
++      WebRtcIpHandlingPolicy::kDefaultPublicInterfaceOnly,
++      WebRtcIpHandlingPolicy::kDisableNonProxiedUdp};
++  for (std::uint8_t value = 0; value <= 3; ++value) {
++    ParsedProfile profile;
++    profile.webrtc_policy = value;
++    auto prefs = WebRtcHostilePrefs();
++    EXPECT_TRUE(ApplyWebRtcPolicy(profile, &prefs))
++        << "value " << static_cast<int>(value);
++    EXPECT_EQ(expected.at(value), prefs.webrtc_ip_handling_policy);
++    // Effective-policy contract: profile policy takes priority, so both the
++    // per-origin override table and the mDNS exemption list are cleared.
++    EXPECT_TRUE(prefs.webrtc_ip_handling_urls.empty());
++    EXPECT_TRUE(prefs.webrtc_local_ips_allowed_urls.empty());
++    // Retained, unrelated to policy selection.
++    EXPECT_EQ(10000, prefs.webrtc_udp_min_port);
++    EXPECT_EQ(10010, prefs.webrtc_udp_max_port);
++    // Idempotent second application reports no change.
++    EXPECT_FALSE(ApplyWebRtcPolicy(profile, &prefs));
++  }
++}
++
++TEST(BrowserBootstrap, WebRtcPolicyInvalidValueRejectedWithoutMutation) {
++  // In-memory invalid values (a decoder-constructed profile must never
++  // carry these, but the helper guards anyway): prefs are unchanged.
++  for (std::uint8_t value : {std::uint8_t{4}, std::uint8_t{128},
++                             std::uint8_t{255}}) {
++    ParsedProfile profile;
++    profile.webrtc_policy = value;
++    auto prefs = WebRtcHostilePrefs();
++    const auto policy = prefs.webrtc_ip_handling_policy;
++    EXPECT_FALSE(ApplyWebRtcPolicy(profile, &prefs))
++        << "value " << static_cast<int>(value);
++    EXPECT_EQ(policy, prefs.webrtc_ip_handling_policy);
++    EXPECT_EQ(2u, prefs.webrtc_ip_handling_urls.size());
++    EXPECT_EQ(2u, prefs.webrtc_local_ips_allowed_urls.size());
++    EXPECT_EQ(10000, prefs.webrtc_udp_min_port);
++    EXPECT_EQ(10010, prefs.webrtc_udp_max_port);
++  }
++}
++
++TEST(BrowserBootstrap, ProfileWebRtcWrapperFollowsProfilePresence) {
++  auto prefs = WebRtcHostilePrefs();
++  const auto policy = prefs.webrtc_ip_handling_policy;
++  // No profile loaded (real-browser path before initialization): the
++  // wrapper is a no-op reporting false.
++  EXPECT_FALSE(ApplyProfileWebRtcPolicy(&prefs));
++  EXPECT_EQ(policy, prefs.webrtc_ip_handling_policy);
++  EXPECT_EQ(2u, prefs.webrtc_ip_handling_urls.size());
++  // With the golden schema 1 profile frozen into state: still a no-op.
++  ProfileBootstrapState state;
++  ASSERT_TRUE(state.Initialize(true, true,
++      [&]() -> std::optional<std::string> {
++        return std::string(reinterpret_cast<const char*>(kGolden),
++                           sizeof(kGolden));
++      }));
++  ASSERT_NE(nullptr, state.profile());
++  EXPECT_FALSE(ApplyWebRtcPolicy(*state.profile(), &prefs));
++  EXPECT_EQ(policy, prefs.webrtc_ip_handling_policy);
++  EXPECT_EQ(2u, prefs.webrtc_local_ips_allowed_urls.size());
++}
++
++TEST(BrowserBootstrap, ScreenInfosOverrideFollowsProfilePresence) {
++  display::ScreenInfo default_info;
++  default_info.rect = gfx::Rect(0, 0, 800, 600);
++  default_info.device_scale_factor = 1.f;
++  display::ScreenInfos infos(default_info);
++  // No profile: upstream values stay untouched.
++  EXPECT_FALSE(ApplyProfileScreenInfos(&infos));
++  EXPECT_EQ(800, infos.current().rect.width());
++  // With the golden profile loaded through the state reader: full override.
++  ProfileBootstrapState state;
++  ASSERT_TRUE(state.Initialize(true, true,
++                               [&]() -> std::optional<std::string> {
++                                 return std::string(
++                                     reinterpret_cast<const char*>(kGolden),
++                                     sizeof(kGolden));
++                               }));
++  ASSERT_NE(nullptr, state.profile());
++  EXPECT_TRUE(ApplyScreenInfos(*state.profile(), &infos));
++  EXPECT_EQ(1920, infos.current().rect.width());
++  EXPECT_EQ(1080, infos.current().rect.height());
++  EXPECT_EQ(0, infos.current().rect.x());
++  EXPECT_EQ(0, infos.current().rect.y());
++  EXPECT_EQ(1920, infos.current().available_rect.width());
++  EXPECT_EQ(1080, infos.current().available_rect.height());
++  EXPECT_FLOAT_EQ(1.f, infos.current().device_scale_factor);
++  EXPECT_EQ(24, infos.current().depth);
++}
++}  // namespace lengsuo
+diff --git a/lengsuo/integration/profile_bootstrap_state.cc b/lengsuo/integration/profile_bootstrap_state.cc
+new file mode 100644
+index 0000000000..a144dcbb72
+--- /dev/null
++++ b/lengsuo/integration/profile_bootstrap_state.cc
+@@ -0,0 +1,46 @@
++#include "lengsuo/integration/profile_bootstrap_state.h"
++#include <cstdint>
++#include <span>
++namespace lengsuo {
++ProfileBootstrapState::ProfileBootstrapState() = default;
++ProfileBootstrapState::~ProfileBootstrapState() = default;
++bool ProfileBootstrapState::Initialize(bool requested, bool safe_local_path,
++                                       const Reader& read) {
++  if (attempted_) return false;
++  attempted_ = true;
++  if (!requested) return true;
++  if (!safe_local_path) return false;
++  auto wire = read();
++  if (!wire || wire->empty() || wire->size() > 4096) return false;
++  auto parsed = DecodeProfile(std::span<const std::uint8_t>(
++      reinterpret_cast<const std::uint8_t*>(wire->data()), wire->size()));
++  // The standalone decoder supports schema 2, but browser-side WebRTC policy
++  // injection is not accepted yet. Never silently ignore an explicit policy.
++  if (!parsed || parsed->schema_version != 1) return false;
++  profile_ = std::move(parsed);
++  return true;
++}
++bool ProfileBootstrapState::InitializeCatalog(bool requested,
++                                             bool safe_local_path,
++                                             const Reader& read) {
++  if (catalog_attempted_) return false;
++  catalog_attempted_ = true;
++  if (!attempted_) return false;
++  if (!requested) return true;
++  if (!profile_ || !safe_local_path) return false;
++  auto wire = read();
++  if (!wire || wire->empty() || wire->size() > 4096) return false;
++  auto parsed = DecodeCatalog(std::span<const std::uint8_t>(
++      reinterpret_cast<const std::uint8_t*>(wire->data()), wire->size()));
++  if (!parsed || !ResolveCatalogUa(*parsed, *profile_)) return false;
++  catalog_ = std::move(parsed);
++  return true;
++}
++const CatalogUaEntry* ProfileBootstrapState::ua() const {
++  return catalog_ && profile_ ? ResolveCatalogUa(*catalog_, *profile_) : nullptr;
++}
++const CatalogGpuEntry* ProfileBootstrapState::gpu() const {
++  return catalog_ && profile_ ? ResolveCatalogGpu(*catalog_, *profile_)
++                             : nullptr;
++}
++}  // namespace lengsuo
+diff --git a/lengsuo/integration/profile_bootstrap_state.h b/lengsuo/integration/profile_bootstrap_state.h
+new file mode 100644
+index 0000000000..3bd62d6f81
+--- /dev/null
++++ b/lengsuo/integration/profile_bootstrap_state.h
+@@ -0,0 +1,30 @@
++#ifndef LENGSUO_INTEGRATION_PROFILE_BOOTSTRAP_STATE_H_
++#define LENGSUO_INTEGRATION_PROFILE_BOOTSTRAP_STATE_H_
++#include <functional>
++#include <optional>
++#include <string>
++#include "lengsuo/native/profile_wire.h"
++#include "lengsuo/native/profile_catalog.h"
++namespace lengsuo {
++// Browser startup only. No credentials, entitlement or network decisions.
++class ProfileBootstrapState {
++ public:
++  using Reader = std::function<std::optional<std::string>()>;
++  // Out-of-line: Chromium style requires it for complex members.
++  ProfileBootstrapState();
++  ~ProfileBootstrapState();
++  ProfileBootstrapState(const ProfileBootstrapState&) = delete;
++  ProfileBootstrapState& operator=(const ProfileBootstrapState&) = delete;
++  bool Initialize(bool requested, bool safe_local_path, const Reader& read);
++  bool InitializeCatalog(bool requested, bool safe_local_path, const Reader& read);
++  const ParsedProfile* profile() const { return profile_ ? &*profile_ : nullptr; }
++  const CatalogUaEntry* ua() const;
++  const CatalogGpuEntry* gpu() const;
++ private:
++  bool attempted_ = false;
++  std::optional<ParsedProfile> profile_;
++  bool catalog_attempted_ = false;
++  std::optional<ParsedCatalog> catalog_;
++};
++}  // namespace lengsuo
++#endif
+diff --git a/lengsuo/native/BUILD.gn b/lengsuo/native/BUILD.gn
+new file mode 100644
+index 0000000000..976173410c
+--- /dev/null
++++ b/lengsuo/native/BUILD.gn
+@@ -0,0 +1,27 @@
++# Decoder source sets. Chromium integration evidence lives in VERIFICATION.md.
++source_set("profile_wire") {
++  sources = [
++    "profile_wire.cc",
++    "profile_wire.h",
++    "wire_reader.h",
++  ]
++}
++
++source_set("profile_catalog") {
++  sources = [
++    "profile_catalog.cc",
++    "profile_catalog.h",
++  ]
++  public_deps = [ ":profile_wire" ]
++}
++
++source_set("canvas_noise") {
++  sources = [
++    "canvas_apply.cc",
++    "canvas_apply.h",
++    "canvas_noise.cc",
++    "fp_overrides.cc",
++    "fp_overrides.h",
++    "canvas_noise.h",
++  ]
++}
+diff --git a/lengsuo/native/canvas_apply.cc b/lengsuo/native/canvas_apply.cc
+new file mode 100644
+index 0000000000..3eb837cc3b
+--- /dev/null
++++ b/lengsuo/native/canvas_apply.cc
+@@ -0,0 +1,73 @@
++#include "canvas_apply.h"
++#include <span>
++#include <string_view>
++#include "canvas_noise.h"
++namespace lengsuo {
++namespace {
++bool g_enabled = false;
++std::uint64_t g_seed = 0;
++std::uint32_t g_slot = 0;
++}  // namespace
++void InitCanvasNoiseFromSwitch(const char* switch_value) {
++  g_enabled = false;
++  if (!switch_value) return;
++  const std::string_view value(switch_value);
++  const auto sep = value.find(':');
++  if (sep == std::string_view::npos || sep == 0 || sep + 1 >= value.size()) {
++    return;
++  }
++  const std::string_view seed_text = value.substr(0, sep);
++  const std::string_view slot_text = value.substr(sep + 1);
++  std::uint64_t seed = 0;
++  if (seed_text.empty() || seed_text.size() > 16) {
++    return;
++  }
++  for (const char c : seed_text) {
++    const int digit = (c >= '0' && c <= '9')   ? c - '0'
++                      : (c >= 'a' && c <= 'f') ? c - 'a' + 10
++                      : (c >= 'A' && c <= 'F') ? c - 'A' + 10
++                                               : -1;
++    if (digit < 0) {
++      return;
++    }
++    seed = (seed << 4) | static_cast<std::uint64_t>(digit);
++  }
++  if (seed == 0) {
++    return;
++  }
++  std::uint32_t slot = 0;
++  for (const char c : slot_text) {
++    if (c < '0' || c > '9') {
++      return;
++    }
++    slot = slot * 10u + static_cast<std::uint32_t>(c - '0');
++    if (slot > 0xFFFFFFFu) {
++      return;
++    }
++  }
++  if (slot_text.empty()) {
++    return;
++  }
++  g_seed = seed;
++  g_slot = slot;
++  g_enabled = true;
++}
++bool CanvasNoiseEnabled() { return g_enabled; }
++void ApplyProfileCanvasNoise(void* data, std::uint32_t width,
++                             std::uint32_t height, std::uint64_t stride) {
++  if (!g_enabled || !data || !width || !height) return;
++  canvas::CanvasNoiseConfig config;
++  config.algorithm_version = 1;
++  config.enabled = true;
++  config.seed = g_seed;
++  config.slot = g_slot;
++  const std::uint64_t buffer_size =
++      static_cast<std::uint64_t>(stride) * height;
++  const std::uint8_t* src = static_cast<const std::uint8_t*>(data);
++  std::uint8_t* dst = static_cast<std::uint8_t*>(data);
++  canvas::ApplyCanvasNoiseV1(
++      config, std::span<const std::uint8_t>(src, buffer_size),
++      std::span<std::uint8_t>(dst, buffer_size), width, height, stride,
++      buffer_size);
++}
++}  // namespace lengsuo
+diff --git a/lengsuo/native/canvas_apply.h b/lengsuo/native/canvas_apply.h
+new file mode 100644
+index 0000000000..58558f34c3
+--- /dev/null
++++ b/lengsuo/native/canvas_apply.h
+@@ -0,0 +1,19 @@
++// Renderer-side canvas noise application state and entry point.
++//
++// The browser passes seed/slot via the --lengsuo-managed-canvas switch
++// (hex seed + decimal slot). No profile file or secrets reach the renderer.
++// When the switch is absent the state is disabled and ApplyProfileCanvasNoise
++// is a no-op — upstream readback stays byte-identical.
++#ifndef LENGSUO_NATIVE_CANVAS_APPLY_H_
++#define LENGSUO_NATIVE_CANVAS_APPLY_H_
++#include <cstdint>
++namespace lengsuo {
++// Parses --lengsuo-managed-canvas=<hex-seed>:<slot>. Empty/invalid -> disabled.
++void InitCanvasNoiseFromSwitch(const char* switch_value);
++bool CanvasNoiseEnabled();
++// Applies noise in place to an RGBA8 buffer. No-op when disabled or on any
++// validation failure (never throws, never allocates).
++void ApplyProfileCanvasNoise(void* data, std::uint32_t width,
++                             std::uint32_t height, std::uint64_t stride);
++}  // namespace lengsuo
++#endif
+diff --git a/lengsuo/native/canvas_noise.cc b/lengsuo/native/canvas_noise.cc
+new file mode 100644
+index 0000000000..aab467209c
+--- /dev/null
++++ b/lengsuo/native/canvas_noise.cc
+@@ -0,0 +1,163 @@
++// canvas_noise v1 — implementation. See canvas_noise.h for the contract.
++//
++// The arithmetic mirrors tests/canvas_ref/gen_canvas_ref.py line for line:
++// all state is uint64 with wrapping (unsigned overflow IS the specified
++// modular arithmetic), the stream advances exactly two mixes per pixel in
++// row-major order regardless of transparency, and padding bytes are never
++// read or written.
++
++#include "canvas_noise.h"
++
++namespace lengsuo::canvas {
++namespace {
++
++constexpr std::uint64_t kConstA = 0x9E3779B97F4A7C15ULL;
++constexpr std::uint64_t kConstB = 0xC2B2AE3D27D4EB4FULL;
++constexpr std::uint64_t kConstMixSeed = 0xA24BAED5ULL;
++constexpr std::uint64_t kConstHi = 0x517CC1B727220A95ULL;
++constexpr std::uint64_t kConstLo = 0x4CF8E355ULL;
++
++struct MixPair {
++  std::uint64_t a;
++  std::uint64_t b;
++};
++
++std::uint64_t Rotl64(std::uint64_t x, int k) {
++  return (x << k) | (x >> (64 - k));
++}
++
++MixPair Mix(std::uint64_t a, std::uint64_t b) {
++  a += b;
++  a = Rotl64(a, 23);
++  a += b + kConstA;
++  b += a;
++  b = Rotl64(b, 45);
++  b += a + kConstB;
++  a += Rotl64(b, 31);
++  return {a, b};
++}
++
++bool ValidateGeometry(std::uint32_t width, std::uint32_t height,
++                      std::uint64_t stride, std::uint64_t buffer_size,
++                      std::size_t src_size, std::size_t dst_size,
++                      CanvasNoiseStatus& status) {
++  const std::uint64_t pixels =
++      static_cast<std::uint64_t>(width) * static_cast<std::uint64_t>(height);
++  if (width == 0 || height == 0 || width > 65535 || height > 65535 ||
++      pixels > (1ULL << 28)) {
++    status = CanvasNoiseStatus::kInvalidGeometry;
++    return false;
++  }
++  const std::uint64_t min_stride =
++      static_cast<std::uint64_t>(width) * 4ULL;
++  if (stride < min_stride || stride > (1ULL << 27) - 4ULL) {
++    status = CanvasNoiseStatus::kInvalidGeometry;
++    return false;
++  }
++  if (stride * height > buffer_size || buffer_size > src_size ||
++      buffer_size > dst_size) {
++    status = CanvasNoiseStatus::kBufferTooSmall;
++    return false;
++  }
++  if (buffer_size == 0 || src_size == 0 || dst_size == 0) {
++    status = CanvasNoiseStatus::kBufferTooSmall;
++    return false;
++  }
++  return true;
++}
++
++}  // namespace
++
++CanvasNoiseResult ApplyCanvasNoiseV1(const CanvasNoiseConfig& config,
++                                     std::span<const std::uint8_t> src,
++                                     std::span<std::uint8_t> dst,
++                                     std::uint32_t width,
++                                     std::uint32_t height,
++                                     std::uint64_t stride,
++                                     std::uint64_t buffer_size) {
++  CanvasNoiseResult result;
++  if (config.algorithm_version != 1) {
++    result.status = CanvasNoiseStatus::kUnsupportedVersion;
++    return result;
++  }
++  if (!ValidateGeometry(width, height, stride, buffer_size, src.size(),
++                        dst.size(), result.status)) {
++    return result;
++  }
++  if (!config.enabled) {
++    // Explicit off path: validated but never writes; whether to copy is the
++    // caller's decision (contract: no hidden copy side effect).
++    return result;
++  }
++
++  MixPair init = Mix(config.seed,
++                     (static_cast<std::uint64_t>(config.slot) << 32) ^
++                         kConstMixSeed);
++  std::uint64_t hi = init.a ^ config.seed ^ kConstHi ^
++                     (static_cast<std::uint64_t>(width) << 16) ^
++                     static_cast<std::uint64_t>(height);
++  std::uint64_t lo = (init.b + config.seed + (stride << 3)) ^ kConstLo ^
++                     (static_cast<std::uint64_t>(config.slot) * 0x9E3779B9ULL);
++  // The reference's derive() returns mix(hi, lo) — one extra mix that is part
++  // of derivation itself (see gen_canvas_ref.py::derive). The per-pixel loop
++  // then consumes two more mixes per pixel, row-major.
++  MixPair derived = Mix(hi, lo);
++  hi = derived.a;
++  lo = derived.b;
++
++  for (std::uint32_t row = 0; row < height; ++row) {
++    const std::size_t base = static_cast<std::size_t>(row) *
++                             static_cast<std::size_t>(stride);
++    for (std::uint32_t col = 0; col < width; ++col) {
++      const std::size_t p = base + static_cast<std::size_t>(col) * 4ULL;
++      MixPair s = Mix(hi, lo);
++      const std::uint64_t v1 = s.a ^ s.b;
++      // Second mix advances the stream only; the mild variant never scales
++      // the delta by v2 (that was the rejected plan-B formula).
++      s = Mix(s.a, s.b);
++      hi = s.a;
++      lo = s.b;
++
++      const std::uint8_t alpha = src[p + 3];
++      if (alpha == 0) {
++        // Fully transparent: all four bytes preserved byte-for-byte. When
++        // dst aliases src this is naturally a no-op; when it does not, the
++        // copy is still required by the contract.
++        dst[p + 0] = src[p + 0];
++        dst[p + 1] = src[p + 1];
++        dst[p + 2] = src[p + 2];
++        dst[p + 3] = src[p + 3];
++        ++result.preserved_pixels;
++        continue;
++      }
++
++      const std::int64_t d =
++          static_cast<std::int64_t>(v1 % 27ULL) - 13;  // [-13, 13]
++      // The reference uses Python floor division (`d * alpha // 255`), which
++      // rounds toward negative infinity; C++ `/` truncates toward zero. The
++      // difference only shows for negative numerators (e.g. -1152/255 is -5
++      // floored but -4 truncated), so division is implemented explicitly.
++      const std::int64_t numerator = d * static_cast<std::int64_t>(alpha);
++      const std::int64_t delta =
++          numerator >= 0 ? numerator / 255
++                         : -((-numerator + 254) / 255);
++      bool changed = false;
++      for (int c = 0; c < 3; ++c) {
++        const std::int64_t value =
++            static_cast<std::int64_t>(src[p + c]) + delta;
++        const std::uint8_t clamped = value < 0   ? 0
++                                     : value > 255 ? 255
++                                                   : static_cast<std::uint8_t>(value);
++        changed = changed || clamped != src[p + c];
++        dst[p + c] = clamped;
++      }
++      dst[p + 3] = alpha;  // alpha strictly preserved
++      if (changed) {
++        ++result.changed_pixels;
++      }
++    }
++  }
++  return result;
++}
++
++}  // namespace lengsuo::canvas
+diff --git a/lengsuo/native/canvas_noise.h b/lengsuo/native/canvas_noise.h
+new file mode 100644
+index 0000000000..668be59ca4
+--- /dev/null
++++ b/lengsuo/native/canvas_noise.h
+@@ -0,0 +1,31 @@
++// canvas_noiwarning: in the working copy of 'lengsuo/native/fp_overrides.cc', CRLF will be replaced by LF the next time Git touches it
+se v1 — deterministic RGBA8 pixel perturbation (pure algorithm).
++// Contract: lengsuo kernel repo docs/canvas-component-contract.md (plan A).
++// Reference bytes: kernel repo tests/canvas_ref/golden_fixture.inc.
++#ifndef LENGSUO_NATIVE_CANVAS_NOISE_H_
++#define LENGSUO_NATIVE_CANVAS_NOISE_H_
++#include <cstdint>
++#include <span>
++namespace lengsuo::canvas {
++enum class CanvasNoiseStatus : std::uint8_t {
++  kOk, kUnsupportedVersion, kInvalidGeometry, kBufferTooSmall,
++};
++struct CanvasNoiseConfig {
++  std::uint32_t algorithm_version{};
++  bool enabled{};
++  std::uint64_t seed{};
++  std::uint32_t slot{};
++};
++struct CanvasNoiseResult {
++  CanvasNoiseStatus status{CanvasNoiseStatus::kOk};
++  std::uint64_t changed_pixels{};
++  std::uint64_t preserved_pixels{};
++};
++CanvasNoiseResult ApplyCanvasNoiseV1(const CanvasNoiseConfig& config,
++                                     std::span<const std::uint8_t> src,
++                                     std::span<std::uint8_t> dst,
++                                     std::uint32_t width,
++                                     std::uint32_t height,
++                                     std::uint64_t stride,
++                                     std::uint64_t buffer_size);
++}  // namespace lengsuo::canvas
++#endif
+diff --git a/lengsuo/native/fp_overrides.cc b/lengsuo/native/fp_overrides.cc
+new file mode 100644
+index 0000000000..10ec1f8bee
+--- /dev/null
++++ b/lengsuo/native/fp_overrides.cc
+@@ -0,0 +1,267 @@
++// fp_overrides - renderer-side fingerprint override state.
++//
++// One switch carries everything:
++//   --lengsuo-managed-fp=<seed-hex>:<canvas>:<audio>:<rects>:<fonts>:<gpu>:
++//                        <ua>:<webgl-params>:<vendor>:<renderer>:<hwc>:<mem>
++// 0 (or empty, for the two strings) keeps that dimension native. Absent switch
++// => everything disabled and upstream behavior stays byte-identical.
++#include "lengsuo/native/fp_overrides.h"
++
++#include <array>
++#include <cstddef>
++#include <cstdint>
++#include <cstring>
++#include <span>
++#include <string_view>
++
++namespace lengsuo::fp {
++namespace {
++
++// SplitMix64 finalizer: cheap, well distributed, bit-identical everywhere.
++std::uint64_t Mix(std::uint64_t x) {
++  x += 0x9E3779B97F4A7C15ULL;
++  x = (x ^ (x >> 30)) * 0xBF58476D1CE4E5B9ULL;
++  x = (x ^ (x >> 27)) * 0x94D049BB133111EBULL;
++  return x ^ (x >> 31);
++}
++
++// Field indices of the switch payload.
++enum Field : std::size_t {
++  kSeed = 0,
++  kCanvas,
++  kAudio,
++  kRects,
++  kFonts,
++  kGpu,
++  kUa,
++  kWebglParams,
++  kVendor,
++  kRenderer,
++  kHwc,
++  kMem,
++  kFieldCount,
++};
++
++bool g_enabled = false;
++std::uint64_t g_seed = 0;
++std::uint64_t g_canvas = 0;
++std::uint64_t g_audio = 0;
++std::uint32_t g_rects = 0;
++std::uint32_t g_fonts = 0;
++std::uint32_t g_gpu = 0;
++std::uint32_t g_ua = 0;
++std::uint32_t g_webgl_params = 0;
++// Fixed-capacity owned copies. The switch payload is a temporary in the
++// caller, so views into it would dangle; std::string globals are disallowed
++// (exit-time destructor), hence plain buffers + std::span for indexing.
++constexpr std::size_t kMaxFaceLen = 128;
++std::array<char, kMaxFaceLen + 1> g_vendor_storage{};
++std::array<char, kMaxFaceLen + 1> g_renderer_storage{};
++std::uint32_t g_hw_concurrency = 0;
++std::uint32_t g_device_memory = 0;
++
++// Copies at most kMaxFaceLen chars and NUL-terminates. Returns a view of the
++// copied prefix (empty when the source was empty).
++std::string_view StoreFace(std::string_view text,
++                           std::array<char, kMaxFaceLen + 1>& storage) {
++  const std::size_t n = text.size() < kMaxFaceLen ? text.size() : kMaxFaceLen;
++  std::span<char> dst(storage);
++  for (std::size_t i = 0; i < n; ++i) {
++    dst[i] = text.at(i);
++  }
++  dst[n] = '\0';
++  return std::string_view(storage.data(), n);
++}
++
++std::uint32_t ParseDecimal(std::string_view text) {
++  if (text.empty() || text.size() > 9) {
++    return 0;
++  }
++  std::uint32_t value = 0;
++  for (const char c : text) {
++    if (c < '0' || c > '9') {
++      return 0;
++    }
++    value = value * 10u + static_cast<std::uint32_t>(c - '0');
++  }
++  return value;
++}
++
++bool ParseHex(std::string_view text, std::uint64_t* out) {
++  if (text.empty() || text.size() > 16) {
++    return false;
++  }
++  std::uint64_t value = 0;
++  for (const char c : text) {
++    std::uint64_t digit = 0;
++    if (c >= '0' && c <= '9') {
++      digit = static_cast<std::uint64_t>(c - '0');
++    } else if (c >= 'a' && c <= 'f') {
++      digit = static_cast<std::uint64_t>(c - 'a' + 10);
++    } else if (c >= 'A' && c <= 'F') {
++      digit = static_cast<std::uint64_t>(c - 'A' + 10);
++    } else {
++      return false;
++    }
++    value = (value << 4) | digit;
++  }
++  *out = value;
++  return true;
++}
++
++// A non-zero slot enables the dimension; the slot byte and the process seed
++// both feed the mixer so two profiles never collide on one dimension.
++std::uint64_t DeriveSlotSeed(std::uint32_t slot, std::uint64_t salt) {
++  return slot != 0 ? Mix(g_seed ^ salt ^ static_cast<std::uint64_t>(slot)) : 0;
++}
++
++}  // namespace
++
++void InitFromSwitch(std::string_view value) {
++  // Reset first so a malformed payload can never leave stale state behind.
++  g_enabled = false;
++  g_seed = 0;
++  g_canvas = 0;
++  g_audio = 0;
++  g_rects = 0;
++  g_fonts = 0;
++  g_gpu = 0;
++  g_ua = 0;
++  g_webgl_params = 0;
++  g_vendor_storage.fill(0);
++  g_renderer_storage.fill(0);
++  g_hw_concurrency = 0;
++  g_device_memory = 0;
++
++  std::array<std::string_view, kFieldCount> fields{};
++  std::size_t count = 0;
++  std::size_t start = 0;
++  for (std::size_t i = 0; i <= value.size() && count < kFieldCount; ++i) {
++    if (i == value.size() || value[i] == ':') {
++      fields.at(count) = value.substr(start, i - start);
++      ++count;
++      start = i + 1;
++    }
++  }
++  // The two face strings may legitimately be empty, so only the numeric prefix
++  // is mandatory.
++  if (count < kFieldCount - 2 || fields.at(kSeed).empty()) {
++    return;
++  }
++
++  std::uint64_t seed = 0;
++  if (!ParseHex(fields.at(kSeed), &seed) || seed == 0) {
++    return;
++  }
++  g_seed = seed;
++
++  const std::uint32_t canvas_slot = ParseDecimal(fields.at(kCanvas));
++  const std::uint32_t audio_slot = ParseDecimal(fields.at(kAudio));
++  g_rects = ParseDecimal(fields.at(kRects));
++  g_fonts = ParseDecimal(fields.at(kFonts));
++  g_gpu = ParseDecimal(fields.at(kGpu));
++  g_ua = ParseDecimal(fields.at(kUa));
++  g_webgl_params = ParseDecimal(fields.at(kWebglParams));
++  const std::string_view vendor = StoreFace(fields.at(kVendor),
++                                            g_vendor_storage);
++  const std::string_view renderer = StoreFace(fields.at(kRenderer),
++                                              g_renderer_storage);
++  g_hw_concurrency = ParseDecimal(fields.at(kHwc));
++  g_device_memory = ParseDecimal(fields.at(kMem));
++
++  g_canvas = DeriveSlotSeed(canvas_slot, 0xC4C0FFEEULL);
++  g_audio = DeriveSlotSeed(audio_slot, 0x0DEADBEEFULL);
++  g_enabled = true;
++  // Keep the stored views reachable for the accessors below.
++  (void)vendor;
++  (void)renderer;
++}
++
++bool Enabled() {
++  return g_enabled;
++}
++
++std::string_view WebGLVendor() {
++  if (g_gpu == 0) {
++    return std::string_view();
++  }
++  return std::string_view(g_vendor_storage.data(),
++                          std::strlen(g_vendor_storage.data()));
++}
++
++std::string_view WebGLRenderer() {
++  if (g_gpu == 0) {
++    return std::string_view();
++  }
++  return std::string_view(g_renderer_storage.data(),
++                          std::strlen(g_renderer_storage.data()));
++}
++
++std::uint32_t HardwareConcurrency() {
++  return g_hw_concurrency;
++}
++
++std::uint32_t DeviceMemoryGB() {
++  return g_device_memory;
++}
++
++double RectsJitterPx() {
++  // Must exceed LayoutUnit quantization (1/64 px) to be observable, yet stay
++  // sub-pixel so rendering is visually unchanged: 0.101..0.400 px.
++  return g_rects != 0 ? 0.101 + static_cast<double>(g_seed % 300u) * 0.001
++                      : 0.0;
++}
++
++std::uint64_t AudioSeed() {
++  return g_audio;
++}
++
++std::uint64_t WebGLParamsSeed() {
++  return DeriveSlotSeed(g_webgl_params, 0xA5A5A5A5ULL);
++}
++
++std::int32_t WebGLParamBias(std::uint32_t pname, std::int32_t original) {
++  if (g_webgl_params == 0) {
++    return original;
++  }
++  // Allow-list: only informational MAX_* capability caps form the WebGL
++  // fingerprint surface. State params (ACTIVE_TEXTURE, DEPTH_FUNC,
++  // CURRENT_PROGRAM, VIEWPORT, SCISSOR_BOX, ...) must pass through untouched
++  // or pages break. Values are Khronos GL enums; this translation unit does
++  // not include the GL headers.
++  switch (pname) {
++    case 0x0D33:  // GL_MAX_TEXTURE_SIZE
++    case 0x8073:  // GL_MAX_3D_TEXTURE_SIZE (WebGL2)
++    case 0x84E8:  // GL_MAX_RENDERBUFFER_SIZE
++    case 0x8517:  // GL_MAX_CUBE_MAP_TEXTURE_SIZE
++    case 0x8869:  // GL_MAX_VERTEX_ATTRIBS
++    case 0x8872:  // GL_MAX_TEXTURE_IMAGE_UNITS
++    case 0x88FF:  // GL_MAX_ARRAY_TEXTURE_LAYERS (WebGL2)
++    case 0x8B4C:  // GL_MAX_VERTEX_TEXTURE_IMAGE_UNITS
++    case 0x8B4D:  // GL_MAX_COMBINED_TEXTURE_IMAGE_UNITS
++    case 0x8D57:  // GL_MAX_SAMPLES
++    case 0x8D6B:  // GL_MAX_ELEMENT_INDEX (WebGL2)
++    case 0x8DFB:  // GL_MAX_VERTEX_UNIFORM_VECTORS
++    case 0x8DFC:  // GL_MAX_VARYING_VECTORS
++    case 0x8DFD:  // GL_MAX_FRAGMENT_UNIFORM_VECTORS
++      break;
++    default:
++      return original;
++  }
++  if (original <= 0) {
++    return original;
++  }
++  // Mix the cap value in so two profiles can share one dimension while still
++  // advertising different limits.
++  const std::uint64_t mixed =
++      Mix(WebGLParamsSeed() ^ (static_cast<std::uint64_t>(pname) << 24) ^
++          static_cast<std::uint64_t>(original));
++  // Stay inside +/-25% of the driver value; small caps move by at most 1.
++  const std::int64_t bound = original > 8 ? original / 4 : 1;
++  const std::uint64_t span = 2u * static_cast<std::uint64_t>(bound) + 1u;
++  const std::int64_t delta = static_cast<std::int64_t>(mixed % span) - bound;
++  const std::int64_t biased = static_cast<std::int64_t>(original) + delta;
++  return static_cast<std::int32_t>(biased > 0 ? biased : 1);
++}
++
++}  // namespace lengsuo::fp
+diff --git a/lengsuo/native/fp_overrides.h b/lengsuo/native/fp_overrides.h
+new file mode 100644
+index 0000000000..9df9ae4f7a
+--- /dev/null
++++ b/lengsuo/native/fp_overrides.h
+@@ -0,0 +1,26 @@
++// fp_overrides - renderer-side fingerprint override state.
++// One switch carries everything: --lengsuo-managed-fp=<seed-hex>:<a>:<c>:<r>:<f>:<g>:<u>:<w>
++// (slots: audio, canvas, rects, fonts, gpu, ua, webgl). Absent => all disabled,
++// upstream behavior byte-identical. Face resolution lives here (built-in tables).
++#ifndef LENGSUO_NATIVE_FP_OVERRIDES_H_
++#define LENGSUO_NATIVE_FP_OVERRIDES_H_
++#include <cstdint>
++#include <string_view>
++namespace lengsuo::fp {
++void InitFromSwitch(std::string_view value);
++bool Enabled();
++// WebGL faces resolved from seed+slot (deterministic).
++std::string_view WebGLVendor();
++std::string_view WebGLRenderer();
++std::uint32_t HardwareConcurrency();  // 0 = disabled
++std::uint32_t DeviceMemoryGB();       // 0 = disabled
++double RectsJitterPx();               // 0 = disabled
++std::uint64_t AudioSeed();
++
++// Slot 7: deterministic seed for WebGL MAX_* parameter perturbation.
++std::uint64_t WebGLParamsSeed();            // 0 = disabled
++// Deterministic bias for GLenum-typed int parameters (MAX_*, *_BITS...);
++// returns 0 when the webgl slot is off. Applied inside GetIntParameter.
++std::int32_t WebGLParamBias(std::uint32_t pname, std::int32_t original);
++}  // namespace lengsuo::fp
++#endif
+diff --git a/lengsuo/native/golden.inc b/lengsuo/native/golden.inc
+new file mode 100644
+index 0000000000..42c2deb283
+--- /dev/null
++++ b/lengsuo/native/golden.inc
+@@ -0,0 +1 @@
++constexpr unsigned char kGolden[] = {76,66,80,70,49,0,0,0,1,0,0,0,1,0,5,101,110,118,45,49,0,2,112,49,0,1,2,3,4,5,6,7,0,0,0,7,128,0,0,4,56,24,0,0,3,232,0,8,0,0,32,0,0,0,5,101,110,45,85,83,0,3,85,84,67,0,7,0,5,97,117,100,105,111,0,0,0,3,0,6,99,97,110,118,97,115,0,0,0,1,0,12,99,108,105,101,110,116,95,114,101,99,116,115,0,0,0,5,0,5,102,111,110,116,115,0,0,0,4,0,3,103,112,117,0,0,0,6,0,2,117,97,0,0,0,7,0,5,119,101,98,103,108,0,0,0,2};
+diff --git a/lengsuo/native/profile_catalog.cc b/lengsuo/native/profile_catalog.cc
+new file mode 100644
+index 0000000000..dcde68dc4a
+--- /dev/null
++++ b/lengsuo/native/profile_catalog.cc
+@@ -0,0 +1,155 @@
++#include "profile_catalog.h"
++
++#include <cstdint>
++#include <string_view>
++#include <vector>
++
++#include "wire_reader.h"
++
++namespace lengsuo {
++namespace {
++constexpr std::size_t kMaxContainer = 4096;
++constexpr std::size_t kMaxEntries = 16;
++constexpr std::size_t kMaxBrands = 8;
++constexpr std::size_t kMaxGpuEntries = 16;
++
++bool ReadBrand(WireReader& reader, CatalogBrand& brand) {
++  return reader.Text(brand.name, 32) && reader.Text(brand.version, 32);
++}
++
++// Trailing optional section: face tag "gpu", count, then per entry
++// slot(4) + vendor + renderer. Absent section = catalog carries no GPU faces.
++bool ReadGpuSection(WireReader& reader, std::vector<CatalogGpuEntry>& out) {
++  std::string tag;
++  if (!reader.Text(tag, 12, true) || tag != "gpu") {
++    return false;
++  }
++  std::uint32_t count = 0;
++  if (!reader.Number(count, 2) || count == 0 || count > kMaxGpuEntries) {
++    return false;
++  }
++  out.resize(count);
++  for (auto& entry : out) {
++    if (!reader.Number(entry.slot, 4) || !InRange(entry.slot, 1, 1048576) ||
++        !reader.Text(entry.vendor, 128) || !reader.Text(entry.renderer, 256)) {
++      return false;
++    }
++  }
++  for (std::size_t i = 0; i < out.size(); ++i) {
++    for (std::size_t j = i + 1; j < out.size(); ++j) {
++      if (out[i].slot == out[j].slot) {
++        return false;
++      }
++    }
++  }
++  return true;
++}
++bool ReadBrandList(WireReader& reader, std::vector<CatalogBrand>& out,
++                   bool allow_empty) {
++  std::uint32_t count;
++  if (!reader.Number(count, 1) || count > kMaxBrands ||
++      (!allow_empty && count == 0)) {
++    return false;
++  }
++  out.resize(count);
++  for (auto& brand : out) {
++    if (!ReadBrand(reader, brand)) {
++      return false;
++    }
++  }
++  return true;
++}
++}  // namespace
++
++std::optional<ParsedCatalog> DecodeCatalog(
++    std::span<const std::uint8_t> bytes) {
++  if (bytes.size() > kMaxContainer) {
++    return std::nullopt;
++  }
++  WireReader reader(bytes);
++  std::uint32_t value;
++  for (const auto character : std::string_view("LBPC1")) {
++    if (!reader.Number(value, 1) ||
++        value != static_cast<unsigned char>(character)) {
++      return std::nullopt;
++    }
++  }
++  ParsedCatalog catalog;
++  if (!reader.Number(catalog.schema_version, 4) ||
++      catalog.schema_version != 1 ||
++      !reader.Text(catalog.pool_version, 64, true)) {
++    return std::nullopt;
++  }
++  if (!reader.Number(value, 2) || value == 0 || value > kMaxEntries) {
++    return std::nullopt;
++  }
++  catalog.ua_entries.resize(value);
++  for (auto& entry : catalog.ua_entries) {
++    std::string face;
++    if (!reader.Text(face, 12, true) || face != "ua" ||
++        !reader.Number(entry.slot, 4) || !InRange(entry.slot, 1, 1048576) ||
++        !reader.Text(entry.ua_string, 512) ||
++        !ReadBrandList(reader, entry.brands, false) ||
++        !ReadBrandList(reader, entry.full_versions, true) ||
++        !reader.Text(entry.platform, 32) ||
++        !reader.Text(entry.platform_version, 64) ||
++        !reader.Text(entry.architecture, 32) ||
++        !reader.Text(entry.bitness, 8) ||
++        !reader.OptionalText(entry.model, 128)) {
++      return std::nullopt;
++    }
++    std::uint8_t mobile;
++    if (!reader.Byte(mobile) || mobile > 1) {
++      return std::nullopt;
++    }
++    entry.mobile = mobile == 1;
++  }
++  // Slots identify wire pool positions; duplicates make resolution ambiguous.
++  for (std::size_t i = 0; i < catalog.ua_entries.size(); ++i) {
++    for (std::size_t j = i + 1; j < catalog.ua_entries.size(); ++j) {
++      if (catalog.ua_entries[i].slot == catalog.ua_entries[j].slot) {
++        return std::nullopt;
++      }
++    }
++  }
++  // Optional trailing GPU section. A schema-1 catalog without it ends here,
++  // so every previously valid catalog keeps decoding unchanged.
++  if (!reader.End()) {
++    if (!ReadGpuSection(reader, catalog.gpu_entries)) {
++      return std::nullopt;
++    }
++    if (!reader.End()) {
++      return stdwarning: in the working copy of 'lengsuo/native/profile_wire.cc', CRLF will be replaced by LF the next time Git touches it
+::nullopt;
++    }
++  }
++  return catalog;
++}
++
++bool CatalogMatchesProfile(const ParsedCatalog& catalog,
++                           const ParsedProfile& profile) {
++  return !catalog.pool_version.empty() &&
++         catalog.pool_version == profile.pool_version;
++}
++const CatalogUaEntry* ResolveCatalogUa(const ParsedCatalog& catalog,
++                                      const ParsedProfile& profile) {
++  if (!CatalogMatchesProfile(catalog, profile)) return nullptr;
++  const CatalogUaEntry* selected = nullptr;
++  for (const auto& entry : catalog.ua_entries) {
++    if (entry.slot != profile.slots[5]) continue;
++    if (selected) return nullptr;
++    selected = &entry;
++  }
++  return selected;
++}
++const CatalogGpuEntry* ResolveCatalogGpu(const ParsedCatalog& catalog,
++                                        const ParsedProfile& profile) {
++  if (!CatalogMatchesProfile(catalog, profile)) return nullptr;
++  const CatalogGpuEntry* selected = nullptr;
++  for (const auto& entry : catalog.gpu_entries) {
++    if (entry.slot != profile.slots[4]) continue;
++    if (selected) return nullptr;
++    selected = &entry;
++  }
++  return selected;
++}
++}  // namespace lengsuo
+diff --git a/lengsuo/native/profile_catalog.h b/lengsuo/native/profile_catalog.h
+new file mode 100644
+index 0000000000..1c23aec506
+--- /dev/null
++++ b/lengsuo/native/profile_catalog.h
+@@ -0,0 +1,67 @@
++#ifndef LENGSUO_NATIVE_PROFILE_CATALOG_H_
++#define LENGSUO_NATIVE_PROFILE_CATALOG_H_
++
++#include <cstdint>
++#include <optional>
++#include <span>
++#include <string>
++#include <vector>
++
++#include "profile_wire.h"
++
++namespace lengsuo {
++// Decoding only: no signature/lease verification, runner authorization or
++// browser injection is implied by a decoded catalog.
++struct CatalogBrand {
++  std::string name;
++  std::string version;
++};
++
++// One resolved "ua" slot: exactly the values the two browser exits need
++// (override string and client-hints metadata). Fields the catalog does not
++// carry stay upstream; nothing is fabricated here.
++struct CatalogUaEntry {
++  std::uint32_t slot{};
++  std::string ua_string;
++  std::vector<CatalogBrand> brands;
++  std::vector<CatalogBrand> full_versions;
++  std::string platform;
++  std::string platform_version;
++  std::string architecture;
++  std::string bitness;
++  std::string model;
++  bool mobile{};
++};
++
++// One resolved "gpu" slot: the two WebGL face strings. Kept separate from UA
++// entries so a profile can pin GPU and UA independently.
++struct CatalogGpuEntry {
++  std::uint32_t slot{};
++  std::string vendor;
++  std::string renderer;
++};
++struct ParsedCatalog {
++  std::uint32_t schema_version{};
++  std::string pool_version;
++  std::vector<CatalogUaEntry> ua_entries;
++  // Absent in catalog schema 1; optional for backward compatibility.
++  std::vector<CatalogGpuEntry> gpu_entries;
++};
++
++// All malformed input returns nullopt; no partially parsed catalog escapes.
++std::optional<ParsedCatalog> DecodeCatalog(std::span<const std::uint8_t> bytes);
++
++// Binding check: a catalog may only serve a profile from the same pool.
++bool CatalogMatchesProfile(const ParsedCatalog& catalog,
++                           const ParsedProfile& profile);
++// Returns a borrowed entry only for an exact pool and unique UA-slot match.
++// The caller must keep the catalog alive and immutable while using the entry.
++const CatalogUaEntry* ResolveCatalogUa(const ParsedCatalog& catalog,
++                                      const ParsedProfile& profile);
++// Returns the unique GPU face for profile.slots[4], or nullptr when the
++// catalog carries no GPU section or the slot is missing/ambiguous. Caller
++// must keep the catalog alive.
++const CatalogGpuEntry* ResolveCatalogGpu(const ParsedCatalog& catalog,
++                                         const ParsedProfile& profile);
++}  // namespace lengsuo
++#endif
+diff --git a/lengsuo/native/profile_wire.cc b/lengsuo/native/profile_wire.cc
+new file mode 100644
+index 0000000000..a768f91d1e
+--- /dev/null
++++ b/lengsuo/native/profile_wire.cc
+@@ -0,0 +1,91 @@
++#include "profile_wire.h"
++
++#include <string_view>
++
++#include "wire_reader.h"
++
++namespace lengsuo {
++std::optional<ParsedProfile> DecodeProfile(
++    std::span<const std::uint8_t> bytes) {
++  if (bytes.size() > 4096) {
++    return std::nullopt;
++  }
++  WireReader reader(bytes);
++  std::uint32_t value;
++  for (const auto character : std::string_view("LBPF1")) {
++    if (!reader.Number(value, 1) ||
++        value != static_cast<unsigned char>(character)) {
++      return std::nullopt;
++    }
++  }
++  ParsedProfile profile;
++  if (!reader.Number(profile.schema_version, 4) ||
++      !InRange(profile.schema_version, 1, 2) ||
++      !reader.Number(profile.noise_version, 4) || profile.noise_version != 1 ||
++      !reader.Text(profile.environment_id, 64, true) ||
++      !reader.Text(profile.pool_version, 64, true)) {
++    return std::nullopt;
++  }
++  for (auto& byte : profile.noise_seed) {
++    if (!reader.Number(value, 1)) {
++      return std::nullopt;
++    }
++    byte = static_cast<std::uint8_t>(value);
++  }
++  if (!reader.Number(value, 1) || value > 4) {
++    return std::nullopt;
++  }
++  profile.platform = static_cast<Platform>(value);
++  if (!reader.Number(profile.width, 4) || !InRange(profile.width, 1, 16384) ||
++      !reader.Number(profile.height, 4) || !InRange(profile.height, 1, 16384) ||
++      static_cast<std::uint64_t>(profile.width) * profile.height >
++          64 * 1024 * 1024 ||
++      !reader.Number(value, 1) || (value != 8 && value != 24 && value != 30)) {
++    return std::nullopt;
++  }
++  profile.color_depth = static_cast<std::uint8_t>(value);
++  if (!reader.Number(profile.dpr_milli, 4) ||
++      !InRange(profile.dpr_milli, 1, 10000) || !reader.Number(value, 2) ||
++      !InRange(value, 1, 1024)) {
++    return std::nullopt;
++  }
++  profile.cpu_cores = static_cast<std::uint16_t>(value);
++  if (!reader.Number(profile.memory_mib, 4) ||
++      !InRange(profile.memory_mib, 128, 1048576) || !reader.Number(value, 1) ||
++      value > 10 ||
++      ((profile.platform == Platform::Android ||
++        profile.platform == Platform::Ios) && value == 0)) {
++    return std::nullopt;
++  }
++  profile.max_touch_points = static_cast<std::uint8_t>(value);
++  if (!reader.Text(profile.language, 35) || !reader.Text(profile.timezone, 64)) {
++    return std::nullopt;
++  }
++  // Schema 2 carries one webrtc policy byte after timezone and before the
++  // slot table (W3 layout, docs/webrtc-schema2-native.md);
++  // schema 1 offsets are unchanged and carry no statement.
++  if (profile.schema_version == 2) {
++    if (!reader.Number(value, 1) || value > 3) {
++      return std::nullopt;
++    }
++    profile.webrtc_policy = static_cast<std::uint8_t>(value);
++  }
++  if (!reader.Number(value, 2) || value != 7) {
++    return std::nullopt;
++  }
++  constexpr std::array<std::string_view, 7> names = {
++      "audio", "canvas", "client_rects", "fonts", "gpu", "ua", "webgl"};
++  for (std::size_t i = 0; i < names.size(); ++i) {
++    std::string name;
++    if (!reader.Text(name, 12, true) || name != names[i] ||
++        !reader.Number(profile.slots[i], 4) ||
++        !InRange(profile.slots[i], 1, 1048576)) {
++      return std::nullopt;
++    }
++  }
++  if (!reader.End()) {
++    return std::nullopt;
++  }
++  return profile;
++}
++}  // namespace lengsuo
+diff --git a/lengsuo/native/profile_wire.h b/lengsuo/native/profile_wire.h
+new file mode 100644
+index 0000000000..b40855cad5
+--- /dev/null
++++ b/lengsuo/native/profile_wire.h
+@@ -0,0 +1,47 @@
++#ifndef LENGSUO_NATIVE_PROFILE_WIRE_H_
++#define LENGSUO_NATIVE_PROFILE_WIRE_H_
++
++#include <array>
++#include <cstdint>
++#include <optional>
++#include <span>
++#include <string>
++
++namespace lengsuo {
++enum class Platform : std::uint8_t {
++  Windows,
++  Linux,
++  Macos,
++  Android,
++  Ios
++};
++
++// Wire decoding only: no catalog resolution, signature/lease verification,
++// browser injection or fingerprint acceptance is implied by this value.
++struct ParsedProfile {
++  std::uint32_t schema_version{};
++  std::uint32_t noise_version{};
++  std::string environment_id;
++  std::string pool_version;
++  std::array<std::uint8_t, 8> noise_seed{};
++  Platform platform{};
++  std::uint32_t width{};
++  std::uint32_t height{};
++  std::uint32_t dpr_milli{};
++  std::uint32_t memory_mib{};
++  std::uint16_t cpu_cores{};
++  std::uint8_t color_depth{};
++  std::uint8_t max_touch_points{};
++  std::string language;
++  std::string timezone;
++  // audio, canvas, client_rects, fonts, gpu, ua, webgl, in canonical order.
++  std::array<std::uint32_t, 7> slots{};
++  // Schema 2 only: blink WebRtcIpHandlingPolicy enum value 0..3. Schema 1
++  // profiles carry no statement (nullopt) and leave upstream behavior.
++  std::optional<std::uint8_t> webrtc_policy;
++};
++
++// All malformed input returns nullopt; no partially parsed profile escapes.
++std::optional<ParsedProfile> DecodeProfile(std::span<const std::uint8_t> bytes);
++}  // namespace lengsuo
++#endif
+diff --git a/lengsuo/native/wire_reader.h b/lengsuo/native/wire_reader.h
+new file mode 100644
+index 0000000000..3d4291b20a
+--- /dev/null
++++ b/lengsuo/native/wire_reader.h
+@@ -0,0 +1,74 @@
++#ifndef LENGSUO_NATIVE_WIRE_READER_H_
++#define LENGSUO_NATIVE_WIRE_READER_H_
++
++#include <cstddef>
++#include <cstdint>
++#include <span>
++#include <string>
++
++namespace lengsuo {
++// Bounded big-endian cursor shared by the LBPF1/LBPC1 decoders. Every read
++// either advances with validated data or fails; no partial field escapes.
++class WireReader {
++ public:
++  explicit WireReader(std::span<const std::uint8_t> bytes) : bytes_(bytes) {}
++
++  bool Number(std::uint32_t& out, std::size_t count) {
++    if (count > bytes_.size() - pos_) {
++      return false;
++    }
++    out = 0;
++    for (std::size_t i = 0; i < count; ++i) {
++      out = (out << 8) | bytes_[pos_++];
++    }
++    return true;
++  }
++
++  // Fixed-length (2-byte count) printable field; empty values fail.
++  bool Text(std::string& out, std::size_t max, bool identifier = false) {
++    return OptionalText(out, max, identifier) && !out.empty();
++  }
++
++  // Like Text() but a zero-length value is accepted and yields an empty
++  // string; used only where the format explicitly allows emptiness.
++  bool OptionalText(std::string& out, std::size_t max,
++                    bool identifier = false) {
++    std::uint32_t count;
++    if (!Number(count, 2) || count > max ||
++        count > bytes_.size() - pos_) {
++      return false;
++    }
++    out.clear();
++    for (std::uint32_t i = 0; i < count; ++i) {
++      const auto c = bytes_[pos_++];
++      const bool id = (c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z') ||
++                      (c >= '0' && c <= '9') || c == '-' || c == '_';
++      if (c < 32 || c > 126 || (identifier && !id)) {
++        return false;
++      }
++      out.push_back(static_cast<char>(c));
++    }
++    return true;
++  }
++
++  bool Byte(std::uint8_t& out) {
++    if (pos_ >= bytes_.size()) {
++      return false;
++    }
++    out = bytes_[pos_++];
++    return true;
++  }
++
++  bool End() const { return pos_ == bytes_.size(); }
++
++ private:
++  std::span<const std::uint8_t> bytes_;
++  std::size_t pos_ = 0;
++};
++
++inline bool InRange(std::uint32_t value, std::uint32_t low,
++                    std::uint32_t high) {
++  return value >= low && value <= high;
++}
++}  // namespace lengsuo
++#endif

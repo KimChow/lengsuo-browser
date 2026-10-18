@@ -61,12 +61,23 @@ struct EntrySpec {
   int mobile = 0;
 };
 
+struct GpuSpec {
+  std::uint32_t slot = 3;
+  std::string vendor = "Google Inc. (NVIDIA)";
+  std::string renderer = "ANGLE (NVIDIA, NVIDIA GeForce RTX 3060, D3D11)";
+};
+
 struct CatalogSpec {
   std::string magic = "LBPC1";
   std::uint32_t container_version = 1;
   std::string pool_version = "p1";
   int entry_count = -1;  // Negative: entries.size().
   std::vector<EntrySpec> entries{EntrySpec{}};
+  // Optional trailing GPU section. Empty = catalog carries no GPU faces, and
+  // the encoding must stay byte-identical to the schema-1 golden fixture.
+  std::vector<GpuSpec> gpu_entries{};
+  int gpu_count = -1;  // Negative: gpu_entries.size().
+  std::string gpu_tag = "gpu";
 };
 
 void Append(Bytes& out, const Bytes& tail) {
@@ -144,6 +155,18 @@ Bytes CatalogBytes(const CatalogSpec& spec) {
   for (int i = 0; i < entry_count && i < static_cast<int>(spec.entries.size());
        ++i) {
     Append(out, EntryBytes(spec.entries[static_cast<std::size_t>(i)]));
+  }
+  if (!spec.gpu_entries.empty() || spec.gpu_count >= 0) {
+    Append(out, Text(spec.gpu_tag));
+    const int gpu_count = ResolvedCount(spec.gpu_count, spec.gpu_entries.size());
+    Append(out, Fixed(static_cast<std::uint32_t>(gpu_count), 2));
+    for (int i = 0;
+         i < gpu_count && i < static_cast<int>(spec.gpu_entries.size()); ++i) {
+      const GpuSpec& gpu = spec.gpu_entries[static_cast<std::size_t>(i)];
+      Append(out, Fixed(gpu.slot, 4));
+      Append(out, Text(gpu.vendor));
+      Append(out, Text(gpu.renderer));
+    }
   }
   return out;
 }
@@ -338,6 +361,10 @@ int main() {
   ambiguous.ua_entries.push_back(ambiguous.ua_entries[0]);
   selected_profile.pool_version = "p1";
   Check(lengsuo::ResolveCatalogUa(ambiguous, selected_profile) == nullptr);
+
+  // The optional GPU section has its own test binary:
+  // native/profile_catalog_gpu_test.cc (keeps both files under the 400-line
+  // soft target required by AGENTS.md).
 
   std::cout << "PASS " << checks << " assertions\n";
   return 0;

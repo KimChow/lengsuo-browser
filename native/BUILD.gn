@@ -14,3 +14,14 @@ source_set("profile_catalog") {
   ]
   public_deps = [ ":profile_wire" ]
 }
+
+source_set("canvas_noise") {
+  sources = [
+    "canvas_apply.cc",
+    "canvas_apply.h",
+    "canvas_noise.cc",
+    "fp_overrides.cc",
+    "fp_overrides.h",
+    "canvas_noise.h",
+  ]
+}

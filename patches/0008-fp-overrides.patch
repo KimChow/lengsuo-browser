@@ -1,5 +1,5 @@
 diff --git a/chrome/browser/chrome_content_browser_client.cc b/chrome/browser/chrome_content_browser_client.cc
-index 19045777b3..fd4df1ca8a 100644
+index 19045777b3..6902984550 100644
 --- a/chrome/browser/chrome_content_browser_client.cc
 +++ b/chrome/browser/chrome_content_browser_client.cc
 @@ -4,6 +4,8 @@
@@ -11,7 +11,7 @@ index 19045777b3..fd4df1ca8a 100644
  #include <algorithm>
  #include <iterator>
  #include <map>
-@@ -2893,6 +2895,47 @@ void MaybeAppendBlinkSettingsSwitchForFieldTrial(
+@@ -2893,6 +2895,57 @@ void MaybeAppendBlinkSettingsSwitchForFieldTrial(
  void ChromeContentBrowserClient::AppendExtraCommandLineSwitches(
      base::CommandLine* command_line,
      int child_process_id) {
@@ -42,16 +42,26 @@ index 19045777b3..fd4df1ca8a 100644
 +            base::StringPrintf("%016llx:%u",
 +                               static_cast<unsigned long long>(canvas_seed),
 +                               browser_profile->slots[1]));
-+      // Combined fingerprint switch: seed + per-dimension slot bytes
-+      // (audio:canvas:rects:fonts:gpu:ua:webgl). 0 slot = native.
++      // Combined fingerprint switch. Field order is fixed by
++      // lengsuo/native/fp_overrides.cc:
++      //   seed:canvas:audio:rects:fonts:gpu:ua:webglParams:
++      //   vendor:renderer:hwc:mem
++      // Any slot at 0 leaves that dimension native. GPU faces come from the
++      // catalog's optional gpu section; absent entries stay empty so the
++      // renderer keeps the driver's own strings.
++      const lengsuo::CatalogGpuEntry* gpu_face = lengsuo::BrowserGpu();
 +      command_line->AppendSwitchASCII(
 +          "lengsuo-managed-fp",
-+          base::StringPrintf("%016llx:%u:%u:%u:%u:%u:%u:%u",
++          base::StringPrintf("%016llx:%u:%u:%u:%u:%u:%u:%u:%s:%s:%u:%u",
 +                             static_cast<unsigned long long>(canvas_seed),
-+                             browser_profile->slots[0], browser_profile->slots[1],
-+                             browser_profile->slots[4], browser_profile->slots[3],
-+                             browser_profile->slots[5], browser_profile->slots[6],
-+                             browser_profile->slots[6]));
++                             browser_profile->slots[1], browser_profile->slots[0],
++                             browser_profile->slots[3], browser_profile->slots[2],
++                             browser_profile->slots[4], browser_profile->slots[5],
++                             browser_profile->slots[6],
++                             gpu_face ? gpu_face->vendor.c_str() : "",
++                             gpu_face ? gpu_face->renderer.c_str() : "",
++                             browser_profile->cpu_cores,
++                             browser_profile->memory_mib / 1024));
 +
 +      }
 +    }
@@ -59,7 +69,7 @@ index 19045777b3..fd4df1ca8a 100644
    crash_keys::AppendStringAnnotationsCommandLineSwitch(command_line);
  #if BUILDFLAG(IS_MAC)
    std::unique_ptr<metrics::ClientInfo> client_info =
-@@ -3285,6 +3328,8 @@ ChromeContentBrowserClient::GetQuarantineConnectionCallback() {
+@@ -3285,6 +3338,8 @@ ChromeContentBrowserClient::GetQuarantineConnectionCallback() {
  }
  
  std::string ChromeContentBrowserClient::GetApplicationLocale() {
@@ -68,7 +78,7 @@ index 19045777b3..fd4df1ca8a 100644
    if (BrowserThread::CurrentlyOn(BrowserThread::IO)) {
      return GetIOThreadApplicationLocale();
    }
-@@ -3293,6 +3338,8 @@ std::string ChromeContentBrowserClient::GetApplicationLocale() {
+@@ -3293,6 +3348,8 @@ std::string ChromeContentBrowserClient::GetApplicationLocale() {
  
  std::string ChromeContentBrowserClient::GetAcceptLangs(
      content::BrowserContext* context) {
@@ -77,7 +87,7 @@ index 19045777b3..fd4df1ca8a 100644
    Profile* profile = Profile::FromBrowserContext(context);
    return profile->GetPrefs()->GetString(language::prefs::kAcceptLanguages);
  }
-@@ -4885,6 +4932,7 @@ void ChromeContentBrowserClient::OverrideWebPreferences(
+@@ -4885,6 +4942,7 @@ void ChromeContentBrowserClient::OverrideWebPreferences(
    for (auto& parts : extra_parts_) {
      parts->OverrideWebPreferences(web_contents, main_frame_site, web_prefs);
    }
@@ -85,7 +95,7 @@ index 19045777b3..fd4df1ca8a 100644
  
    web_prefs->prefers_default_scrollbar_styles =
        prefs->GetBoolean(prefs::kPrefersDefaultScrollbarStyles);
-@@ -4966,6 +5014,7 @@ bool ChromeContentBrowserClient::OverrideWebPreferencesAfterNavigation(
+@@ -4966,6 +5024,7 @@ bool ChromeContentBrowserClient::OverrideWebPreferencesAfterNavigation(
      prefs_changed |= parts->OverrideWebPreferencesAfterNavigation(
          web_contents, main_frame_site, web_prefs);
    }
@@ -93,7 +103,7 @@ index 19045777b3..fd4df1ca8a 100644
  
    const auto old_in_forced_colors = web_prefs->in_forced_colors;
    const auto old_is_forced_colors_disabled =
-@@ -7727,12 +7776,17 @@ std::string ChromeContentBrowserClient::GetProduct() {
+@@ -7727,12 +7786,17 @@ std::string ChromeContentBrowserClient::GetProduct() {
  }
  
  std::string ChromeContentBrowserClient::GetUserAgent() {
@@ -112,7 +122,7 @@ index 19045777b3..fd4df1ca8a 100644
  }
  
  std::optional<gfx::ImageSkia> ChromeContentBrowserClient::GetProductLogo() {
-@@ -9093,6 +9147,8 @@ bool ChromeContentBrowserClient::IsBlobUrlPartitioningEnabled(
+@@ -9093,6 +9157,8 @@ bool ChromeContentBrowserClient::IsBlobUrlPartitioningEnabled(
  bool ChromeContentBrowserClient::ShouldReduceAcceptLanguage(
      content::BrowserContext* browser_context) {
    DCHECK_CURRENTLY_ON(BrowserThread::UI);
@@ -234,7 +244,7 @@ index d611207944..96aa2ce5a5 100644
      "//gpu/command_buffer/client:gles2_implementation",
      "//gpu/command_buffer/client:gles2_interface",
 diff --git a/third_party/blink/renderer/modules/webgl/webgl_rendering_context_base.cc b/third_party/blink/renderer/modules/webgl/webgl_rendering_context_base.cc
-index b452298c24..e88ceed003 100644
+index b452298c24..c6c244d5b5 100644
 --- a/third_party/blink/renderer/modules/webgl/webgl_rendering_context_base.cc
 +++ b/third_party/blink/renderer/modules/webgl/webgl_rendering_context_base.cc
 @@ -169,6 +169,7 @@
@@ -249,7 +259,7 @@ index b452298c24..e88ceed003 100644
      case GL_RENDERBUFFER_BINDING:
        return WebGLAny(script_state, renderbuffer_binding_.Get());
      case GL_RENDERER:
-+      if (lengsuo::fp::Enabled()) {
++      if (lengsuo::fp::Enabled() && !lengsuo::fp::WebGLRenderer().empty()) {
 +        return WebGLAny(script_state,
 +                        String(std::string(lengsuo::fp::WebGLRenderer()).c_str()));
 +      }
@@ -260,7 +270,7 @@ index b452298c24..e88ceed003 100644
      case GC3D_UNPACK_COLORSPACE_CONVERSION_WEBGL:
        return WebGLAny(script_state, unpack_colorspace_conversion_);
      case GL_VENDOR:
-+      if (lengsuo::fp::Enabled()) {
++      if (lengsuo::fp::Enabled() && !lengsuo::fp::WebGLVendor().empty()) {
 +        return WebGLAny(script_state,
 +                        String(std::string(lengsuo::fp::WebGLVendor()).c_str()));
 +      }
@@ -271,7 +281,7 @@ index b452298c24..e88ceed003 100644
        return ScriptValue::CreateNull(script_state->GetIsolate());
      case WebGLDebugRendererInfo::kUnmaskedRendererWebgl:
        if (ExtensionEnabled(kWebGLDebugRendererInfoName)) {
-+        if (lengsuo::fp::Enabled()) {
++        if (lengsuo::fp::Enabled() && !lengsuo::fp::WebGLRenderer().empty()) {
 +          return WebGLAny(
 +              script_state,
 +              String(std::string(lengsuo::fp::WebGLRenderer()).c_str()));
@@ -283,7 +293,7 @@ index b452298c24..e88ceed003 100644
        return ScriptValue::CreateNull(script_state->GetIsolate());
      case WebGLDebugRendererInfo::kUnmaskedVendorWebgl:
        if (ExtensionEnabled(kWebGLDebugRendererInfoName)) {
-+        if (lengsuo::fp::Enabled()) {
++        if (lengsuo::fp::Enabled() && !lengsuo::fp::WebGLVendor().empty()) {
 +          return WebGLAny(
 +              script_state,
 +              String(std::string(lengsuo::fp::WebGLVendor()).c_str()));
@@ -291,3 +301,39 @@ index b452298c24..e88ceed003 100644
          return WebGLAny(script_state,
                          String(ContextGL()->GetString(GL_VENDOR)));
        }
+@@ -8021,6 +8040,9 @@ ScriptValue WebGLRenderingContextBase::GetIntParameter(
+   GLint value = 0;
+   if (!isContextLost()) {
+     ContextGL()->GetIntegerv(pname, &value);
++    // Lengsuo: deterministic bias on capability caps (fingerprint surface).
++    // Allow-list only; never touches viewport/scissor/range params.
++    value = lengsuo::fp::WebGLParamBias(pname, static_cast<std::int32_t>(value));
+     switch (pname) {
+       case GL_IMPLEMENTATION_COLOR_READ_FORMAT:
+       case GL_IMPLEMENTATION_COLOR_READ_TYPE:
+@@ -8041,8 +8063,11 @@ ScriptValue WebGLRenderingContextBase::GetInt64Parameter(
+     ScriptState* script_state,
+     GLenum pname) {
+   GLint64 value = 0;
+-  if (!isContextLost())
++  if (!isContextLost()) {
+     ContextGL()->GetInteger64v(pname, &value);
++    value = static_cast<GLint64>(lengsuo::fp::WebGLParamBias(
++        pname, static_cast<std::int32_t>(value)));
++  }
+   return WebGLAny(script_state, value);
+ }
+ 
+@@ -8050,8 +8075,11 @@ ScriptValue WebGLRenderingContextBase::GetUnsignedIntParameter(
+     ScriptState* script_state,
+     GLenum pname) {
+   GLint value = 0;
+-  if (!isContextLost())
++  if (!isContextLost()) {
+     ContextGL()->GetIntegerv(pname, &value);
++    value = lengsuo::fp::WebGLParamBias(
++        pname, static_cast<std::int32_t>(value));
++  }
+   return WebGLAny(script_state, static_cast<unsigned>(value));
+ }
+ 

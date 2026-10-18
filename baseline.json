@@ -40,6 +40,26 @@
     {
       "path": "patches/0008-profile-timezone.patch",
       "sha256": "867b3e70ae9588986f9eace97a2354da14c2821ff370bb6b2ca487b0f56a33c5"
+    },
+    {
+      "path": "patches/0007-canvas-readback.patch",
+      "sha256": "7618ff7b6354d73c705a4c950e8c6d295363be995defcc4e23dadaeb05769f80"
+    },
+    {
+      "path": "patches/0008-fp-overrides.patch",
+      "sha256": "285d52ce78d4350b8fb00b6c2ecd66de77ac2193819262952e87b13bc6dc9716"
+    },
+    {
+      "path": "patches/0009-rects-audio.patch",
+      "sha256": "06d566377206c7dea6e5a9c1ceba0398cb953c311399f7ea74efdcc05b5c18c8"
+    },
+    {
+      "path": "patches/0010-webgl-params.patch",
+      "sha256": "aa1078b3812b6aea0bfb5998816288cfc6f90d6577d6c1215d64d485b865d2cb"
+    },
+    {
+      "path": "patches/0011-lengsuo-sources.patch",
+      "sha256": "6daf62359ba47d17395c02d6659ae0a8d7d3d3eb4848e12f69f6b1c719edaa88"
     }
   ]
 }

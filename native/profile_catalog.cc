@@ -11,11 +11,39 @@ namespace {
 constexpr std::size_t kMaxContainer = 4096;
 constexpr std::size_t kMaxEntries = 16;
 constexpr std::size_t kMaxBrands = 8;
+constexpr std::size_t kMaxGpuEntries = 16;
 
 bool ReadBrand(WireReader& reader, CatalogBrand& brand) {
   return reader.Text(brand.name, 32) && reader.Text(brand.version, 32);
 }
 
+// Trailing optional section: face tag "gpu", count, then per entry
+// slot(4) + vendor + renderer. Absent section = catalog carries no GPU faces.
+bool ReadGpuSection(WireReader& reader, std::vector<CatalogGpuEntry>& out) {
+  std::string tag;
+  if (!reader.Text(tag, 12, true) || tag != "gpu") {
+    return false;
+  }
+  std::uint32_t count = 0;
+  if (!reader.Number(count, 2) || count == 0 || count > kMaxGpuEntries) {
+    return false;
+  }
+  out.resize(count);
+  for (auto& entry : out) {
+    if (!reader.Number(entry.slot, 4) || !InRange(entry.slot, 1, 1048576) ||
+        !reader.Text(entry.vendor, 128) || !reader.Text(entry.renderer, 256)) {
+      return false;
+    }
+  }
+  for (std::size_t i = 0; i < out.size(); ++i) {
+    for (std::size_t j = i + 1; j < out.size(); ++j) {
+      if (out[i].slot == out[j].slot) {
+        return false;
+      }
+    }
+  }
+  return true;
+}
 bool ReadBrandList(WireReader& reader, std::vector<CatalogBrand>& out,
                    bool allow_empty) {
   std::uint32_t count;
@@ -84,8 +112,15 @@ std::optional<ParsedCatalog> DecodeCatalog(
       }
     }
   }
+  // Optional trailing GPU section. A schema-1 catalog without it ends here,
+  // so every previously valid catalog keeps decoding unchanged.
   if (!reader.End()) {
-    return std::nullopt;
+    if (!ReadGpuSection(reader, catalog.gpu_entries)) {
+      return std::nullopt;
+    }
+    if (!reader.End()) {
+      return std::nullopt;
+    }
   }
   return catalog;
 }
@@ -101,6 +136,17 @@ const CatalogUaEntry* ResolveCatalogUa(const ParsedCatalog& catalog,
   const CatalogUaEntry* selected = nullptr;
   for (const auto& entry : catalog.ua_entries) {
     if (entry.slot != profile.slots[5]) continue;
+    if (selected) return nullptr;
+    selected = &entry;
+  }
+  return selected;
+}
+const CatalogGpuEntry* ResolveCatalogGpu(const ParsedCatalog& catalog,
+                                        const ParsedProfile& profile) {
+  if (!CatalogMatchesProfile(catalog, profile)) return nullptr;
+  const CatalogGpuEntry* selected = nullptr;
+  for (const auto& entry : catalog.gpu_entries) {
+    if (entry.slot != profile.slots[4]) continue;
     if (selected) return nullptr;
     selected = &entry;
   }
