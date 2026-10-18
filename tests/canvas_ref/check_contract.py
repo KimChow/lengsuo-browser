@@ -13,7 +13,11 @@ Checks, on the 5 synthetic vectors and fixed-seed repeats:
   4. input immutability: apply_v1 leaves src unchanged;
   5. src_bytes salt generator is algorithm-independent & stable;
   6. changed-pixel sanity: at least one vector both preserves
-     transparency and alters some opaque pixel (v4).
+     transparency and alters some opaque pixel (v4);
+  7. plan-A bound: every single-channel perturbation stays within
+     [-13, 13] (contract prose and pseudocode now agree on the mild
+     variant d*alpha/255; the retired (v2 & 0xFF) factor would break
+     this and is rejected here).
 Exits nonzero on any failure.
 """
 import importlib.util
@@ -71,6 +75,13 @@ for name, seed, slot, w, h, stride, src, expected in cases:
     before = bytes(src)
     ref.apply_v1(seed, slot, w, h, stride, src)
     check(bytes(src) == before, f"{name}: src unmodified by apply_v1")
+
+    # 7. plan-A perturbation bound: no channel moves by more than 13.
+    bound_ok = True
+    for p in pixels(w, h, stride):
+        for c in range(3):
+            bound_ok &= abs(expected[p + c] - src[p + c]) <= 13
+    check(bound_ok, f"{name}: per-channel perturbation within +/-13")
 
 # 5. input generator independent of algorithm internals & stable.
 gen_a = bytes(ref.src_bytes(64, 7))

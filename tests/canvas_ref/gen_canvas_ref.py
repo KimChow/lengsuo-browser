@@ -52,11 +52,17 @@ def apply_v1(seed, slot, width, height, stride, src):
             v2 = hi ^ lo
             if data[p + 3] == 0:
                 continue  # fully transparent: all four bytes preserved
+            # v1 mild variant (contract plan A): single-channel perturbation
+            # is d scaled by alpha/255, so |delta| <= 13. v2 is still drawn to
+            # advance the stream (two mixes per pixel, row-major) but does NOT
+            # scale the delta; multiplying by (v2 & 0xFF) pushed the bound to
+            # 13*255 = 3315 and clamped ~67% of channels to 0/255.
             d = (v1 % 27) - 13  # signed delta in [-13,13]
             alpha = data[p + 3]
-            k = ((v2 & 0xFF) * alpha) // 255
+            _v2_reserved = v2  # stream advance only; unused in mild scaling
+            delta = (d * alpha) // 255
             for c in range(3):
-                value = data[p + c] + d * k
+                value = data[p + c] + delta
                 out[p + c] = 0 if value < 0 else (255 if value > 255 else value)
             out[p + 3] = data[p + 3]
     return bytes(out)
