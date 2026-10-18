@@ -74,7 +74,8 @@ class H extends http.Server {
   }
 }
 const srv = new H();
-srv.listen(0, '127.0.0.1');
+let PORT = 0;
+const listening = new Promise((res) => srv.listen(0, '127.0.0.1', () => { PORT = srv.address().port; res(); }));
 
 // ---- runner ----
 function grab(tag, extraFlags) {
@@ -83,7 +84,7 @@ function grab(tag, extraFlags) {
     const dir = path.join(WORK, tag);
     fs.mkdirSync(dir, { recursive: true });
     const args = ['--headless', '--no-sandbox', '--no-first-run',
-      '--disable-sync', '--user-data-dir=' + dir, ...extraFlags, 'http://127.0.0.1:' + srv.address().port + '/'];
+      '--disable-sync', '--user-data-dir=' + dir, ...extraFlags, 'http://127.0.0.1:' + PORT + '/'];
     const p = spawn(CHROME, args, { stdio: 'ignore' });
     const dl = Date.now() + 40000;
     const t = setInterval(() => {
@@ -97,6 +98,7 @@ function grab(tag, extraFlags) {
 }
 
 (async () => {
+  await listening;
   const results = [];
   const push = (name, ok, detail) => results.push({ case: name, status: ok ? 'PASS' : 'FAIL', detail });
 

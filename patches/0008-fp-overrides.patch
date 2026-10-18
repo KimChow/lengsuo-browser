@@ -1,0 +1,293 @@
+diff --git a/chrome/browser/chrome_content_browser_client.cc b/chrome/browser/chrome_content_browser_client.cc
+index 19045777b3..fd4df1ca8a 100644
+--- a/chrome/browser/chrome_content_browser_client.cc
++++ b/chrome/browser/chrome_content_browser_client.cc
+@@ -4,6 +4,8 @@
+ 
+ #include "chrome/browser/chrome_content_browser_client.h"
+ 
++#include "lengsuo/integration/browser_bootstrap.h"
++
+ #include <algorithm>
+ #include <iterator>
+ #include <map>
+@@ -2893,6 +2895,47 @@ void MaybeAppendBlinkSettingsSwitchForFieldTrial(
+ void ChromeContentBrowserClient::AppendExtraCommandLineSwitches(
+     base::CommandLine* command_line,
+     int child_process_id) {
++  if (command_line->GetSwitchValueASCII(switches::kProcessType) ==
++      switches::kRendererProcess) {
++    // Direct-passthrough: when the browser itself was launched with
++    // --lengsuo-managed-fp (test harness mode, no profile wire), forward it
++    // verbatim so the renderer's InitFromSwitch can pick it up.
++    const base::CommandLine& browser_cmd = *base::CommandLine::ForCurrentProcess();
++    if (browser_cmd.HasSwitch("lengsuo-managed-fp") &&
++        !command_line->HasSwitch("lengsuo-managed-fp")) {
++      command_line->AppendSwitchASCII(
++          "lengsuo-managed-fp",
++          browser_cmd.GetSwitchValueASCII("lengsuo-managed-fp"));
++    }
++    if (const auto* browser_profile = lengsuo::BrowserProfile()) {
++      command_line->AppendSwitchASCII("lengsuo-managed-language",
++                                      browser_profile->language);
++      command_line->AppendSwitchASCII("lengsuo-managed-timezone",
++                                      browser_profile->timezone);
++      {
++        std::uint64_t canvas_seed = 0;
++        for (const std::uint8_t b : browser_profile->noise_seed) {
++          canvas_seed = (canvas_seed << 8) | b;
++        }
++        command_line->AppendSwitchASCII(
++            "lengsuo-managed-canvas",
++            base::StringPrintf("%016llx:%u",
++                               static_cast<unsigned long long>(canvas_seed),
++                               browser_profile->slots[1]));
++      // Combined fingerprint switch: seed + per-dimension slot bytes
++      // (audio:canvas:rects:fonts:gpu:ua:webgl). 0 slot = native.
++      command_line->AppendSwitchASCII(
++          "lengsuo-managed-fp",
++          base::StringPrintf("%016llx:%u:%u:%u:%u:%u:%u:%u",
++                             static_cast<unsigned long long>(canvas_seed),
++                             browser_profile->slots[0], browser_profile->slots[1],
++                             browser_profile->slots[4], browser_profile->slots[3],
++                             browser_profile->slots[5], browser_profile->slots[6],
++                             browser_profile->slots[6]));
++
++      }
++    }
++  }
+   crash_keys::AppendStringAnnotationsCommandLineSwitch(command_line);
+ #if BUILDFLAG(IS_MAC)
+   std::unique_ptr<metrics::ClientInfo> client_info =
+@@ -3285,6 +3328,8 @@ ChromeContentBrowserClient::GetQuarantineConnectionCallback() {
+ }
+ 
+ std::string ChromeContentBrowserClient::GetApplicationLocale() {
++  if (const auto* browser_profile = lengsuo::BrowserProfile())
++    return browser_profile->language;
+   if (BrowserThread::CurrentlyOn(BrowserThread::IO)) {
+     return GetIOThreadApplicationLocale();
+   }
+@@ -3293,6 +3338,8 @@ std::string ChromeContentBrowserClient::GetApplicationLocale() {
+ 
+ std::string ChromeContentBrowserClient::GetAcceptLangs(
+     content::BrowserContext* context) {
++  if (const auto* browser_profile = lengsuo::BrowserProfile())
++    return browser_profile->language;
+   Profile* profile = Profile::FromBrowserContext(context);
+   return profile->GetPrefs()->GetString(language::prefs::kAcceptLanguages);
+ }
+@@ -4885,6 +4932,7 @@ void ChromeContentBrowserClient::OverrideWebPreferences(
+   for (auto& parts : extra_parts_) {
+     parts->OverrideWebPreferences(web_contents, main_frame_site, web_prefs);
+   }
++  lengsuo::ApplyProfileTouchPreferences(web_prefs);
+ 
+   web_prefs->prefers_default_scrollbar_styles =
+       prefs->GetBoolean(prefs::kPrefersDefaultScrollbarStyles);
+@@ -4966,6 +5014,7 @@ bool ChromeContentBrowserClient::OverrideWebPreferencesAfterNavigation(
+     prefs_changed |= parts->OverrideWebPreferencesAfterNavigation(
+         web_contents, main_frame_site, web_prefs);
+   }
++  prefs_changed |= lengsuo::ApplyProfileTouchPreferences(web_prefs);
+ 
+   const auto old_in_forced_colors = web_prefs->in_forced_colors;
+   const auto old_is_forced_colors_disabled =
+@@ -7727,12 +7776,17 @@ std::string ChromeContentBrowserClient::GetProduct() {
+ }
+ 
+ std::string ChromeContentBrowserClient::GetUserAgent() {
++  if (const auto* ua = lengsuo::BrowserUa())
++    return ua->ua_string;
+   return embedder_support::GetUserAgent();
+ }
+ 
+ blink::UserAgentMetadata ChromeContentBrowserClient::GetUserAgentMetadata() {
+   DCHECK_CURRENTLY_ON(BrowserThread::UI);
+-  return embedder_support::GetUserAgentMetadata();
++  auto metadata = embedder_support::GetUserAgentMetadata();
++  if (const auto* ua = lengsuo::BrowserUa())
++    lengsuo::ApplyUaMetadata(*ua, &metadata);
++  return metadata;
+ }
+ 
+ std::optional<gfx::ImageSkia> ChromeContentBrowserClient::GetProductLogo() {
+@@ -9093,6 +9147,8 @@ bool ChromeContentBrowserClient::IsBlobUrlPartitioningEnabled(
+ bool ChromeContentBrowserClient::ShouldReduceAcceptLanguage(
+     content::BrowserContext* browser_context) {
+   DCHECK_CURRENTLY_ON(BrowserThread::UI);
++  // Managed profiles freeze one explicit language; do not negotiate from host prefs.
++  if (lengsuo::BrowserProfile()) return false;
+   const PrefService::Preference* pref =
+       Profile::FromBrowserContext(browser_context)
+           ->GetPrefs()
+diff --git a/content/renderer/BUILD.gn b/content/renderer/BUILD.gn
+index 6a40348748..66022beadb 100644
+--- a/content/renderer/BUILD.gn
++++ b/content/renderer/BUILD.gn
+@@ -228,6 +228,7 @@ target(link_target_type, "renderer") {
+   ]
+ 
+   deps = [
++    "//lengsuo/native:canvas_noise",
+     "//base",
+     "//base:i18n",
+     "//build:chromecast_buildflags",
+diff --git a/content/renderer/renderer_main.cc b/content/renderer/renderer_main.cc
+index 2fd21f7ee5..cc2d2fd932 100644
+--- a/content/renderer/renderer_main.cc
++++ b/content/renderer/renderer_main.cc
+@@ -89,6 +89,9 @@
+ #include "mojo/public/cpp/bindings/lib/test_random_mojo_delays.h"
+ #endif
+ 
++#include "lengsuo/native/canvas_apply.h"
++#include "lengsuo/native/fp_overrides.h"
++
+ namespace content {
+ namespace {
+ 
+@@ -155,6 +158,23 @@ int RendererMain(MainFunctionParams parameters) {
+ 
+   const base::CommandLine& command_line = *parameters.command_line;
+ 
++  // Browser passes only the frozen language, never the profile file or secrets.
++  // Linux zygote children inherit ICU state; --lang alone does not reset it.
++  if (command_line.HasSwitch("lengsuo-managed-canvas")) {
++    lengsuo::InitCanvasNoiseFromSwitch(
++        command_line.GetSwitchValueASCII("lengsuo-managed-canvas").c_str());
++  }
++  if (command_line.HasSwitch("lengsuo-managed-fp")) {
++    lengsuo::fp::InitFromSwitch(
++        command_line.GetSwitchValueASCII("lengsuo-managed-fp"));
++  }
++  if (command_line.HasSwitch("lengsuo-managed-language")) {
++    const auto locale =
++        command_line.GetSwitchValueASCII("lengsuo-managed-language");
++    if (locale.empty()) return 1;
++    base::i18n::SetICUDefaultLocale(locale);
++  }
++
+ #if BUILDFLAG(IS_MAC)
+   base::apple::ScopedNSAutoreleasePool* pool = parameters.autorelease_pool;
+ #endif  // BUILDFLAG(IS_MAC)
+diff --git a/third_party/blink/renderer/core/BUILD.gn b/third_party/blink/renderer/core/BUILD.gn
+index 383115087f..6dad2cb479 100644
+--- a/third_party/blink/renderer/core/BUILD.gn
++++ b/third_party/blink/renderer/core/BUILD.gn
+@@ -248,6 +248,7 @@ rust_static_library("xml_ffi") {
+   ]
+   cxx_bindings = [ crate_root ]
+   deps = [
++    "//lengsuo/native:canvas_noise",
+     "//third_party/blink/renderer/platform/wtf",
+     "//third_party/rust/cxx/v1:lib",
+     "//third_party/rust/xml/v1:lib",
+diff --git a/third_party/blink/renderer/core/frame/navigator_concurrent_hardware.cc b/third_party/blink/renderer/core/frame/navigator_concurrent_hardware.cc
+index f5c0db2d1b..59e9f89e87 100644
+--- a/third_party/blink/renderer/core/frame/navigator_concurrent_hardware.cc
++++ b/third_party/blink/renderer/core/frame/navigator_concurrent_hardware.cc
+@@ -5,10 +5,14 @@
+ #include "third_party/blink/renderer/core/frame/navigator_concurrent_hardware.h"
+ 
+ #include "base/system/sys_info.h"
++#include "lengsuo/native/fp_overrides.h"
+ 
+ namespace blink {
+ 
+ unsigned NavigatorConcurrentHardware::hardwareConcurrency() const {
++  if (lengsuo::fp::Enabled() && lengsuo::fp::HardwareConcurrency() != 0) {
++    return lengsuo::fp::HardwareConcurrency();
++  }
+   return static_cast<unsigned>(base::SysInfo::NumberOfProcessors());
+ }
+ 
+diff --git a/third_party/blink/renderer/core/frame/navigator_device_memory.cc b/third_party/blink/renderer/core/frame/navigator_device_memory.cc
+index 05fa33e456..0efe0b0fed 100644
+--- a/third_party/blink/renderer/core/frame/navigator_device_memory.cc
++++ b/third_party/blink/renderer/core/frame/navigator_device_memory.cc
+@@ -8,10 +8,14 @@
+ #include "third_party/blink/public/mojom/use_counter/metrics/web_feature.mojom-shared.h"
+ #include "third_party/blink/renderer/core/dom/document.h"
+ #include "third_party/blink/renderer/core/frame/local_dom_window.h"
++#include "lengsuo/native/fp_overrides.h"
+ 
+ namespace blink {
+ 
+ float NavigatorDeviceMemory::deviceMemory() const {
++  if (lengsuo::fp::Enabled() && lengsuo::fp::DeviceMemoryGB() != 0) {
++    return lengsuo::fp::DeviceMemoryGB();
++  }
+   return ApproximatedDeviceMemory::GetApproximatedDeviceMemory();
+ }
+ 
+diff --git a/third_party/blink/renderer/modules/webgl/BUILD.gn b/third_party/blink/renderer/modules/webgl/BUILD.gn
+index d611207944..96aa2ce5a5 100644
+--- a/third_party/blink/renderer/modules/webgl/BUILD.gn
++++ b/third_party/blink/renderer/modules/webgl/BUILD.gn
+@@ -195,6 +195,7 @@ blink_modules_sources("webgl") {
+ 
+   public_deps = [ "//device/vr/public/mojom:vr_service_blink" ]
+   deps = [
++    "//lengsuo/native:canvas_noise",
+     "//device/vr/buildflags",
+     "//gpu/command_buffer/client:gles2_implementation",
+     "//gpu/command_buffer/client:gles2_interface",
+diff --git a/third_party/blink/renderer/modules/webgl/webgl_rendering_context_base.cc b/third_party/blink/renderer/modules/webgl/webgl_rendering_context_base.cc
+index b452298c24..e88ceed003 100644
+--- a/third_party/blink/renderer/modules/webgl/webgl_rendering_context_base.cc
++++ b/third_party/blink/renderer/modules/webgl/webgl_rendering_context_base.cc
+@@ -169,6 +169,7 @@
+ #include "third_party/skia/include/core/SkImage.h"
+ #include "third_party/skia/include/gpu/ganesh/GrTypes.h"
+ #include "ui/gfx/geometry/size.h"
++#include "lengsuo/native/fp_overrides.h"
+ 
+ 
+ // Populates parameters from texImage2D except for border, width, height, and
+@@ -4120,6 +4121,10 @@ ScriptValue WebGLRenderingContextBase::getParameter(ScriptState* script_state,
+     case GL_RENDERBUFFER_BINDING:
+       return WebGLAny(script_state, renderbuffer_binding_.Get());
+     case GL_RENDERER:
++      if (lengsuo::fp::Enabled()) {
++        return WebGLAny(script_state,
++                        String(std::string(lengsuo::fp::WebGLRenderer()).c_str()));
++      }
+       return WebGLAny(script_state, String("WebKit WebGL"));
+     case GL_SAMPLE_ALPHA_TO_COVERAGE:
+       return GetBooleanParameter(script_state, pname);
+@@ -4198,6 +4203,10 @@ ScriptValue WebGLRenderingContextBase::getParameter(ScriptState* script_state,
+     case GC3D_UNPACK_COLORSPACE_CONVERSION_WEBGL:
+       return WebGLAny(script_state, unpack_colorspace_conversion_);
+     case GL_VENDOR:
++      if (lengsuo::fp::Enabled()) {
++        return WebGLAny(script_state,
++                        String(std::string(lengsuo::fp::WebGLVendor()).c_str()));
++      }
+       return WebGLAny(script_state, String("WebKit"));
+     case GL_VERSION:
+       return WebGLAny(
+@@ -4216,6 +4225,11 @@ ScriptValue WebGLRenderingContextBase::getParameter(ScriptState* script_state,
+       return ScriptValue::CreateNull(script_state->GetIsolate());
+     case WebGLDebugRendererInfo::kUnmaskedRendererWebgl:
+       if (ExtensionEnabled(kWebGLDebugRendererInfoName)) {
++        if (lengsuo::fp::Enabled()) {
++          return WebGLAny(
++              script_state,
++              String(std::string(lengsuo::fp::WebGLRenderer()).c_str()));
++        }
+         return WebGLAny(script_state,
+                         String(ContextGL()->GetString(GL_RENDERER)));
+       }
+@@ -4225,6 +4239,11 @@ ScriptValue WebGLRenderingContextBase::getParameter(ScriptState* script_state,
+       return ScriptValue::CreateNull(script_state->GetIsolate());
+     case WebGLDebugRendererInfo::kUnmaskedVendorWebgl:
+       if (ExtensionEnabled(kWebGLDebugRendererInfoName)) {
++        if (lengsuo::fp::Enabled()) {
++          return WebGLAny(
++              script_state,
++              String(std::string(lengsuo::fp::WebGLVendor()).c_str()));
++        }
+         return WebGLAny(script_state,
+                         String(ContextGL()->GetString(GL_VENDOR)));
+       }
