@@ -743,7 +743,7 @@ index 0000000..3bd62d6
 +#endif
 diff --git a/lengsuo/native/BUILD.gn b/lengsuo/native/BUILD.gn
 new file mode 100644
-index 0000000..b9464b1
+index 0000000..a383a3e
 --- /dev/null
 +++ b/lengsuo/native/BUILD.gn
 @@ -0,0 +1,32 @@
@@ -771,10 +771,10 @@ index 0000000..b9464b1
 +    "canvas_noise.cc",
 +    "fp_overrides.cc",
 +    "fp_overrides.h",
-+    "font_face_set_filter.cc",
-+    "font_face_set_filter.h",
-+    "font_substitution.cc",
-+    "font_substitution.h",
++    "font_family_traits.cc",
++    "font_family_traits.h",
++    "font_metrics.cc",
++    "font_metrics.h",
 +    "canvas_noise.h",
 +    "product_brand.h",
 +  ]
@@ -1111,44 +1111,43 @@ index 0000000..b6cced4
 +}  // namespace lengsuo::canvas
 +
 +#endif  // LENGSUO_NATIVE_CANVAS_NOISE_H_
-diff --git a/lengsuo/native/font_face_set_filter.cc b/lengsuo/native/font_face_set_filter.cc
+diff --git a/lengsuo/native/font_family_traits.cc b/lengsuo/native/font_family_traits.cc
 new file mode 100644
-index 0000000..26bb2c6
+index 0000000..6002a61
 --- /dev/null
-+++ b/lengsuo/native/font_face_set_filter.cc
++++ b/lengsuo/native/font_family_traits.cc
 @@ -0,0 +1,5 @@
-+// The filter itself is header-only (native/font_face_set_filter.h). This
++// The traits decoder is header-only (native/font_family_traits.h). This
 +// translation unit exists so the CMake and GN targets have a stable source and
 +// the header is compiled and -Werror-checked even when only the library, not
 +// the test, is built.
-+#include "font_face_set_filter.h"
-diff --git a/lengsuo/native/font_face_set_filter.h b/lengsuo/native/font_face_set_filter.h
++#include "font_family_traits.h"
+diff --git a/lengsuo/native/font_family_traits.h b/lengsuo/native/font_family_traits.h
 new file mode 100644
-index 0000000..3b23965
+index 0000000..8da381c
 --- /dev/null
-+++ b/lengsuo/native/font_face_set_filter.h
-@@ -0,0 +1,144 @@
-+// font_face_set_filter - the font dimension's availability set.
++++ b/lengsuo/native/font_family_traits.h
+@@ -0,0 +1,156 @@
++// font_family_traits - the fonts dimension's {switcher, value, mask} shape.
 +//
-+// The profile's font slot (slots[3]) has been decoded since schema 1, but
-+// nothing consumed it: `document.fonts.check()` and `measureText()` answered
-+// from the host's real font list, so changing the slot changed nothing a page
-+// could observe. This is the consumer's data structure.
++// docs/cc-task-rulings.md §C: 对标端 gives every overridable dimension the same
++// shape -- {switcher, value, default_value} -- and for fonts the value is a
++// semicolon-separated family string ("Arial;Arial Black"), not a structured
++// list. Our profile encodes the fonts dimension as one slot number, which is
++// why nothing consumed it; this header is the missing decoder from that slot
++// plus the switch's value/mask fields into the shape the mechanism needs.
 +//
-+// It carries *availability only*. It deliberately does not carry glyph or
-+// metric data: the pixel layer cannot be faked (docs/gpu-and-detection-plan.md
-+// three-layer model), so a family that is answerable as "present" is still
-+// shaped by the machine's real font. Availability and measurement therefore
-+// stay consistent by construction -- hiding a family hides its widths with it.
++// It does NOT carry a font inventory. 对标端's full family pool lives on its
++// server and was never captured, so no list is invented here: an empty value
++// is a legitimate statement ("use the mask"), and the family names are only
++// ever the ones the profile actually sent.
 +//
-+// Header-only: the filter is three small operations over a caller-owned table
-+// and gains nothing from a translation unit. It must not pull platform
-+// headers, because it is compiled both into the standalone native tests and
-+// into Blink.
++// Header-only: three small operations over caller-owned strings, compiled both
++// into the standalone native tests and into Blink (no platform headers).
 +//
-+// Contract: docs/font-dimension.md.
-+#ifndef LENGSUO_NATIVE_FONT_FACE_SET_FILTER_H_
-+#define LENGSUO_NATIVE_FONT_FACE_SET_FILTER_H_
++// Contract doc: docs/font-dimension.md.
++#ifndef LENGSUO_NATIVE_FONT_FAMILY_TRAITS_H_
++#define LENGSUO_NATIVE_FONT_FAMILY_TRAITS_H_
 +
 +#include <cstddef>
 +#include <cstdint>
@@ -1156,253 +1155,295 @@ index 0000000..3b23965
 +#include <string_view>
 +#include <vector>
 +
-+namespace lengsuo::fp {
++namespace lengsuo::fonts {
 +
-+// Tri-state answer. kNotInitialized is a distinct value rather than "empty",
-+// because "this profile says there are no fonts" and "this profile says
-+// nothing about fonts" must not collapse into the same behaviour.
-+enum class FontFaceSetStatus : std::uint8_t {
-+  kNotInitialized = 0,
-+  kAbsent = 1,
-+  kPresent = 2,
-+  kInit = 3,  // the set applies, independent of this family's membership
++// Upper bounds are what the profile wire accepts for the same fields
++// (profile_wire.cc), so a hostile payload cannot make the switch accept what
++// the wire rejects.
++inline constexpr std::size_t kMaxFamilyName = 128;
++inline constexpr std::size_t kMaxFamilyValue = 4096;
++inline constexpr std::size_t kMaxFamilyCount = 64;
++
++struct FamilyTraits {
++  // False when the profile said nothing about fonts (slot 0) or the payload was
++  // malformed; the caller must then leave measurement byte-identical to native.
++  bool installed{false};
++  // The profile's raw font slot, kept for diagnostics/tests.
++  std::uint32_t slot{};
++  // The family names the profile declared, in wire order. May be empty: a mask
++  // can ask for metric perturbation without naming families.
++  std::vector<std::string> families;
++  // Whether the font metric perturbation is active. True iff installed and the
++  // profile made a statement: a non-empty value, or a non-zero family mask.
++  bool perturbs_metrics{false};
 +};
 +
-+// Case-sensitive: CSS font family names are case-sensitive, and the browser
-+// compares the resolved family name, not the authored one.
-+class FontFaceSetFilter {
-+ public:
-+  static constexpr std::size_t kMaxEntries = 64;
-+  static constexpr std::size_t kMaxName = 128;
-+  static constexpr std::size_t kMaxPayload = 2048;
++// Splits 对标端's semicolon-separated value. Blank elements and duplicates are
++// dropped; interior spaces are preserved (family names may contain them). A
++// malformed element rejects the whole value (returns empty).
++std::vector<std::string> ParseSemicolonFamilies(std::string_view value);
 +
-+  FontFaceSetFilter() = default;
++// Decodes (slot, value, mask) into the mechanism's input.
++//
++//   * slot == 0              -> not installed: "the profile said nothing",
++//                               identical to the GPU dimension's slot 0.
++//   * value non-empty        -> installed; a non-empty family list is itself
++//                               the statement, so metrics are perturbed even
++//                               when mask is 0 (the service default).
++//   * value empty, mask != 0 -> installed; the mask is the only statement.
++//   * value empty, mask == 0 -> installed but dormant: nothing declares a
++//                               change, so measurement stays native.
++//
++// A malformed value (oversize, too many or oversized names, control bytes)
++// yields a not-installed result rather than a half-parsed one.
++FamilyTraits ParseFamilyTraits(std::uint32_t slot, std::string_view value,
++                               std::uint32_t mask);
 +
-+  // Parses the switch payload: a comma-separated list of family names.
-+  //
-+  // An empty payload is accepted and means "no family is available" -- an
-+  // explicit statement, not an absence of one. Malformed input (empty element,
-+  // oversized payload, non-printable byte, oversized or too many names) is
-+  // rejected whole: the filter is left uninitialized and the caller must fall
-+  // back to native behaviour rather than apply half a font list, which would
-+  // claim the dimension was applied while pages still see deleted families.
-+  bool Init(std::string_view payload) {
-+    entries_.clear();
-+    initialized_ = false;
-+    if (payload.size() > kMaxPayload) {
-+      return false;
-+    }
-+    for (const char character : payload) {
-+      const auto byte = static_cast<unsigned char>(character);
-+      if (byte < 32 || byte > 126) {
-+        return false;
-+      }
-+    }
-+    std::size_t start = 0;
-+    while (start < payload.size()) {
-+      const std::size_t comma = payload.find(',', start);
-+      const std::size_t end =
-+          comma == std::string_view::npos ? payload.size() : comma;
-+      if (!Add(payload.substr(start, end - start))) {
-+        entries_.clear();
-+        initialized_ = false;
-+        return false;
-+      }
-+      if (comma == std::string_view::npos) {
-+        break;
-+      }
-+      start = comma + 1;
-+    }
-+    initialized_ = true;
-+    return true;
-+  }
++// ---------------------------------------------------------------------------
++// Implementation (header-only).
++// ---------------------------------------------------------------------------
++namespace internal {
 +
-+  // Appends one family. Duplicates are ignored, not stored twice.
-+  bool Add(std::string_view family) {
-+    if (family.empty() || family.size() > kMaxName) {
-+      return false;
-+    }
-+    for (const char character : family) {
-+      const auto byte = static_cast<unsigned char>(character);
-+      if (byte < 32 || byte > 126) {
-+        return false;
-+      }
-+    }
-+    if (Contains(family)) {
-+      return true;
-+    }
-+    if (entries_.size() >= kMaxEntries) {
-+      return false;
-+    }
-+    entries_.emplace_back(family);
-+    return true;
-+  }
-+
-+  FontFaceSetStatus status() const {
-+    return initialized_ ? FontFaceSetStatus::kInit
-+                        : FontFaceSetStatus::kNotInitialized;
-+  }
-+
-+  // Queries are only meaningful once Init() succeeded; the caller is expected
-+  // to gate on status() exactly as it gates on whether the switch was present.
-+  FontFaceSetStatus Available(std::string_view family) const {
-+    if (!initialized_) {
-+      return FontFaceSetStatus::kNotInitialized;
-+    }
-+    return Contains(family) ? FontFaceSetStatus::kPresent
-+                            : FontFaceSetStatus::kAbsent;
-+  }
-+
-+  bool empty() const { return entries_.empty(); }
-+  std::size_t size() const { return entries_.size(); }
-+
-+ private:
-+  bool Contains(std::string_view family) const {
-+    for (const auto& entry : entries_) {
-+      if (entry == family) {
-+        return true;
-+      }
-+    }
++inline bool ValidFamily(std::string_view family) {
++  if (family.empty() || family.size() > kMaxFamilyName) {
 +    return false;
 +  }
++  for (const char character : family) {
++    const auto byte = static_cast<unsigned char>(character);
++    if (byte < 32 || byte > 126) {
++      return false;
++    }
++  }
++  return true;
++}
 +
-+  std::vector<std::string> entries_;
-+  bool initialized_ = false;
-+};
++}  // namespace internal
 +
-+}  // namespace lengsuo::fp
-+#endif  // LENGSUO_NATIVE_FONT_FACE_SET_FILTER_H_
-diff --git a/lengsuo/native/font_substitution.cc b/lengsuo/native/font_substitution.cc
++inline std::vector<std::string> ParseSemicolonFamilies(std::string_view value) {
++  std::vector<std::string> families;
++  std::size_t start = 0;
++  while (start < value.size()) {
++    const std::size_t semicolon = value.find(';', start);
++    const std::size_t end =
++        semicolon == std::string_view::npos ? value.size() : semicolon;
++    const std::string_view element = value.substr(start, end - start);
++    const bool blank = element.find_first_not_of(' ') == std::string_view::npos;
++    if (!blank) {
++      if (!internal::ValidFamily(element) ||
++          families.size() >= kMaxFamilyCount) {
++        return {};  // malformed: reject the whole value, not one element
++      }
++      bool duplicate = false;
++      for (const auto& existing : families) {
++        if (existing == element) {
++          duplicate = true;
++          break;
++        }
++      }
++      if (!duplicate) {
++        families.emplace_back(element);
++      }
++    }
++    if (semicolon == std::string_view::npos) {
++      break;
++    }
++    start = semicolon + 1;
++  }
++  return families;
++}
++
++inline FamilyTraits ParseFamilyTraits(std::uint32_t slot,
++                                      std::string_view value,
++                                      std::uint32_t mask) {
++  FamilyTraits traits;
++  traits.slot = slot;
++  if (slot == 0) {
++    return traits;  // the profile said nothing about fonts
++  }
++  if (value.size() > kMaxFamilyValue) {
++    return traits;  // too large: not installed, never half-parsed
++  }
++  for (const char character : value) {
++    const auto byte = static_cast<unsigned char>(character);
++    if (byte < 32 || byte > 126) {
++      return traits;  // control bytes are never a valid family list
++    }
++  }
++  traits.families = ParseSemicolonFamilies(value);
++  // ParseSemicolonFamilies returns {} both for "empty" and for "malformed"; a
++  // non-empty value that parsed to nothing is the malformed case.
++  const bool blank = value.find_first_not_of("; ") == std::string_view::npos;
++  if (!blank && traits.families.empty()) {
++    return traits;  // malformed (oversize/too many names): stay native
++  }
++  traits.installed = true;
++  traits.perturbs_metrics = !traits.families.empty() || mask != 0;
++  return traits;
++}
++
++}  // namespace lengsuo::fonts
++
++#endif  // LENGSUO_NATIVE_FONT_FAMILY_TRAITS_H_
+diff --git a/lengsuo/native/font_metrics.cc b/lengsuo/native/font_metrics.cc
 new file mode 100644
-index 0000000..d3330ae
+index 0000000..ae59b33
 --- /dev/null
-+++ b/lengsuo/native/font_substitution.cc
-@@ -0,0 +1,5 @@
-+// The substitution decision is header-only (native/font_substitution.h). This
-+// translation unit exists so the CMake and GN targets have a stable source and
-+// the header is compiled and -Werror-checked even when only the library, not
-+// the test, is built.
-+#include "font_substitution.h"
-diff --git a/lengsuo/native/font_substitution.h b/lengsuo/native/font_substitution.h
-new file mode 100644
-index 0000000..2e422df
---- /dev/null
-+++ b/lengsuo/native/font_substitution.h
-@@ -0,0 +1,98 @@
-+// font_substitution - make a profile's declared families actually resolve.
++++ b/lengsuo/native/font_metrics.cc
+@@ -0,0 +1,60 @@
++// font_metrics v1 - implementation. See font_metrics.h for the contract.
 +//
-+// The font dimension (profile slots[3]) was decoded but did nothing observable.
-+// The first proposed fix -- make `document.fonts.check()` answer false for
-+// families outside the set -- was withdrawn: upstream `FontFaceSet::check()`
-+// (font_face_set.cc:232) returns true for every family the page did not itself
-+// register, so that state cannot exist. The observable face of the dimension
-+// is instead *availability*: which families resolve to a real typeface, and
-+// the widths that follow (docs/cc-task-rulings.md §C).
-+//
-+// The chosen mechanism is gamma2: add, never remove. A family the profile
-+// declares is made to resolve to a real, installed candidate family instead of
-+// falling through to the default fallback. We do not invent glyphs, metrics or
-+// an inventory -- the substitute is one of the host's own font families, so the
-+// pixel layer stays honest (docs/gpu-and-detection-plan.md three-layer model).
-+// Families the host already resolves are untouched.
-+//
-+// This header is pure: it depends only on the availability set and a caller-
-+// supplied pool of real candidate names, so it is unit-testable without Blink
-+// and without a font backend. The Blink call site feeds it the CSS generic
-+// families -- see the comment on the call site for why the host's family list
-+// is deliberately not enumerated (native/font_substitution_test.cc,
-+// font_cache_skia.cc).
-+//
-+// Contract: docs/font-dimension.md.
-+#ifndef LENGSUO_NATIVE_FONT_SUBSTITUTION_H_
-+#define LENGSUO_NATIVE_FONT_SUBSTITUTION_H_
++// The arithmetic mirrors tests/font_metrics_ref.py line for line: a single
++// SplitMix64 finalizer (the same Mix() fp_overrides.cc uses for canvas/audio,
++// so every dimension shares one seed-derivation discipline) over the seed
++// salted with the quantized native advance. The salt makes two glyphs in one
++// string independent while keeping a given glyph fixed for a given profile.
 +
-+#include <cstddef>
++#include "font_metrics.h"
++
++#include <cmath>
++
++namespace lengsuo::fonts {
++namespace {
++
++constexpr std::uint64_t kConstMixAdd = 0x9E3779B97F4A7C15ULL;
++constexpr std::uint64_t kConstMixMul1 = 0xBF58476D1CE4E5B9ULL;
++constexpr std::uint64_t kConstMixMul2 = 0x94D049BB133111EBULL;
++constexpr std::uint64_t kConstSalt = 0x9E3779B97F4A7C15ULL;
++
++}  // namespace
++
++std::uint64_t MixForTest(std::uint64_t x) {
++  x += kConstMixAdd;
++  x = (x ^ (x >> 30)) * kConstMixMul1;
++  x = (x ^ (x >> 27)) * kConstMixMul2;
++  return x ^ (x >> 31);
++}
++
++FontNoiseResult PerturbAdvance(const FontNoiseConfig& config) {
++  FontNoiseResult result;
++  result.advance = config.advance;
++  // Off conditions: no dimension, no stream, or nothing to perturb.
++  if (!config.enabled || config.seed == 0 || !(config.advance > 0.0f)) {
++    result.status = FontNoiseStatus::kDisabled;
++    return result;
++  }
++  // Quantize the native advance to the layout quantum, then salt the seed with
++  // it. round() (not truncation) so 7.99999 and 8.00001 land on one bucket.
++  const std::int64_t quantized =
++      static_cast<std::int64_t>(std::llround(config.advance / kAdvanceQuantum));
++  const std::uint64_t stream =
++      MixForTest(config.seed ^ (static_cast<std::uint64_t>(quantized) *
++                                kConstSalt));
++  // steps in [-kMaxAdvanceSteps, kMaxAdvanceSteps].
++  const int steps =
++      static_cast<int>(stream % (2 * kMaxAdvanceSteps + 1)) - kMaxAdvanceSteps;
++  if (steps == 0) {
++    // A zero draw leaves the advance native. Reporting kDisabled here would be
++    // wrong -- the dimension is on -- so it stays kPerturbed with a zero shift.
++    result.status = FontNoiseStatus::kPerturbed;
++    return result;
++  }
++  result.status = FontNoiseStatus::kPerturbed;
++  result.advance =
++      config.advance + static_cast<float>(steps) * kAdvanceQuantum;
++  return result;
++}
++
++}  // namespace lengsuo::fonts
+diff --git a/lengsuo/native/font_metrics.h b/lengsuo/native/font_metrics.h
+new file mode 100644
+index 0000000..194f9c1
+--- /dev/null
++++ b/lengsuo/native/font_metrics.h
+@@ -0,0 +1,75 @@
++// font_metrics v1 - deterministic perturbation of the measured glyph advance.
++//
++// This is the accepted mechanism for the font dimension
++// (docs/cc-task-rulings.md §C, docs/font-dimension-reference-approach.md). The
++// earlier proposals -- filter the availability set, or alias declared families
++// -- were both withdrawn: upstream `FontFaceSet::check()` only judges the
++// page's own @font-face registrations and returns true for every system family,
++// so "make check() answer false for an absent family" is not a state upstream
++// has, and faking it would fabricate a font registry the page can enumerate.
++//
++// What 对标端 does instead is overlay a deterministic mask on the *real* value:
++// its font_fingerprint_mask sits alongside canvas/webgl/audio masks, and the
++// open-source base it is built on applies it inside font_cache.cc. The
++// observable face of the dimension is therefore not availability but the
++// measured advance -- and that is exactly what a canvas `measureText()` reads.
++//
++// Contract:
++//   * Off (enabled == false, or seed == 0, or a non-positive advance) returns
++//     the native advance unchanged, bit for bit. A build with no font switch
++//     therefore measures identically to upstream.
++//   * On, the result is a pure function of (seed, native advance): the same
++//     profile yields the same widths in every renderer/worker process, and two
++//     profiles yield different widths.
++//   * The shift is a whole number of 1/64 px steps (the layout quantum) with
++//     |shift| < kMaxAdvanceDelta (1/4 px), so text can never move by a whole
++//     pixel: the perturbation is measurable but not visible.
++//
++// Pure: no Blink, no IPC, no allocation, no static mutable state -- so it is
++// unit-testable, and reproducible from tests/font_metrics_ref.py.
++//
++// Contract doc: docs/font-dimension.md.
++#ifndef LENGSUO_NATIVE_FONT_METRICS_H_
++#define LENGSUO_NATIVE_FONT_METRICS_H_
++
 +#include <cstdint>
-+#include <span>
-+#include <string>
-+#include <string_view>
-+#include <vector>
 +
-+#include "font_face_set_filter.h"
++namespace lengsuo::fonts {
 +
-+namespace lengsuo::fp {
-+
-+class FontSubstitution {
-+ public:
-+  // Not installed: every query answers "leave it to the platform". The default
-+  // state, so a build with no font switch behaves exactly like upstream.
-+  FontSubstitution() = default;
-+
-+  // Wraps a parsed availability set by value: the substitution owns a copy, so
-+  // it outlives the temporary a caller naturally builds it from. A default-
-+  // constructed (uninitialized) filter yields a not-installed substitution,
-+  // which is the correct answer: "the profile said nothing about fonts" must be
-+  // a no-op.
-+  static FontSubstitution From(const FontFaceSetFilter& fonts) {
-+    FontSubstitution substitution;
-+    substitution.fonts_ = fonts;
-+    substitution.installed_ = fonts.status() == FontFaceSetStatus::kInit;
-+    return substitution;
-+  }
-+
-+  bool Installed() const { return installed_; }
-+
-+  // True when this family is declared by the profile *and* therefore eligible
-+  // for aliasing. Whether the host actually lacks it is decided by the caller
-+  // (a family the host resolves is never touched).
-+  bool NeedsSubstitute(std::string_view family) const {
-+    return installed_ && fonts_.Available(family) == FontFaceSetStatus::kPresent;
-+  }
-+
-+  // Picks a real family from `candidates` for a declared family. Deterministic
-+  // in `family` and `candidates` only: a stable, platform-independent hash
-+  // (never std::hash, whose value may vary per process), so two renderer
-+  // processes given one profile agree. Returns an empty string when there is
-+  // nothing to alias onto, which the caller must read as "stay native".
-+  std::string SubstituteFor(std::string_view family,
-+                            std::span<const std::string_view> candidates) const {
-+    if (candidates.empty()) {
-+      return std::string();
-+    }
-+    const std::uint64_t hash = StableHash(family);
-+    return std::string(candidates[hash % candidates.size()]);
-+  }
-+
-+ private:
-+  // FNV-1a. Chosen because it is tiny, has no per-process salt, and is trivial
-+  // to reproduce in a test or another language (see the Python smoke test).
-+  static std::uint64_t StableHash(std::string_view value) {
-+    std::uint64_t hash = 1469598103934665603ULL;  // offset basis
-+    for (const char character : value) {
-+      hash ^= static_cast<unsigned char>(character);
-+      hash *= 1099511628211ULL;  // FNV prime
-+    }
-+    return hash;
-+  }
-+
-+  FontFaceSetFilter fonts_;
-+  bool installed_ = false;
++enum class FontNoiseStatus : std::uint8_t {
++  kDisabled,   // native advance returned unchanged
++  kPerturbed,  // advance moved by a non-zero number of 1/64 px steps
 +};
 +
-+}  // namespace lengsuo::fp
-+#endif  // LENGSUO_NATIVE_FONT_SUBSTITUTION_H_
++struct FontNoiseConfig {
++  bool enabled{};
++  std::uint64_t seed{};
++  float advance{};
++};
++
++struct FontNoiseResult {
++  FontNoiseStatus status{FontNoiseStatus::kDisabled};
++  float advance{};
++};
++
++// 1/64 px: the quantum the native measurement itself uses, so the result is
++// exactly representable after Blink's own rounding.
++//
++// The step bound is chosen from measurement (native/font_probe.py, report §3):
++// native widths land only on 1/8 px fractions, i.e. the largest native
++// fractional jitter is 0.5 units. +/-4 units is 8x that, so a perturbed width
++// is unambiguously separable from native jitter, while 4/64 = 1/16 px per glyph
++// is far below one device pixel, so no glyph can visibly move.
++constexpr float kAdvanceQuantum = 1.0f / 64.0f;
++constexpr int kMaxAdvanceSteps = 4;
++constexpr float kMaxAdvanceDelta = kAdvanceQuantum * kMaxAdvanceSteps;
++
++// Perturbs one glyph advance. See the contract above for the off conditions.
++FontNoiseResult PerturbAdvance(const FontNoiseConfig& config);
++
++// Exposed for the frozen-vector test only (mirrors tests/font_metrics_ref.py).
++std::uint64_t MixForTest(std::uint64_t x);
++
++}  // namespace lengsuo::fonts
++
++#endif  // LENGSUO_NATIVE_FONT_METRICS_H_
 diff --git a/lengsuo/native/fp_overrides.cc b/lengsuo/native/fp_overrides.cc
 new file mode 100644
-index 0000000..4b5971d
+index 0000000..29fe2f3
 --- /dev/null
 +++ b/lengsuo/native/fp_overrides.cc
-@@ -0,0 +1,370 @@
+@@ -0,0 +1,400 @@
 +// fp_overrides - renderer-side fingerprint override state.
 +//
-+// One switch carries everything:
-+//   --lengsuo-managed-fp=<seed-hex>:<canvas>:<audio>:<rects>:<fonts>:<gpu>:
-+//                        <ua>:<webgl-params>:<vendor>:<renderer>:<hwc>:<mem>
-+// 0 (or empty, for the two strings) keeps that dimension native. The font
-+// dimension is the exception: it is not a seed but an explicit family list,
-+// and it therefore arrives in its own --lengsuo-managed-fonts switch (see
-+// docs/fp-switch-contract.md). Absent switches => everything disabled and
-+// upstream behavior stays byte-identical.
++// --lengsuo-managed-fp=<seed>:<canvas>:<audio>:<rects>:<fonts>:<gpu>:<ua>:
++//   <webgl>:<vendor>:<renderer>:<hwc>:<mem>; 0/empty keeps that dimension native.
++// The font dimension is the exception: its {switcher, value, mask} content rides
++// its own --lengsuo-managed-fonts switch (docs/fp-switch-contract.md). Absent
++// switches => everything disabled and upstream behavior stays byte-identical.
 +#include "fp_overrides.h"
 +
 +#include <array>
@@ -1411,6 +1452,10 @@ index 0000000..4b5971d
 +#include <cstring>
 +#include <span>
 +#include <string_view>
++#include <utility>
++
++#include "font_family_traits.h"
++#include "font_metrics.h"
 +
 +namespace lengsuo::fp {
 +namespace {
@@ -1445,7 +1490,6 @@ index 0000000..4b5971d
 +std::uint64_t g_canvas = 0;
 +std::uint64_t g_audio = 0;
 +std::uint32_t g_rects = 0;
-+std::uint32_t g_fonts = 0;
 +std::uint32_t g_gpu = 0;
 +std::uint32_t g_ua = 0;
 +std::uint32_t g_webgl_params = 0;
@@ -1458,13 +1502,11 @@ index 0000000..4b5971d
 +std::uint32_t g_hw_concurrency = 0;
 +std::uint32_t g_device_memory = 0;
 +
-+// Font availability set. Unlike the numeric slots above this is not a seed:
-+// the profile hands over an explicit family list (对标端 does not expose a font
-+// pool, so nothing is ever invented here -- see docs/font-dimension.md). The
-+// storage is a function-local static so it has no exit-time destructor.
-+FontFaceSetFilter& FontsStorage() {
-+  static FontFaceSetFilter fonts;
-+  return fonts;
++// Font dimension traits -- the {switcher, value, mask} shape, not a seed.
++// Function-local static so it has no exit-time destructor.
++lengsuo::fonts::FamilyTraits& FontTraitsStorage() {
++  static lengsuo::fonts::FamilyTraits traits;
++  return traits;
 +}
 +bool g_fonts_installed = false;
 +
@@ -1481,18 +1523,28 @@ index 0000000..4b5971d
 +  return std::string_view(storage.data(), n);
 +}
 +
-+std::uint32_t ParseDecimal(std::string_view text) {
++// Returns false when the field is not a plain decimal integer (empty, too long,
++// or carrying a non-digit). Distinguishing "0" from "x" matters for the font
++// switch: "x" must be rejected, not silently read as 0.
++bool ParseDecimalStrict(std::string_view text, std::uint32_t* out) {
 +  if (text.empty() || text.size() > 9) {
-+    return 0;
++    return false;
 +  }
 +  std::uint32_t value = 0;
 +  for (const char c : text) {
 +    if (c < '0' || c > '9') {
-+      return 0;
++      return false;
 +    }
 +    value = value * 10u + static_cast<std::uint32_t>(c - '0');
 +  }
-+  return value;
++  *out = value;
++  return true;
++}
++
++// Lenient form: any malformed field reads as 0 (i.e. "keep native").
++std::uint32_t ParseDecimal(std::string_view text) {
++  std::uint32_t value = 0;
++  return ParseDecimalStrict(text, &value) ? value : 0;
 +}
 +
 +bool ParseHex(std::string_view text, std::uint64_t* out) {
@@ -1531,7 +1583,6 @@ index 0000000..4b5971d
 +  }
 +  return result;
 +}
-+
 +}  // namespace
 +
 +void InitFromSwitch(std::string_view value) {
@@ -1541,7 +1592,6 @@ index 0000000..4b5971d
 +  g_canvas = 0;
 +  g_audio = 0;
 +  g_rects = 0;
-+  g_fonts = 0;
 +  g_gpu = 0;
 +  g_ua = 0;
 +  g_webgl_params = 0;
@@ -1575,7 +1625,8 @@ index 0000000..4b5971d
 +  const std::uint32_t canvas_slot = ParseDecimal(fields.at(kCanvas));
 +  const std::uint32_t audio_slot = ParseDecimal(fields.at(kAudio));
 +  g_rects = ParseDecimal(fields.at(kRects));
-+  g_fonts = ParseDecimal(fields.at(kFonts));
++  // kFonts is a contract position only; the font content rides its own switch.
++  (void)ParseDecimal(fields.at(kFonts));
 +  g_gpu = ParseDecimal(fields.at(kGpu));
 +  g_ua = ParseDecimal(fields.at(kUa));
 +  g_webgl_params = ParseDecimal(fields.at(kWebglParams));
@@ -1596,9 +1647,31 @@ index 0000000..4b5971d
 +
 +bool InitFontsFromSwitch(std::string_view value) {
 +  g_fonts_installed = false;
-+  if (!FontsStorage().Init(value)) {
++  FontTraitsStorage() = lengsuo::fonts::FamilyTraits();
++  // Payload: <slot>:<mask>:<Family;Family;...>. The value may be empty (its
++  // own statement: the mask then decides), so only the two numeric fields are
++  // mandatory. A missing second colon is malformed, not "empty value".
++  const std::size_t first = value.find(':');
++  if (first == std::string_view::npos) {
 +    return false;
 +  }
++  const std::size_t second = value.find(':', first + 1);
++  if (second == std::string_view::npos) {
++    return false;
++  }
++  std::uint32_t slot = 0;
++  std::uint32_t mask = 0;
++  if (!ParseDecimalStrict(value.substr(0, first), &slot) ||
++      !ParseDecimalStrict(value.substr(first + 1, second - first - 1), &mask)) {
++    return false;
++  }
++  const std::string_view families = value.substr(second + 1);
++  lengsuo::fonts::FamilyTraits traits =
++      lengsuo::fonts::ParseFamilyTraits(slot, families, mask);
++  if (slot != 0 && !traits.installed) {
++    return false;  // malformed value: install nothing
++  }
++  FontTraitsStorage() = std::move(traits);
 +  g_fonts_installed = true;
 +  return true;
 +}
@@ -1642,23 +1715,24 @@ index 0000000..4b5971d
 +  return g_audio;
 +}
 +
-+const FontFaceSetFilter* Fonts() {
-+  return g_fonts_installed ? &FontsStorage() : nullptr;
++const lengsuo::fonts::FamilyTraits& FontTraits() {
++  return FontTraitsStorage();
 +}
 +
-+std::string FontSubstituteFor(std::string_view family,
-+                              std::span<const std::string_view> candidates) {
++float PerturbGlyphAdvance(float advance) {
 +  if (!g_fonts_installed) {
-+    return std::string();  // no set installed: stay byte-identical to upstream
++    return advance;  // no profile statement: byte-identical to upstream
 +  }
-+  // Builds a throwaway substitution view from the installed set. The decision
-+  // itself lives in native/font_substitution.h so it can be unit-tested
-+  // without Blink; this wrapper only bridges the renderer-side storage.
-+  const FontSubstitution substitution = FontSubstitution::From(FontsStorage());
-+  if (!substitution.NeedsSubstitute(family)) {
-+    return std::string();
++  const lengsuo::fonts::FamilyTraits& traits = FontTraitsStorage();
++  // Needs both a relevant statement (installed and active) and a stream.
++  if (!traits.installed || !traits.perturbs_metrics) {
++    return advance;
 +  }
-+  return substitution.SubstituteFor(family, candidates);
++  lengsuo::fonts::FontNoiseConfig config;
++  config.enabled = true;
++  config.seed = g_seed ^ (static_cast<std::uint64_t>(traits.slot) << 32);
++  config.advance = advance;
++  return lengsuo::fonts::PerturbAdvance(config).advance;
 +}
 +
 +std::uint64_t WebGLParamsSeed() {
@@ -1765,10 +1839,10 @@ index 0000000..4b5971d
 +}  // namespace lengsuo::fp
 diff --git a/lengsuo/native/fp_overrides.h b/lengsuo/native/fp_overrides.h
 new file mode 100644
-index 0000000..9b86367
+index 0000000..29fecb3
 --- /dev/null
 +++ b/lengsuo/native/fp_overrides.h
-@@ -0,0 +1,54 @@
+@@ -0,0 +1,49 @@
 +// fp_overrides - renderer-side fingerprint override state.
 +// One switch carries everything: --lengsuo-managed-fp=<seed-hex>:<a>:<c>:<r>:<f>:<g>:<u>:<w>
 +// (slots: audio, canvas, rects, fonts, gpu, ua, webgl). Absent => all disabled,
@@ -1776,23 +1850,23 @@ index 0000000..9b86367
 +#ifndef LENGSUO_NATIVE_FP_OVERRIDES_H_
 +#define LENGSUO_NATIVE_FP_OVERRIDES_H_
 +#include <cstdint>
-+#include <span>
-+#include <string>
 +#include <string_view>
 +
-+#include "font_face_set_filter.h"
-+#include "font_substitution.h"
++#include "font_family_traits.h"
++#include "font_metrics.h"
 +namespace lengsuo::fp {
 +// Two switches, both optional and both absent by default:
 +//   --lengsuo-managed-fp=<seed-hex>:<a>:<c>:<r>:<f>:<g>:<u>:<w>:<vendor>:
 +//                        <renderer>:<hwc>:<mem>
-+//   --lengsuo-managed-fonts=<comma-separated family list>
-+// The font list is a structured, potentially large payload, so it does not
-+// ride in a colon-separated field of the fp switch (see
-+// docs/fp-switch-contract.md). Both absent => upstream behavior byte-identical.
++//   --lengsuo-managed-fonts=<slot>:<mask>:<Family;Family;...>
++// The fonts dimension is {switcher, value, mask} (docs/cc-task-rulings.md §C):
++// its value is a semicolon-separated family string that can be large, so it
++// does not ride a colon field of the fp switch (see docs/fp-switch-contract.md).
++// Both absent => upstream behavior byte-identical.
 +void InitFromSwitch(std::string_view value);
-+// Replaces the font availability set. Returns false on a malformed payload, in
-+// which case no set is installed and every query keeps its native answer.
++// Parses --lengsuo-managed-fonts and installs the font-metric perturbation.
++// Returns false on a malformed payload, in which case nothing is installed and
++// every measurement keeps its native value.
 +bool InitFontsFromSwitch(std::string_view value);
 +bool Enabled();
 +// WebGL faces resolved from seed+slot (deterministic).
@@ -1802,25 +1876,20 @@ index 0000000..9b86367
 +std::uint32_t DeviceMemoryGB();       // 0 = disabled
 +double RectsJitterPx();               // 0 = disabled
 +std::uint64_t AudioSeed();
-+// Font dimension: nullptr until a valid set is installed. Callers must treat
-+// nullptr as "this profile says nothing about fonts" and keep native behavior.
-+const FontFaceSetFilter* Fonts();
 +
-+// gamma2: a family the profile declares but the host cannot resolve is aliased
-+// onto one of a fixed pool of universally-present families, so the declaration
-+// actually takes effect (docs/cc-task-rulings.md §C). Returns the candidate
-+// family name to retry with, or an empty string when no substitution applies
-+// (no set installed, family not declared, or the caller offered no candidates).
-+// The caller supplies `candidates` -- this layer never invents a family
-+// inventory, it only chooses within what it is given.
-+std::string FontSubstituteFor(std::string_view family,
-+                              std::span<const std::string_view> candidates);
++// Font dimension: the parsed traits, or a default (not-installed) value until a
++// valid payload arrives. Callers must treat !installed as "this profile says
++// nothing about fonts" and keep the native measurement. The seed used for the
++// perturbation is the global noise seed, so the font dimension shares the
++// canvas/audio derivation discipline (docs/font-dimension.md).
++const lengsuo::fonts::FamilyTraits& FontTraits();
 +
-+// Slot 7: deterministic seed for WebGL MAX_* parameter perturbation.
-+std::uint64_t WebGLParamsSeed();            // 0 = disabled
-+// Deterministic bias for GLenum-typed int parameters (MAX_*, *_BITS...);
-+// returns 0 when the webgl slot is off. Applied inside GetIntParameter.
-+std::int32_t WebGLParamBias(std::uint32_t pname, std::int32_t original);
++// Perturbs one measured glyph advance per the installed font dimension. This is
++// the browser-side entry point for the accepted mechanism (docs/cc-task-rulings
++// §C): the advance is perturbed deterministically, `FontFaceSet::check()` is
++// never touched. Returns the native advance unchanged when the dimension is off,
++// not installed, or dormant.
++float PerturbGlyphAdvance(float advance);
 +}  // namespace lengsuo::fp
 +#endif
 diff --git a/lengsuo/native/golden.inc b/lengsuo/native/golden.inc
@@ -2097,10 +2166,10 @@ index 0000000..1c23aec
 +#endif
 diff --git a/lengsuo/native/profile_wire.cc b/lengsuo/native/profile_wire.cc
 new file mode 100644
-index 0000000..8ebf1f2
+index 0000000..14d0c5e
 --- /dev/null
 +++ b/lengsuo/native/profile_wire.cc
-@@ -0,0 +1,109 @@
+@@ -0,0 +1,120 @@
 +#include "profile_wire.h"
 +
 +#include <string_view>
@@ -2172,23 +2241,34 @@ index 0000000..8ebf1f2
 +      return std::nullopt;
 +    }
 +    profile.webrtc_policy = static_cast<std::uint8_t>(value);
-+    // Optional trailing font set, before the slot table. Writers that predate
-+    // the font dimension (and every schema-1 profile) simply stop here, so
-+    // every previously valid profile keeps decoding byte-identically -- the
-+    // same optional-tail rule the catalog's GPU section uses.
++    // Optional trailing font section, before the slot table. Writers that
++    // predate the font dimension (and every schema-1 profile) simply stop
++    // here, so every previously valid profile keeps decoding byte-identically
++    // -- the same optional-tail rule the catalog's GPU section uses.
 +    //
-+    // The reader accepts exactly one `fonts` section followed by the slot
-+    // table. Two-char and four-char lookaheads cannot both be "fonts", so an
-+    // accidental `fontsfonts` payload fails instead of being silently skipped.
++    // The section is one `fonts` tag followed by the {switcher, value, mask}
++    // triple: a 1-byte switcher (online encoding 1/2/3), the
++    // semicolon-separated family string, and a 1-byte mask. The reader accepts
++    // exactly one such section followed by the slot table. Two-char and
++    // four-char lookaheads cannot both be "fonts", so an accidental
++    // `fontsfonts` payload fails instead of being silently skipped.
 +    std::string probe;
 +    const auto mark = reader.position();
 +    if (reader.PeekText(probe) && probe == "fonts") {
 +      reader.Seek(mark + 2 + probe.size());
-+      std::string families;
-+      if (!reader.OptionalText(families, 2048)) {
++      ParsedProfile::FontDimension fonts;
++      if (!reader.Number(value, 1) || !InRange(value, 1, 3)) {
 +        return std::nullopt;
 +      }
-+      profile.font_families = std::move(families);
++      fonts.switcher = static_cast<std::uint8_t>(value);
++      if (!reader.OptionalText(fonts.value, 4096)) {
++        return std::nullopt;
++      }
++      if (!reader.Number(value, 1) || value > 1) {
++        return std::nullopt;
++      }
++      fonts.mask = static_cast<std::uint8_t>(value);
++      profile.fonts = std::move(fonts);
 +    }
 +  }
 +  if (!reader.Number(value, 2) || value != 7) {
@@ -2212,10 +2292,10 @@ index 0000000..8ebf1f2
 +}  // namespace lengsuo
 diff --git a/lengsuo/native/profile_wire.h b/lengsuo/native/profile_wire.h
 new file mode 100644
-index 0000000..84d8460
+index 0000000..f02b333
 --- /dev/null
 +++ b/lengsuo/native/profile_wire.h
-@@ -0,0 +1,53 @@
+@@ -0,0 +1,62 @@
 +#ifndef LENGSUO_NATIVE_PROFILE_WIRE_H_
 +#define LENGSUO_NATIVE_PROFILE_WIRE_H_
 +
@@ -2252,12 +2332,21 @@ index 0000000..84d8460
 +  std::uint8_t max_touch_points{};
 +  std::string language;
 +  std::string timezone;
-+  // Schema 2 only: the font availability set, "Family,Family,...". No
-+  // inventory is fabricated client-side -- 对标端's font pool was never captured
-+  // -- so an omitted field simply means "the profile says nothing about fonts"
-+  // (std::nullopt) and the renderer keeps the host's real list. An empty string
-+  // is the distinct statement "no family is available".
-+  std::optional<std::string> font_families;
++  // Schema 2 only: the font dimension, shaped like every other overridable
++  // dimension -- {switcher, value, mask} (docs/font-dimension.md §3.1). `value`
++  // is the semicolon-separated family string 对标端 ships ("Arial;Arial Black");
++  // no structured inventory is fabricated client-side because the server-side
++  // pool was never captured. `mask` is the font_fingerprint_mask bit that turns
++  // the metric-noise mechanism on independently of a non-empty value. An omitted
++  // section means "the profile says nothing about fonts" (std::nullopt) and the
++  // host's real metrics are kept. An empty `value` is a legal statement ("decide
++  // by mask"), matching the empty-field convention the other dimensions use.
++  struct FontDimension {
++    std::uint8_t switcher{};
++    std::string value;
++    std::uint8_t mask{};
++  };
++  std::optional<FontDimension> fonts;
 +  // audio, canvas, client_rects, fonts, gpu, ua, webgl, in canonical order.
 +  std::array<std::uint32_t, 7> slots{};
 +  // Schema 2 only: blink WebRtcIpHandlingPolicy enum value 0..3. Schema 1

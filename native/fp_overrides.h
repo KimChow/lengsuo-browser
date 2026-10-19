@@ -5,23 +5,23 @@
 #ifndef LENGSUO_NATIVE_FP_OVERRIDES_H_
 #define LENGSUO_NATIVE_FP_OVERRIDES_H_
 #include <cstdint>
-#include <span>
-#include <string>
 #include <string_view>
 
-#include "font_face_set_filter.h"
-#include "font_substitution.h"
+#include "font_family_traits.h"
+#include "font_metrics.h"
 namespace lengsuo::fp {
 // Two switches, both optional and both absent by default:
 //   --lengsuo-managed-fp=<seed-hex>:<a>:<c>:<r>:<f>:<g>:<u>:<w>:<vendor>:
 //                        <renderer>:<hwc>:<mem>
-//   --lengsuo-managed-fonts=<comma-separated family list>
-// The font list is a structured, potentially large payload, so it does not
-// ride in a colon-separated field of the fp switch (see
-// docs/fp-switch-contract.md). Both absent => upstream behavior byte-identical.
+//   --lengsuo-managed-fonts=<slot>:<mask>:<Family;Family;...>
+// The fonts dimension is {switcher, value, mask} (docs/cc-task-rulings.md §C):
+// its value is a semicolon-separated family string that can be large, so it
+// does not ride a colon field of the fp switch (see docs/fp-switch-contract.md).
+// Both absent => upstream behavior byte-identical.
 void InitFromSwitch(std::string_view value);
-// Replaces the font availability set. Returns false on a malformed payload, in
-// which case no set is installed and every query keeps its native answer.
+// Parses --lengsuo-managed-fonts and installs the font-metric perturbation.
+// Returns false on a malformed payload, in which case nothing is installed and
+// every measurement keeps its native value.
 bool InitFontsFromSwitch(std::string_view value);
 bool Enabled();
 // WebGL faces resolved from seed+slot (deterministic).
@@ -31,24 +31,19 @@ std::uint32_t HardwareConcurrency();  // 0 = disabled
 std::uint32_t DeviceMemoryGB();       // 0 = disabled
 double RectsJitterPx();               // 0 = disabled
 std::uint64_t AudioSeed();
-// Font dimension: nullptr until a valid set is installed. Callers must treat
-// nullptr as "this profile says nothing about fonts" and keep native behavior.
-const FontFaceSetFilter* Fonts();
 
-// gamma2: a family the profile declares but the host cannot resolve is aliased
-// onto one of a fixed pool of universally-present families, so the declaration
-// actually takes effect (docs/cc-task-rulings.md §C). Returns the candidate
-// family name to retry with, or an empty string when no substitution applies
-// (no set installed, family not declared, or the caller offered no candidates).
-// The caller supplies `candidates` -- this layer never invents a family
-// inventory, it only chooses within what it is given.
-std::string FontSubstituteFor(std::string_view family,
-                              std::span<const std::string_view> candidates);
+// Font dimension: the parsed traits, or a default (not-installed) value until a
+// valid payload arrives. Callers must treat !installed as "this profile says
+// nothing about fonts" and keep the native measurement. The seed used for the
+// perturbation is the global noise seed, so the font dimension shares the
+// canvas/audio derivation discipline (docs/font-dimension.md).
+const lengsuo::fonts::FamilyTraits& FontTraits();
 
-// Slot 7: deterministic seed for WebGL MAX_* parameter perturbation.
-std::uint64_t WebGLParamsSeed();            // 0 = disabled
-// Deterministic bias for GLenum-typed int parameters (MAX_*, *_BITS...);
-// returns 0 when the webgl slot is off. Applied inside GetIntParameter.
-std::int32_t WebGLParamBias(std::uint32_t pname, std::int32_t original);
+// Perturbs one measured glyph advance per the installed font dimension. This is
+// the browser-side entry point for the accepted mechanism (docs/cc-task-rulings
+// §C): the advance is perturbed deterministically, `FontFaceSet::check()` is
+// never touched. Returns the native advance unchanged when the dimension is off,
+// not installed, or dormant.
+float PerturbGlyphAdvance(float advance);
 }  // namespace lengsuo::fp
 #endif

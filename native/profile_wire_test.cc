@@ -211,52 +211,81 @@ int main() {
   }
   // --- Font dimension (optional trailing section, schema 2 only) ---
   //
-  // The font set is written after the webrtc policy byte and before the slot
-  // table as Text("fonts") + Text("Family,Family,..."). A schema-2 writer that
+  // The font dimension is written after the webrtc policy byte and before the
+  // slot table as Text("fonts") + {u8 switcher, Text value, u8 mask} -- the
+  // same {switcher, value, mask} shape every overridable dimension uses, with a
+  // semicolon-separated family string as the value. A schema-2 writer that
   // predates it must keep decoding byte-for-byte (the block above already
   // proves that), and a profile that omits the section must stay
   // distinguishable from one that states "no fonts".
   {
     auto bytes2 = Schema2(golden, 2);
     // Slot table starts at 66 for schema 2; splice the section in front of it.
-    const Bytes section = {0, 5, 'f', 'o', 'n', 't', 's', 0, 3, 'a', 'b', 'c'};
+    const Bytes section = {0, 5, 'f', 'o', 'n', 't', 's',
+                           3,                        // switcher (online)
+                           0, 11, 'A', 'r', 'i', 'a', 'l', ';',
+                           'A', 'r', 'i', 'a', 'l',  // "Arial;Arial"
+                           1};                       // mask
     bytes2.insert(At(bytes2, 66), section.begin(), section.end());
     auto decoded = lengsuo::DecodeProfile(bytes2);
     Check(decoded.has_value());
-    Check(decoded->font_families.has_value() &&
-          *decoded->font_families == "abc");
+    Check(decoded->fonts.has_value() && decoded->fonts->switcher == 3 &&
+          decoded->fonts->value == "Arial;Arial" && decoded->fonts->mask == 1);
     // Everything else is untouched by the insertion.
     Check(decoded->slots == std::array<std::uint32_t, 7>{3, 1, 5, 4, 6, 7, 2});
     Check(decoded->webrtc_policy.has_value() && *decoded->webrtc_policy == 2);
     Check(decoded->language == "en-US" && decoded->timezone == "UTC");
   }
-  // Absent section and empty section are different statements.
+  // Absent section and empty value are different statements, and an empty
+  // value with a non-zero mask is a legal "decide by mask" declaration.
   {
     auto absent = lengsuo::DecodeProfile(Schema2(golden, 2));
-    Check(absent.has_value() && !absent->font_families.has_value());
+    Check(absent.has_value() && !absent->fonts.has_value());
 
     auto bytes2 = Schema2(golden, 2);
-    const Bytes empty_section = {0, 5, 'f', 'o', 'n', 't', 's', 0, 0};
+    const Bytes empty_section = {0, 5, 'f', 'o', 'n', 't', 's',
+                                 2,      // switcher
+                                 0, 0,   // empty value
+                                 1};     // mask
     bytes2.insert(At(bytes2, 66), empty_section.begin(), empty_section.end());
     auto stated_none = lengsuo::DecodeProfile(bytes2);
     Check(stated_none.has_value());
-    Check(stated_none->font_families.has_value() &&
-          stated_none->font_families->empty());
+    Check(stated_none->fonts.has_value() &&
+          stated_none->fonts->value.empty() &&
+          stated_none->fonts->switcher == 2 && stated_none->fonts->mask == 1);
   }
-  // A section longer than the 2048-byte field limit is rejected, not truncated.
+  // The switcher is an online value in 1..3; 0 or 4 is rejected.
+  for (const std::uint8_t switcher :
+       {static_cast<std::uint8_t>(0), static_cast<std::uint8_t>(4)}) {
+    auto bytes2 = Schema2(golden, 2);
+    const Bytes section = {0, 5, 'f', 'o', 'n', 't', 's',
+                           switcher, 0, 3, 'a', 'b', 'c', 0};
+    bytes2.insert(At(bytes2, 66), section.begin(), section.end());
+    Bad(bytes2);
+  }
+  // The mask byte is a 0/1 switch; 2 is out of range.
   {
     auto bytes2 = Schema2(golden, 2);
-    Bytes section = {0, 5, 'f', 'o', 'n', 't', 's'};
-    section.push_back(8);          // length high byte (2049 = 0x0801)
+    const Bytes section = {0, 5, 'f', 'o', 'n', 't', 's',
+                           1, 0, 3, 'a', 'b', 'c', 2};
+    bytes2.insert(At(bytes2, 66), section.begin(), section.end());
+    Bad(bytes2);
+  }
+  // A section longer than the 4096-byte value limit is rejected, not truncated.
+  {
+    auto bytes2 = Schema2(golden, 2);
+    Bytes section = {0, 5, 'f', 'o', 'n', 't', 's', 1};
+    section.push_back(16);         // length high byte (4097 = 0x1001)
     section.push_back(1);
-    section.insert(section.end(), 2049, 'a');
+    section.insert(section.end(), 4097, 'a');
     bytes2.insert(At(bytes2, 66), section.begin(), section.end());
     Bad(bytes2);
   }
   // Section present but the slot table is missing: still malformed.
   {
     auto bytes2 = Schema2(golden, 2);
-    const Bytes section = {0, 5, 'f', 'o', 'n', 't', 's', 0, 3, 'a', 'b', 'c'};
+    const Bytes section = {0, 5, 'f', 'o', 'n', 't', 's', 1, 0, 3, 'a', 'b',
+                           'c', 0};
     bytes2.insert(At(bytes2, 66), section.begin(), section.end());
     bytes2.erase(At(bytes2, bytes2.size() - 5), At(bytes2, bytes2.size()));
     Bad(bytes2);
@@ -266,14 +295,16 @@ int main() {
   // count would misread).
   {
     Bytes bytes1 = golden;
-    const Bytes section = {0, 5, 'f', 'o', 'n', 't', 's', 0, 3, 'a', 'b', 'c'};
+    const Bytes section = {0, 5, 'f', 'o', 'n', 't', 's', 1, 0, 3, 'a', 'b',
+                           'c', 0};
     bytes1.insert(At(bytes1, 65), section.begin(), section.end());
     Bad(bytes1);
   }
   // Duplicated font section is rejected rather than silently skipped.
   {
     auto bytes2 = Schema2(golden, 2);
-    const Bytes section = {0, 5, 'f', 'o', 'n', 't', 's', 0, 3, 'a', 'b', 'c'};
+    const Bytes section = {0, 5, 'f', 'o', 'n', 't', 's', 1, 0, 3, 'a', 'b',
+                           'c', 0};
     bytes2.insert(At(bytes2, 66), section.begin(), section.end());
     bytes2.insert(At(bytes2, 66), section.begin(), section.end());
     Bad(bytes2);
@@ -282,7 +313,8 @@ int main() {
   // the slot table and the stream must fail rather than skip unknown bytes.
   {
     auto bytes2 = Schema2(golden, 2);
-    const Bytes wrong_tag = {0, 5, 'f', 'o', 'n', 'X', 's', 0, 3, 'a', 'b', 'c'};
+    const Bytes wrong_tag = {0, 5, 'f', 'o', 'n', 'X', 's', 1, 0, 3, 'a', 'b',
+                             'c', 0};
     bytes2.insert(At(bytes2, 66), wrong_tag.begin(), wrong_tag.end());
     Bad(bytes2);
   }

@@ -59,7 +59,7 @@
     },
     {
       "path": "patches/0011-lengsuo-sources.patch",
-      "sha256": "852dac440f5bf451d1bb14341bb1064d9060ead90beb40d23d01d11f91496c50"
+      "sha256": "48e49bbf47c8ccce76e42afd252c532d7c3eb40ebe6cd8e0c2ef442e7fa8a576"
     },
     {
       "path": "patches/0012-ua-ch-brand.patch",
@@ -70,8 +70,8 @@
       "sha256": "4c3bd2260c0dadb00e480cebc284d7fda62ab46b82c886abebaf4e22a9dfd561"
     },
     {
-      "path": "patches/0014-font-dimension.patch",
-      "sha256": "b645e42ebd4565993915a70b106b390b1fcaac6abe720e29ed6489fce8f6cbd8"
+      "path": "patches/0014-font-metrics.patch",
+      "sha256": "4196cd1512f7f34af856be367bbfc482de1ef9a3fbd1784a37be7c5f32f4ffda"
     }
   ]
 }

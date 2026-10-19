@@ -1,13 +1,10 @@
 // fp_overrides - renderer-side fingerprint override state.
 //
-// One switch carries everything:
-//   --lengsuo-managed-fp=<seed-hex>:<canvas>:<audio>:<rects>:<fonts>:<gpu>:
-//                        <ua>:<webgl-params>:<vendor>:<renderer>:<hwc>:<mem>
-// 0 (or empty, for the two strings) keeps that dimension native. The font
-// dimension is the exception: it is not a seed but an explicit family list,
-// and it therefore arrives in its own --lengsuo-managed-fonts switch (see
-// docs/fp-switch-contract.md). Absent switches => everything disabled and
-// upstream behavior stays byte-identical.
+// --lengsuo-managed-fp=<seed>:<canvas>:<audio>:<rects>:<fonts>:<gpu>:<ua>:
+//   <webgl>:<vendor>:<renderer>:<hwc>:<mem>; 0/empty keeps that dimension native.
+// The font dimension is the exception: its {switcher, value, mask} content rides
+// its own --lengsuo-managed-fonts switch (docs/fp-switch-contract.md). Absent
+// switches => everything disabled and upstream behavior stays byte-identical.
 #include "fp_overrides.h"
 
 #include <array>
@@ -16,6 +13,10 @@
 #include <cstring>
 #include <span>
 #include <string_view>
+#include <utility>
+
+#include "font_family_traits.h"
+#include "font_metrics.h"
 
 namespace lengsuo::fp {
 namespace {
@@ -50,7 +51,6 @@ std::uint64_t g_seed = 0;
 std::uint64_t g_canvas = 0;
 std::uint64_t g_audio = 0;
 std::uint32_t g_rects = 0;
-std::uint32_t g_fonts = 0;
 std::uint32_t g_gpu = 0;
 std::uint32_t g_ua = 0;
 std::uint32_t g_webgl_params = 0;
@@ -63,13 +63,11 @@ std::array<char, kMaxFaceLen + 1> g_renderer_storage{};
 std::uint32_t g_hw_concurrency = 0;
 std::uint32_t g_device_memory = 0;
 
-// Font availability set. Unlike the numeric slots above this is not a seed:
-// the profile hands over an explicit family list (对标端 does not expose a font
-// pool, so nothing is ever invented here -- see docs/font-dimension.md). The
-// storage is a function-local static so it has no exit-time destructor.
-FontFaceSetFilter& FontsStorage() {
-  static FontFaceSetFilter fonts;
-  return fonts;
+// Font dimension traits -- the {switcher, value, mask} shape, not a seed.
+// Function-local static so it has no exit-time destructor.
+lengsuo::fonts::FamilyTraits& FontTraitsStorage() {
+  static lengsuo::fonts::FamilyTraits traits;
+  return traits;
 }
 bool g_fonts_installed = false;
 
@@ -86,18 +84,28 @@ std::string_view StoreFace(std::string_view text,
   return std::string_view(storage.data(), n);
 }
 
-std::uint32_t ParseDecimal(std::string_view text) {
+// Returns false when the field is not a plain decimal integer (empty, too long,
+// or carrying a non-digit). Distinguishing "0" from "x" matters for the font
+// switch: "x" must be rejected, not silently read as 0.
+bool ParseDecimalStrict(std::string_view text, std::uint32_t* out) {
   if (text.empty() || text.size() > 9) {
-    return 0;
+    return false;
   }
   std::uint32_t value = 0;
   for (const char c : text) {
     if (c < '0' || c > '9') {
-      return 0;
+      return false;
     }
     value = value * 10u + static_cast<std::uint32_t>(c - '0');
   }
-  return value;
+  *out = value;
+  return true;
+}
+
+// Lenient form: any malformed field reads as 0 (i.e. "keep native").
+std::uint32_t ParseDecimal(std::string_view text) {
+  std::uint32_t value = 0;
+  return ParseDecimalStrict(text, &value) ? value : 0;
 }
 
 bool ParseHex(std::string_view text, std::uint64_t* out) {
@@ -136,7 +144,6 @@ std::int64_t PowerOfTwoAtMost(std::int64_t value) {
   }
   return result;
 }
-
 }  // namespace
 
 void InitFromSwitch(std::string_view value) {
@@ -146,7 +153,6 @@ void InitFromSwitch(std::string_view value) {
   g_canvas = 0;
   g_audio = 0;
   g_rects = 0;
-  g_fonts = 0;
   g_gpu = 0;
   g_ua = 0;
   g_webgl_params = 0;
@@ -180,7 +186,8 @@ void InitFromSwitch(std::string_view value) {
   const std::uint32_t canvas_slot = ParseDecimal(fields.at(kCanvas));
   const std::uint32_t audio_slot = ParseDecimal(fields.at(kAudio));
   g_rects = ParseDecimal(fields.at(kRects));
-  g_fonts = ParseDecimal(fields.at(kFonts));
+  // kFonts is a contract position only; the font content rides its own switch.
+  (void)ParseDecimal(fields.at(kFonts));
   g_gpu = ParseDecimal(fields.at(kGpu));
   g_ua = ParseDecimal(fields.at(kUa));
   g_webgl_params = ParseDecimal(fields.at(kWebglParams));
@@ -201,9 +208,31 @@ void InitFromSwitch(std::string_view value) {
 
 bool InitFontsFromSwitch(std::string_view value) {
   g_fonts_installed = false;
-  if (!FontsStorage().Init(value)) {
+  FontTraitsStorage() = lengsuo::fonts::FamilyTraits();
+  // Payload: <slot>:<mask>:<Family;Family;...>. The value may be empty (its
+  // own statement: the mask then decides), so only the two numeric fields are
+  // mandatory. A missing second colon is malformed, not "empty value".
+  const std::size_t first = value.find(':');
+  if (first == std::string_view::npos) {
     return false;
   }
+  const std::size_t second = value.find(':', first + 1);
+  if (second == std::string_view::npos) {
+    return false;
+  }
+  std::uint32_t slot = 0;
+  std::uint32_t mask = 0;
+  if (!ParseDecimalStrict(value.substr(0, first), &slot) ||
+      !ParseDecimalStrict(value.substr(first + 1, second - first - 1), &mask)) {
+    return false;
+  }
+  const std::string_view families = value.substr(second + 1);
+  lengsuo::fonts::FamilyTraits traits =
+      lengsuo::fonts::ParseFamilyTraits(slot, families, mask);
+  if (slot != 0 && !traits.installed) {
+    return false;  // malformed value: install nothing
+  }
+  FontTraitsStorage() = std::move(traits);
   g_fonts_installed = true;
   return true;
 }
@@ -247,23 +276,24 @@ std::uint64_t AudioSeed() {
   return g_audio;
 }
 
-const FontFaceSetFilter* Fonts() {
-  return g_fonts_installed ? &FontsStorage() : nullptr;
+const lengsuo::fonts::FamilyTraits& FontTraits() {
+  return FontTraitsStorage();
 }
 
-std::string FontSubstituteFor(std::string_view family,
-                              std::span<const std::string_view> candidates) {
+float PerturbGlyphAdvance(float advance) {
   if (!g_fonts_installed) {
-    return std::string();  // no set installed: stay byte-identical to upstream
+    return advance;  // no profile statement: byte-identical to upstream
   }
-  // Builds a throwaway substitution view from the installed set. The decision
-  // itself lives in native/font_substitution.h so it can be unit-tested
-  // without Blink; this wrapper only bridges the renderer-side storage.
-  const FontSubstitution substitution = FontSubstitution::From(FontsStorage());
-  if (!substitution.NeedsSubstitute(family)) {
-    return std::string();
+  const lengsuo::fonts::FamilyTraits& traits = FontTraitsStorage();
+  // Needs both a relevant statement (installed and active) and a stream.
+  if (!traits.installed || !traits.perturbs_metrics) {
+    return advance;
   }
-  return substitution.SubstituteFor(family, candidates);
+  lengsuo::fonts::FontNoiseConfig config;
+  config.enabled = true;
+  config.seed = g_seed ^ (static_cast<std::uint64_t>(traits.slot) << 32);
+  config.advance = advance;
+  return lengsuo::fonts::PerturbAdvance(config).advance;
 }
 
 std::uint64_t WebGLParamsSeed() {
