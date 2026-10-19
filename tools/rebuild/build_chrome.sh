@@ -43,17 +43,50 @@ require_deps() {
 stage_recipe() {
     say "== recipe checkout =="
     if [ -d "$RECIPE/.git" ]; then
-        git -C "$RECIPE" fetch -q origin main && git -C "$RECIPE" reset -q --hard origin/main
+        # github.com is reachable directly; the tunnel proxy is only needed for
+        # googlesource, and routing github through it is slower and flakier.
+        if ! ( cd "$RECIPE" && env -u http_proxy -u https_proxy \
+                git fetch -q origin main && \
+                git reset -q --hard origin/main ); then
+            say "FATAL: could not update recipe; refusing to build from a stale patch set"
+            receipt recipe 1
+            return 1
+        fi
         receipt recipe 0
-        say "recipe updated"
+        say "recipe updated to $(git -C "$RECIPE" rev-parse --short HEAD)"
         return 0
     fi
     # Our own repository carries the patches and the lock file.
-    git clone --depth 1 https://github.com/KimChow/lengsuo-browser.git "$RECIPE"
-    local rc=$?
-    receipt recipe $rc
-    say "recipe clone rc=$rc"
-    return $rc
+    if ! env -u http_proxy -u https_proxy \
+            git clone --depth 1 https://github.com/KimChow/lengsuo-browser.git "$RECIPE"; then
+        receipt recipe 1
+        say "FATAL: recipe clone failed"
+        return 1
+    fi
+    receipt recipe 0
+    say "recipe cloned"
+    return 0
+}
+
+stage_clean() {
+    say "== reset tree to pinned baseline =="
+    local actual
+    actual=$(git -C "$SRC" rev-parse HEAD)
+    if [ "$actual" != "$REV" ]; then
+        say "FATAL: HEAD is $actual, expected $REV"
+        receipt chromium_clean 1
+        return 1
+    fi
+    # patch_apply is not atomic: a failed run leaves earlier patches applied,
+    # and the next run then reports "does not apply cleanly" on a later patch.
+    # Discard tracked edits and our own untracked source tree before applying.
+    git -C "$SRC" checkout -- .
+    rm -rf "$SRC/lengsuo"
+    local dirty
+    dirty=$(git -C "$SRC" status --porcelain | grep -v '^??' | wc -l)
+    receipt chromium_clean $([ "$dirty" -eq 0 ] && echo 0 || echo 1)
+    say "clean rc=$? dirty_files=$dirty"
+    [ "$dirty" -eq 0 ]
 }
 
 stage_patch() {
@@ -95,9 +128,9 @@ require_deps
 
 case "${1:-all}" in
     recipe) stage_recipe ;;
-    patch)  stage_recipe && stage_patch ;;
+    patch)  stage_recipe && stage_clean && stage_patch ;;
     gen)    stage_gen ;;
     build)  stage_build ;;
-    all)    stage_recipe && stage_patch && stage_gen && stage_build; say "ALL rc=$?" ;;
+    all)    stage_recipe && stage_clean && stage_patch && stage_gen && stage_build; say "ALL rc=$?" ;;
     *) say "unknown stage $1"; exit 2 ;;
 esac
