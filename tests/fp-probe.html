@@ -1,0 +1,306 @@
+<!doctype html>
+<html lang="en">
+<meta charset="utf-8">
+<title>fp-probe</title>
+<style>body{font:13px system-ui;margin:12px}pre{white-space:pre-wrap}</style>
+<canvas id="c" width="240" height="60"></canvas>
+<pre id="out">probing…</pre>
+<script>
+// Single source of truth for "what does this browser report".
+//
+// The page only *collects*. Judging whether a value is normal happens in
+// tools/fp_compare.py by diffing two runs (official Chrome vs our build), so
+// there is no pass/fail opinion baked in here.
+//
+// window.__PROBE__ resolves to one JSON object; window.__PROBE_TEXT__ is the
+// same thing as pretty JSON once settled (for hosts that can only read text).
+
+const FONT_NAMES = [
+  'Arial', 'Arial Black', 'Calibri', 'Cambria', 'Candara', 'Comic Sans MS',
+  'Consolas', 'Constantia', 'Corbel', 'Courier New', 'Georgia', 'Impact',
+  'Lucida Console', 'Microsoft YaHei', 'Palatino Linotype', 'Segoe UI',
+  'SimSun', 'Tahoma', 'Times New Roman', 'Trebuchet MS', 'Verdana',
+  'DejaVu Sans', 'Liberation Sans', 'Noto Sans CJK SC',
+];
+
+// Width-based detection: a font is "present" when swapping it changes the
+// measured width of a probe string against all three generic fallbacks.
+function detectFonts() {
+  const probe = 'mmmmmmmmmmlli1WQ@';
+  const bases = ['monospace', 'sans-serif', 'serif'];
+  const span = document.createElement('span');
+  span.style.cssText =
+      'position:absolute;left:-9999px;top:0;font-size:72px;visibility:hidden';
+  span.textContent = probe;
+  document.body.appendChild(span);
+  const base = {};
+  for (const b of bases) {
+    span.style.fontFamily = b;
+    base[b] = span.getBoundingClientRect().width;
+  }
+  const found = [];
+  for (const name of FONT_NAMES) {
+    let hit = false;
+    for (const b of bases) {
+      span.style.fontFamily = `"${name}",${b}`;
+      if (span.getBoundingClientRect().width !== base[b]) { hit = true; break; }
+    }
+    if (hit) found.push(name);
+  }
+  span.remove();
+  return found;
+}
+
+function dumpGL(gl) {
+  if (!gl) return { available: false };
+  const dbg = gl.getExtension('WEBGL_debug_renderer_info');
+  const p = (k) => {
+    try {
+      const v = gl.getParameter(k);
+      if (v === null || v === undefined) return null;
+      if (typeof v === 'number' || typeof v === 'string' || typeof v === 'boolean') {
+        return v;
+      }
+      if (Array.isArray(v) || ArrayBuffer.isView(v)) return Array.from(v);
+      return String(v);
+    } catch (e) {
+      return 'ERR:' + e;
+    }
+  };
+  const out = {
+    available: true,
+    version: p(gl.VERSION),
+    shadingLanguageVersion: p(gl.SHADING_LANGUAGE_VERSION),
+    vendor: p(gl.VENDOR),
+    renderer: p(gl.RENDERER),
+    unmaskedVendor: dbg ? p(dbg.UNMASKED_VENDOR_WEBGL) : null,
+    unmaskedRenderer: dbg ? p(dbg.UNMASKED_RENDERER_WEBGL) : null,
+    activeTexture: p(gl.ACTIVE_TEXTURE),
+    viewport: p(gl.VIEWPORT),
+    maxViewportDims: p(gl.MAX_VIEWPORT_DIMS),
+    aliasedLineWidthRange: p(gl.ALIASED_LINE_WIDTH_RANGE),
+    aliasedPointSizeRange: p(gl.ALIASED_POINT_SIZE_RANGE),
+    maxTextureSize: p(gl.MAX_TEXTURE_SIZE),
+    maxCubeMapTextureSize: p(gl.MAX_CUBE_MAP_TEXTURE_SIZE),
+    maxRenderbufferSize: p(gl.MAX_RENDERBUFFER_SIZE),
+    maxVertexAttribs: p(gl.MAX_VERTEX_ATTRIBS),
+    maxVertexUniformVectors: p(gl.MAX_VERTEX_UNIFORM_VECTORS),
+    maxVaryingVectors: p(gl.MAX_VARYING_VECTORS),
+    maxFragmentUniformVectors: p(gl.MAX_FRAGMENT_UNIFORM_VECTORS),
+    maxTextureImageUnits: p(gl.MAX_TEXTURE_IMAGE_UNITS),
+    maxVertexTextureImageUnits: p(gl.MAX_VERTEX_TEXTURE_IMAGE_UNITS),
+    maxCombinedTextureImageUnits: p(gl.MAX_COMBINED_TEXTURE_IMAGE_UNITS),
+  };
+  try {
+    out.extensions = (gl.getSupportedExtensions() || []).slice().sort();
+  } catch (e) {
+    out.extensions = ['ERR:' + e];
+  }
+  return out;
+}
+
+function canvasHash() {
+  const cv = document.createElement('canvas');
+  cv.width = 240; cv.height = 60;
+  const ctx = cv.getContext('2d');
+  ctx.textBaseline = 'alphabetic';
+  ctx.fillStyle = '#38761d';
+  ctx.fillRect(0, 0, 120, 40);
+  ctx.fillStyle = '#f1c232';
+  ctx.font = '16px "Arial"';
+  ctx.fillText('fingerprint 你好 123', 4, 24);
+  ctx.strokeStyle = 'rgba(10,20,30,0.7)';
+  ctx.beginPath();
+  ctx.arc(180, 30, 22, 0, Math.PI * 1.5);
+  ctx.stroke();
+  const px = ctx.getImageData(0, 0, 240, 60).data;
+  let h = 2166136261 >>> 0;
+  for (let i = 0; i < px.length; i++) {
+    h ^= px[i];
+    h = Math.imul(h, 16777619) >>> 0;
+  }
+  return h;
+}
+
+function clientRects() {
+  const d = document.createElement('div');
+  d.style.cssText =
+      'position:absolute;left:13.37px;top:7.11px;width:100.5px;height:20px';
+  document.body.appendChild(d);
+  const r = d.getBoundingClientRect();
+  const out = [r.x, r.y, r.width, r.height];
+  d.remove();
+  return out;
+}
+
+async function audioSum() {
+  try {
+    // OfflineAudioContext.startRendering() can never settle when the host has
+    // no audio backend (common under a bare Xvfb). A stuck probe is worse than
+    // a missing value, so bound it.
+    const work = (async () => {
+      const off = new OfflineAudioContext(1, 4410, 44100);
+      const osc = off.createOscillator();
+      osc.type = 'triangle';
+      osc.frequency.value = 1000;
+      osc.connect(off.destination);
+      osc.start();
+      const buf = await off.startRendering();
+      const data = buf.getChannelData(0);
+      let acc = 0;
+      for (let i = 450; i < 500; i++) acc += Math.abs(data[i]);
+      return acc;
+    })();
+    const guard = new Promise((resolve) =>
+        setTimeout(() => resolve('TIMEOUT'), 4000));
+    return await Promise.race([work, guard]);
+  } catch (e) {
+    return 'ERR:' + e;
+  }
+}
+
+async function probe() {
+  const nav = navigator;
+  const r = {};
+
+  // Font enumeration is O(fonts x fallbacks) of forced layout, so start it
+  // early and let it run while the async parts settle.
+  const fontsPromise = Promise.resolve().then(() => detectFonts());
+
+  r.basic = {
+    userAgent: nav.userAgent,
+    appVersion: nav.appVersion,
+    appName: nav.appName,
+    appCodeName: nav.appCodeName,
+    platform: nav.platform,
+    vendor: nav.vendor,
+    product: nav.product,
+    productSub: nav.productSub,
+    oscpu: nav.oscpu ?? null,
+    language: nav.language,
+    languages: nav.languages,
+    hardwareConcurrency: nav.hardwareConcurrency,
+    deviceMemory: nav.deviceMemory ?? null,
+    maxTouchPoints: nav.maxTouchPoints,
+    webdriver: nav.webdriver,
+    pdfViewerEnabled: nav.pdfViewerEnabled,
+    cookieEnabled: nav.cookieEnabled,
+    doNotTrack: nav.doNotTrack,
+  };
+
+  r.chromeObject = {
+    typeofChrome: typeof window.chrome,
+    keys: window.chrome ? Object.keys(window.chrome).sort() : [],
+  };
+
+  r.plugins = Array.from(nav.plugins || []).map((p) => p.name);
+  r.mimeTypes = Array.from(nav.mimeTypes || []).map((m) => m.type);
+
+  if (nav.userAgentData) {
+    const d = nav.userAgentData;
+    r.uaDataLow = {
+      brands: (d.brands || []).map((b) => [b.brand, b.version]),
+      mobile: d.mobile,
+      platform: d.platform,
+    };
+    try {
+      const h = await d.getHighEntropyValues([
+        'architecture', 'bitness', 'formFactors', 'fullVersionList', 'model',
+        'platformVersion', 'uaFullVersion', 'wow64',
+      ]);
+      r.uaDataHigh = {
+        architecture: h.architecture ?? null,
+        bitness: h.bitness ?? null,
+        formFactors: h.formFactors ?? null,
+        fullVersionList:
+            (h.fullVersionList || []).map((b) => [b.brand, b.version]),
+        model: h.model ?? null,
+        platformVersion: h.platformVersion ?? null,
+        uaFullVersion: h.uaFullVersion ?? null,
+        wow64: h.wow64 ?? null,
+      };
+    } catch (e) {
+      r.uaDataHigh = { error: String(e) };
+    }
+  } else {
+    r.uaDataLow = null;
+    r.uaDataHigh = null;
+  }
+
+  const dto = Intl.DateTimeFormat().resolvedOptions();
+  r.intl = {
+    timeZone: dto.timeZone,
+    locale: dto.locale,
+    calendar: dto.calendar,
+    numberingSystem: dto.numberingSystem,
+    tzOffsetJan: new Date('2026-01-15T00:00:00Z').getTimezoneOffset(),
+    tzOffsetJul: new Date('2026-07-15T00:00:00Z').getTimezoneOffset(),
+    epochString: new Date(0).toString(),
+    dateFormatSample: new Intl.DateTimeFormat(undefined, {
+      dateStyle: 'full', timeStyle: 'long',
+    }).format(new Date('2026-01-15T12:00:00Z')),
+  };
+
+  r.display = {
+    screen: {
+      width: screen.width, height: screen.height,
+      availWidth: screen.availWidth, availHeight: screen.availHeight,
+      colorDepth: screen.colorDepth, pixelDepth: screen.pixelDepth,
+    },
+    devicePixelRatio,
+    outer: [outerWidth, outerHeight],
+    inner: [innerWidth, innerHeight],
+  };
+
+  r.webgl1 = dumpGL(document.createElement('canvas').getContext('webgl'));
+  r.webgl2 = dumpGL(document.createElement('canvas').getContext('webgl2'));
+  r.canvasHash = canvasHash();
+  r.clientRects = clientRects();
+  r.audioSum = await audioSum();
+  r.fonts = await fontsPromise;
+
+  return r;
+}
+
+function render(obj) {
+  window.__PROBE_TEXT__ = JSON.stringify(obj, null, 2);
+  document.getElementById('out').textContent = window.__PROBE_TEXT__;
+}
+
+// Optional zero-automation transport: when opened with `?report=1` the page
+// POSTs its own result back to whatever host served it. The browser can then
+// be launched completely normally (no CDP, no --enable-automation), so
+// navigator.webdriver and friends reflect the product, not the harness.
+function maybeReport(obj) {
+  const params = new URLSearchParams(location.search);
+  if (params.get('report') !== '1') return;
+  try {
+    const xhr = new XMLHttpRequest();
+    xhr.open('POST', '/report', false);
+    xhr.setRequestHeader('Content-Type', 'application/json');
+    xhr.send(JSON.stringify(obj));
+  } catch (e) {
+    document.title = 'REPORT-FAILED';
+  }
+}
+
+// Report failures too: a silent no-show is indistinguishable from "the browser
+// never loaded the page", which is exactly the ambiguity that wastes a run.
+window.__PROBE__ = probe().then((r) => {
+  render(r);
+  maybeReport(r);
+  return r;
+}).catch((e) => {
+  const err = { error: String(e && e.stack || e) };
+  render(err);
+  maybeReport(err);
+  throw e;
+});
+
+// Belt and braces: if anything throws before probe() resolves, still report.
+window.addEventListener('error', (ev) => {
+  if (window.__PROBE_TEXT__) return;
+  maybeReport({ error: 'uncaught: ' + (ev.message || 'unknown') });
+});
+</script>
+</html>
