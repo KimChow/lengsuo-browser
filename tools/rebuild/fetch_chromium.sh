@@ -14,7 +14,7 @@
 set -u
 
 ROOT=${LENGSUO_ROOT:-/home/ubuntu/lengsuo-browser-dev}
-SRC=$ROOT/chromium-src
+SRC=$ROOT/src
 DEPS=$ROOT/depot_tools
 REVIEWS=$ROOT/reviews
 LOG=$REVIEWS/rebuild.log
@@ -147,7 +147,9 @@ EOF
 stage_hooks() {
     say "== runhooks =="
     if receipt_ok chromium_hooks; then say "already ran"; return 0; fi
-    ( cd "$SRC" && PATH="$DEPS:$PATH" "$DEPS/gclient" runhooks )
+    # Same as sync: gclient resolves .gclient from the working directory, and
+    # runhooks additionally needs the src solution it was configured with.
+    ( cd "$ROOT" && PATH="$DEPS:$PATH" "$DEPS/gclient" runhooks )
     local rc=$?
     receipt chromium_hooks $rc
     say "hooks rc=$rc"

@@ -94,7 +94,7 @@ def main(argv: list[str]) -> int:
         print("patch 0011 matches the repository sources")
         return 0
 
-    PATCH.write_text(generated, encoding="utf-8")
+    PATCH.write_bytes(generated.encode("utf-8"))
     print("wrote %s (%d lines)" % (PATCH, len(generated.splitlines())))
     return 0
 

@@ -9,7 +9,7 @@
 set -u
 
 ROOT=${LENGSUO_ROOT:-/home/ubuntu/lengsuo-browser-dev}
-SRC=$ROOT/chromium-src
+SRC=$ROOT/src
 DEPS=$ROOT/depot_tools
 RECIPE=$ROOT/recipe
 REVIEWS=$ROOT/reviews
@@ -59,7 +59,7 @@ stage_recipe() {
 stage_patch() {
     say "== apply patches =="
     if receipt_ok chromium_patched; then say "already patched"; return 0; fi
-    ( cd "$RECIPE" && python3 tools/patch_apply.py \
+    ( cd "$RECIPE" && python3 -m tools.patch_apply \
         --source "$SRC" --repository "$RECIPE" \
         --lock "$RECIPE/baseline.json" --apply )
     local rc=$?
