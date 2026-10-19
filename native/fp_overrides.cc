@@ -8,7 +8,7 @@
 // and it therefore arrives in its own --lengsuo-managed-fonts switch (see
 // docs/fp-switch-contract.md). Absent switches => everything disabled and
 // upstream behavior stays byte-identical.
-#include "lengsuo/native/fp_overrides.h"
+#include "fp_overrides.h"
 
 #include <array>
 #include <cstddef>
@@ -248,7 +248,22 @@ std::uint64_t AudioSeed() {
 }
 
 const FontFaceSetFilter* Fonts() {
-  return g_fonts_installed ? &g_fonts : nullptr;
+  return g_fonts_installed ? &FontsStorage() : nullptr;
+}
+
+std::string FontSubstituteFor(std::string_view family,
+                              std::span<const std::string_view> candidates) {
+  if (!g_fonts_installed) {
+    return std::string();  // no set installed: stay byte-identical to upstream
+  }
+  // Builds a throwaway substitution view from the installed set. The decision
+  // itself lives in native/font_substitution.h so it can be unit-tested
+  // without Blink; this wrapper only bridges the renderer-side storage.
+  const FontSubstitution substitution = FontSubstitution::From(FontsStorage());
+  if (!substitution.NeedsSubstitute(family)) {
+    return std::string();
+  }
+  return substitution.SubstituteFor(family, candidates);
 }
 
 std::uint64_t WebGLParamsSeed() {

@@ -1,0 +1,133 @@
+diff --git a/chrome/browser/chrome_content_browser_client.cc b/chrome/browser/chrome_content_browser_client.cc
+index 6902984550..1f37466438 100644
+--- a/chrome/browser/chrome_content_browser_client.cc
++++ b/chrome/browser/chrome_content_browser_client.cc
+@@ -2907,6 +2907,17 @@ void ChromeContentBrowserClient::AppendExtraCommandLineSwitches(
+           "lengsuo-managed-fp",
+           browser_cmd.GetSwitchValueASCII("lengsuo-managed-fp"));
+     }
++    // Same direct-passthrough for the font set. The font dimension is an
++    // explicit family list, not a seed, so it travels in its own switch rather
++    // than a colon field of --lengsuo-managed-fp (docs/fp-switch-contract.md).
++    // The list can be ~2 KB, so it is appended verbatim from the browser's own
++    // command line; profile-wire delivery waits on the schema-2 gate.
++    if (browser_cmd.HasSwitch("lengsuo-managed-fonts") &&
++        !command_line->HasSwitch("lengsuo-managed-fonts")) {
++      command_line->AppendSwitchASCII(
++          "lengsuo-managed-fonts",
++          browser_cmd.GetSwitchValueASCII("lengsuo-managed-fonts"));
++    }
+     if (const auto* browser_profile = lengsuo::BrowserProfile()) {
+       command_line->AppendSwitchASCII("lengsuo-managed-language",
+                                       browser_profile->language);
+diff --git a/content/renderer/renderer_main.cc b/content/renderer/renderer_main.cc
+index cc2d2fd932..0fd5d7b7b7 100644
+--- a/content/renderer/renderer_main.cc
++++ b/content/renderer/renderer_main.cc
+@@ -168,6 +168,13 @@ int RendererMain(MainFunctionParams parameters) {
+     lengsuo::fp::InitFromSwitch(
+         command_line.GetSwitchValueASCII("lengsuo-managed-fp"));
+   }
++  // Font availability set. Absent => no set is installed and every family
++  // keeps resolving exactly as upstream. A malformed payload installs nothing
++  // rather than a half list (native/font_face_set_filter.h).
++  if (command_line.HasSwitch("lengsuo-managed-fonts")) {
++    lengsuo::fp::InitFontsFromSwitch(
++        command_line.GetSwitchValueASCII("lengsuo-managed-fonts"));
++  }
+   if (command_line.HasSwitch("lengsuo-managed-language")) {
+     const auto locale =
+         command_line.GetSwitchValueASCII("lengsuo-managed-language");
+diff --git a/third_party/blink/renderer/platform/BUILD.gn b/third_party/blink/renderer/platform/BUILD.gn
+index 94334c1ce1..3fd24c10c4 100644
+--- a/third_party/blink/renderer/platform/BUILD.gn
++++ b/third_party/blink/renderer/platform/BUILD.gn
+@@ -1819,6 +1819,7 @@ component("platform") {
+     "//ui/native_theme/features",
+   ]
+   deps = [
++    "//lengsuo/native:canvas_noise",
+     ":rustfft_ffi",
+     "fonts:font_format_bindings",
+     "fonts:ift_patcher_bindings",
+diff --git a/third_party/blink/renderer/platform/fonts/skia/font_cache_skia.cc b/third_party/blink/renderer/platform/fonts/skia/font_cache_skia.cc
+index 31af2c1f7c..2c81e88837 100644
+--- a/third_party/blink/renderer/platform/fonts/skia/font_cache_skia.cc
++++ b/third_party/blink/renderer/platform/fonts/skia/font_cache_skia.cc
+@@ -31,6 +31,8 @@
+ #include <unicode/locid.h>
+
+ #include <memory>
++#include <span>
++#include <string>
+ #include <utility>
+
+ #include "base/check_op.h"
+@@ -39,6 +41,7 @@
+ #include "base/strings/string_view_util.h"
+ #include "base/timer/elapsed_timer.h"
+ #include "build/build_config.h"
++#include "lengsuo/native/fp_overrides.h"
+ #include "skia/ext/font_utils.h"
+ #include "third_party/blink/public/platform/linux/web_sandbox_support.h"
+ #include "third_party/blink/public/platform/platform.h"
+@@ -273,6 +276,44 @@ const SimpleFontData* FontCache::GetLastResortFallbackFont(
+   return FontDataFromFontPlatformData(font_platform_data);
+ }
+
++namespace {
++
++// Resolves a declared-but-absent family onto a real installed family.
++//
++// The candidate pool is the CSS generic families, which the platform font
++// manager resolves through its fontconfig aliases without enumerating the
++// installed set. That matters: on Linux the renderer's SkFontConfigInterface is
++// a mojo FontLoader whose countFamilies()/getFamilyName() are
++// SK_ABORT("Not implemented."), so any enumeration of the host's families
++// aborts the process (the same defect Blink hits for an unknown family name).
++// Naming three generic families avoids that path while still handing each
++// declared family a real, measurable typeface.
++//
++// The choice is a pure function of the declared name (native/font_substitution.h),
++// so two renderer processes handed one profile agree. Returns null when no
++// substitution applies -- no set installed, the family is not declared, or the
++// generics do not resolve -- in which case the caller keeps the native
++// "unresolved" result.
++sk_sp<SkTypeface> LengsuoSubstitutedTypeface(
++    const AtomicString& family,
++    const FontDescription& font_description) {
++  SkFontMgr* const font_manager = skia::DefaultFontMgr().get();
++  if (!font_manager) {
++    return nullptr;
++  }
++  static constexpr std::string_view kGenericCandidates[] = {
++      "serif", "sans-serif", "monospace"};
++  const std::string substitute = lengsuo::fp::FontSubstituteFor(
++      family.Utf8(), std::span<const std::string_view>(kGenericCandidates));
++  if (substitute.empty()) {
++    return nullptr;
++  }
++  return font_manager->matchFamilyStyle(substitute.c_str(),
++                                        font_description.SkiaFontStyle());
++}
++
++}  // namespace
++
+ sk_sp<SkTypeface> FontCache::CreateTypeface(
+     const FontDescription& font_description,
+     const FontFaceCreationParams& creation_params,
+@@ -306,6 +347,14 @@ sk_sp<SkTypeface> FontCache::CreateTypeface(
+ #endif  // BUILDFLAG(IS_ANDROID)
+   sk_sp<SkTypeface> typeface = MatchFamilyStyle(
+       name.empty() ? nullptr : name.c_str(), font_description.SkiaFontStyle());
++  // Lengsuo gamma2: a family the profile declares is made to resolve to a real
++  // installed family when the host lacks it, instead of falling through to the
++  // default fallback. Additive only -- a family the host resolves is never
++  // touched -- and reusing the host's own glyphs, so measurement and rendering
++  // stay consistent (docs/font-dimension.md). No set installed => no-op.
++  if (!typeface) {
++    typeface = LengsuoSubstitutedTypeface(family, font_description);
++  }
+   return typeface;
+ }
+

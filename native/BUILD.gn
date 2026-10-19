@@ -24,6 +24,8 @@ source_set("canvas_noise") {
     "fp_overrides.h",
     "font_face_set_filter.cc",
     "font_face_set_filter.h",
+    "font_substitution.cc",
+    "font_substitution.h",
     "canvas_noise.h",
     "product_brand.h",
   ]

@@ -26,10 +26,12 @@ SharedWorker和ServiceWorker时区扩展回归亦已双平台通过，见[Worker
 及 [Screen/DPR 记录](docs/batch2-screen-dpr-design.md)。UA/UA-CH 已验证字段
 及未覆盖范围见 [第三批记录](docs/batch3-ua-uach-design.md)。
 
-指纹覆盖现状（2026-10-19）：canvas / audio / clientRects / GPU 人脸 / WebGL 参数 /
+指纹覆盖现状（2026-10-20）：canvas / audio / clientRects / GPU 人脸 / WebGL 参数 /
 hardwareConcurrency / deviceMemory / UA / language / timezone 已接线并通过端到端验收；
-**字体维度未实现**（slot 已解析、无消费点）。switch 字段契约见
-[指纹 switch 契约](docs/fp-switch-contract.md)，人工验收步骤见
+**字体维度本轮落地**（gamma2：声明但本机缺失的家族别名到 CSS 泛型族，
+`measureText` 宽度随画像改变；画像 wire 投递待 schema 2 门打开）。
+switch 字段契约见 [指纹 switch 契约](docs/fp-switch-contract.md)，
+字体维度见 [字体维度](docs/font-dimension.md)，人工验收步骤见
 [手工验收手册](docs/manual-acceptance.md)（含 `tests/fp-lab.html` 测试页）。
 
 外显一致性现状（2026-10-19，与官方 Chrome 逐字段比对）：

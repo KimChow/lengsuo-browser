@@ -5,9 +5,12 @@
 #ifndef LENGSUO_NATIVE_FP_OVERRIDES_H_
 #define LENGSUO_NATIVE_FP_OVERRIDES_H_
 #include <cstdint>
+#include <span>
+#include <string>
 #include <string_view>
 
 #include "font_face_set_filter.h"
+#include "font_substitution.h"
 namespace lengsuo::fp {
 // Two switches, both optional and both absent by default:
 //   --lengsuo-managed-fp=<seed-hex>:<a>:<c>:<r>:<f>:<g>:<u>:<w>:<vendor>:
@@ -31,6 +34,16 @@ std::uint64_t AudioSeed();
 // Font dimension: nullptr until a valid set is installed. Callers must treat
 // nullptr as "this profile says nothing about fonts" and keep native behavior.
 const FontFaceSetFilter* Fonts();
+
+// gamma2: a family the profile declares but the host cannot resolve is aliased
+// onto one of a fixed pool of universally-present families, so the declaration
+// actually takes effect (docs/cc-task-rulings.md §C). Returns the candidate
+// family name to retry with, or an empty string when no substitution applies
+// (no set installed, family not declared, or the caller offered no candidates).
+// The caller supplies `candidates` -- this layer never invents a family
+// inventory, it only chooses within what it is given.
+std::string FontSubstituteFor(std::string_view family,
+                              std::span<const std::string_view> candidates);
 
 // Slot 7: deterministic seed for WebGL MAX_* parameter perturbation.
 std::uint64_t WebGLParamsSeed();            // 0 = disabled

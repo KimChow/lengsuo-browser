@@ -743,10 +743,10 @@ index 0000000..3bd62d6
 +#endif
 diff --git a/lengsuo/native/BUILD.gn b/lengsuo/native/BUILD.gn
 new file mode 100644
-index 0000000..ae7c189
+index 0000000..b9464b1
 --- /dev/null
 +++ b/lengsuo/native/BUILD.gn
-@@ -0,0 +1,28 @@
+@@ -0,0 +1,32 @@
 +# Decoder source sets. Chromium integration evidence lives in VERIFICATION.md.
 +source_set("profile_wire") {
 +  sources = [
@@ -771,6 +771,10 @@ index 0000000..ae7c189
 +    "canvas_noise.cc",
 +    "fp_overrides.cc",
 +    "fp_overrides.h",
++    "font_face_set_filter.cc",
++    "font_face_set_filter.h",
++    "font_substitution.cc",
++    "font_substitution.h",
 +    "canvas_noise.h",
 +    "product_brand.h",
 +  ]
@@ -1107,20 +1111,299 @@ index 0000000..b6cced4
 +}  // namespace lengsuo::canvas
 +
 +#endif  // LENGSUO_NATIVE_CANVAS_NOISE_H_
+diff --git a/lengsuo/native/font_face_set_filter.cc b/lengsuo/native/font_face_set_filter.cc
+new file mode 100644
+index 0000000..26bb2c6
+--- /dev/null
++++ b/lengsuo/native/font_face_set_filter.cc
+@@ -0,0 +1,5 @@
++// The filter itself is header-only (native/font_face_set_filter.h). This
++// translation unit exists so the CMake and GN targets have a stable source and
++// the header is compiled and -Werror-checked even when only the library, not
++// the test, is built.
++#include "font_face_set_filter.h"
+diff --git a/lengsuo/native/font_face_set_filter.h b/lengsuo/native/font_face_set_filter.h
+new file mode 100644
+index 0000000..3b23965
+--- /dev/null
++++ b/lengsuo/native/font_face_set_filter.h
+@@ -0,0 +1,144 @@
++// font_face_set_filter - the font dimension's availability set.
++//
++// The profile's font slot (slots[3]) has been decoded since schema 1, but
++// nothing consumed it: `document.fonts.check()` and `measureText()` answered
++// from the host's real font list, so changing the slot changed nothing a page
++// could observe. This is the consumer's data structure.
++//
++// It carries *availability only*. It deliberately does not carry glyph or
++// metric data: the pixel layer cannot be faked (docs/gpu-and-detection-plan.md
++// three-layer model), so a family that is answerable as "present" is still
++// shaped by the machine's real font. Availability and measurement therefore
++// stay consistent by construction -- hiding a family hides its widths with it.
++//
++// Header-only: the filter is three small operations over a caller-owned table
++// and gains nothing from a translation unit. It must not pull platform
++// headers, because it is compiled both into the standalone native tests and
++// into Blink.
++//
++// Contract: docs/font-dimension.md.
++#ifndef LENGSUO_NATIVE_FONT_FACE_SET_FILTER_H_
++#define LENGSUO_NATIVE_FONT_FACE_SET_FILTER_H_
++
++#include <cstddef>
++#include <cstdint>
++#include <string>
++#include <string_view>
++#include <vector>
++
++namespace lengsuo::fp {
++
++// Tri-state answer. kNotInitialized is a distinct value rather than "empty",
++// because "this profile says there are no fonts" and "this profile says
++// nothing about fonts" must not collapse into the same behaviour.
++enum class FontFaceSetStatus : std::uint8_t {
++  kNotInitialized = 0,
++  kAbsent = 1,
++  kPresent = 2,
++  kInit = 3,  // the set applies, independent of this family's membership
++};
++
++// Case-sensitive: CSS font family names are case-sensitive, and the browser
++// compares the resolved family name, not the authored one.
++class FontFaceSetFilter {
++ public:
++  static constexpr std::size_t kMaxEntries = 64;
++  static constexpr std::size_t kMaxName = 128;
++  static constexpr std::size_t kMaxPayload = 2048;
++
++  FontFaceSetFilter() = default;
++
++  // Parses the switch payload: a comma-separated list of family names.
++  //
++  // An empty payload is accepted and means "no family is available" -- an
++  // explicit statement, not an absence of one. Malformed input (empty element,
++  // oversized payload, non-printable byte, oversized or too many names) is
++  // rejected whole: the filter is left uninitialized and the caller must fall
++  // back to native behaviour rather than apply half a font list, which would
++  // claim the dimension was applied while pages still see deleted families.
++  bool Init(std::string_view payload) {
++    entries_.clear();
++    initialized_ = false;
++    if (payload.size() > kMaxPayload) {
++      return false;
++    }
++    for (const char character : payload) {
++      const auto byte = static_cast<unsigned char>(character);
++      if (byte < 32 || byte > 126) {
++        return false;
++      }
++    }
++    std::size_t start = 0;
++    while (start < payload.size()) {
++      const std::size_t comma = payload.find(',', start);
++      const std::size_t end =
++          comma == std::string_view::npos ? payload.size() : comma;
++      if (!Add(payload.substr(start, end - start))) {
++        entries_.clear();
++        initialized_ = false;
++        return false;
++      }
++      if (comma == std::string_view::npos) {
++        break;
++      }
++      start = comma + 1;
++    }
++    initialized_ = true;
++    return true;
++  }
++
++  // Appends one family. Duplicates are ignored, not stored twice.
++  bool Add(std::string_view family) {
++    if (family.empty() || family.size() > kMaxName) {
++      return false;
++    }
++    for (const char character : family) {
++      const auto byte = static_cast<unsigned char>(character);
++      if (byte < 32 || byte > 126) {
++        return false;
++      }
++    }
++    if (Contains(family)) {
++      return true;
++    }
++    if (entries_.size() >= kMaxEntries) {
++      return false;
++    }
++    entries_.emplace_back(family);
++    return true;
++  }
++
++  FontFaceSetStatus status() const {
++    return initialized_ ? FontFaceSetStatus::kInit
++                        : FontFaceSetStatus::kNotInitialized;
++  }
++
++  // Queries are only meaningful once Init() succeeded; the caller is expected
++  // to gate on status() exactly as it gates on whether the switch was present.
++  FontFaceSetStatus Available(std::string_view family) const {
++    if (!initialized_) {
++      return FontFaceSetStatus::kNotInitialized;
++    }
++    return Contains(family) ? FontFaceSetStatus::kPresent
++                            : FontFaceSetStatus::kAbsent;
++  }
++
++  bool empty() const { return entries_.empty(); }
++  std::size_t size() const { return entries_.size(); }
++
++ private:
++  bool Contains(std::string_view family) const {
++    for (const auto& entry : entries_) {
++      if (entry == family) {
++        return true;
++      }
++    }
++    return false;
++  }
++
++  std::vector<std::string> entries_;
++  bool initialized_ = false;
++};
++
++}  // namespace lengsuo::fp
++#endif  // LENGSUO_NATIVE_FONT_FACE_SET_FILTER_H_
+diff --git a/lengsuo/native/font_substitution.cc b/lengsuo/native/font_substitution.cc
+new file mode 100644
+index 0000000..d3330ae
+--- /dev/null
++++ b/lengsuo/native/font_substitution.cc
+@@ -0,0 +1,5 @@
++// The substitution decision is header-only (native/font_substitution.h). This
++// translation unit exists so the CMake and GN targets have a stable source and
++// the header is compiled and -Werror-checked even when only the library, not
++// the test, is built.
++#include "font_substitution.h"
+diff --git a/lengsuo/native/font_substitution.h b/lengsuo/native/font_substitution.h
+new file mode 100644
+index 0000000..2e422df
+--- /dev/null
++++ b/lengsuo/native/font_substitution.h
+@@ -0,0 +1,98 @@
++// font_substitution - make a profile's declared families actually resolve.
++//
++// The font dimension (profile slots[3]) was decoded but did nothing observable.
++// The first proposed fix -- make `document.fonts.check()` answer false for
++// families outside the set -- was withdrawn: upstream `FontFaceSet::check()`
++// (font_face_set.cc:232) returns true for every family the page did not itself
++// register, so that state cannot exist. The observable face of the dimension
++// is instead *availability*: which families resolve to a real typeface, and
++// the widths that follow (docs/cc-task-rulings.md §C).
++//
++// The chosen mechanism is gamma2: add, never remove. A family the profile
++// declares is made to resolve to a real, installed candidate family instead of
++// falling through to the default fallback. We do not invent glyphs, metrics or
++// an inventory -- the substitute is one of the host's own font families, so the
++// pixel layer stays honest (docs/gpu-and-detection-plan.md three-layer model).
++// Families the host already resolves are untouched.
++//
++// This header is pure: it depends only on the availability set and a caller-
++// supplied pool of real candidate names, so it is unit-testable without Blink
++// and without a font backend. The Blink call site feeds it the CSS generic
++// families -- see the comment on the call site for why the host's family list
++// is deliberately not enumerated (native/font_substitution_test.cc,
++// font_cache_skia.cc).
++//
++// Contract: docs/font-dimension.md.
++#ifndef LENGSUO_NATIVE_FONT_SUBSTITUTION_H_
++#define LENGSUO_NATIVE_FONT_SUBSTITUTION_H_
++
++#include <cstddef>
++#include <cstdint>
++#include <span>
++#include <string>
++#include <string_view>
++#include <vector>
++
++#include "font_face_set_filter.h"
++
++namespace lengsuo::fp {
++
++class FontSubstitution {
++ public:
++  // Not installed: every query answers "leave it to the platform". The default
++  // state, so a build with no font switch behaves exactly like upstream.
++  FontSubstitution() = default;
++
++  // Wraps a parsed availability set by value: the substitution owns a copy, so
++  // it outlives the temporary a caller naturally builds it from. A default-
++  // constructed (uninitialized) filter yields a not-installed substitution,
++  // which is the correct answer: "the profile said nothing about fonts" must be
++  // a no-op.
++  static FontSubstitution From(const FontFaceSetFilter& fonts) {
++    FontSubstitution substitution;
++    substitution.fonts_ = fonts;
++    substitution.installed_ = fonts.status() == FontFaceSetStatus::kInit;
++    return substitution;
++  }
++
++  bool Installed() const { return installed_; }
++
++  // True when this family is declared by the profile *and* therefore eligible
++  // for aliasing. Whether the host actually lacks it is decided by the caller
++  // (a family the host resolves is never touched).
++  bool NeedsSubstitute(std::string_view family) const {
++    return installed_ && fonts_.Available(family) == FontFaceSetStatus::kPresent;
++  }
++
++  // Picks a real family from `candidates` for a declared family. Deterministic
++  // in `family` and `candidates` only: a stable, platform-independent hash
++  // (never std::hash, whose value may vary per process), so two renderer
++  // processes given one profile agree. Returns an empty string when there is
++  // nothing to alias onto, which the caller must read as "stay native".
++  std::string SubstituteFor(std::string_view family,
++                            std::span<const std::string_view> candidates) const {
++    if (candidates.empty()) {
++      return std::string();
++    }
++    const std::uint64_t hash = StableHash(family);
++    return std::string(candidates[hash % candidates.size()]);
++  }
++
++ private:
++  // FNV-1a. Chosen because it is tiny, has no per-process salt, and is trivial
++  // to reproduce in a test or another language (see the Python smoke test).
++  static std::uint64_t StableHash(std::string_view value) {
++    std::uint64_t hash = 1469598103934665603ULL;  // offset basis
++    for (const char character : value) {
++      hash ^= static_cast<unsigned char>(character);
++      hash *= 1099511628211ULL;  // FNV prime
++    }
++    return hash;
++  }
++
++  FontFaceSetFilter fonts_;
++  bool installed_ = false;
++};
++
++}  // namespace lengsuo::fp
++#endif  // LENGSUO_NATIVE_FONT_SUBSTITUTION_H_
 diff --git a/lengsuo/native/fp_overrides.cc b/lengsuo/native/fp_overrides.cc
 new file mode 100644
-index 0000000..77c2237
+index 0000000..4b5971d
 --- /dev/null
 +++ b/lengsuo/native/fp_overrides.cc
-@@ -0,0 +1,329 @@
+@@ -0,0 +1,370 @@
 +// fp_overrides - renderer-side fingerprint override state.
 +//
 +// One switch carries everything:
 +//   --lengsuo-managed-fp=<seed-hex>:<canvas>:<audio>:<rects>:<fonts>:<gpu>:
 +//                        <ua>:<webgl-params>:<vendor>:<renderer>:<hwc>:<mem>
-+// 0 (or empty, for the two strings) keeps that dimension native. Absent switch
-+// => everything disabled and upstream behavior stays byte-identical.
-+#include "lengsuo/native/fp_overrides.h"
++// 0 (or empty, for the two strings) keeps that dimension native. The font
++// dimension is the exception: it is not a seed but an explicit family list,
++// and it therefore arrives in its own --lengsuo-managed-fonts switch (see
++// docs/fp-switch-contract.md). Absent switches => everything disabled and
++// upstream behavior stays byte-identical.
++#include "fp_overrides.h"
 +
 +#include <array>
 +#include <cstddef>
@@ -1174,6 +1457,16 @@ index 0000000..77c2237
 +std::array<char, kMaxFaceLen + 1> g_renderer_storage{};
 +std::uint32_t g_hw_concurrency = 0;
 +std::uint32_t g_device_memory = 0;
++
++// Font availability set. Unlike the numeric slots above this is not a seed:
++// the profile hands over an explicit family list (对标端 does not expose a font
++// pool, so nothing is ever invented here -- see docs/font-dimension.md). The
++// storage is a function-local static so it has no exit-time destructor.
++FontFaceSetFilter& FontsStorage() {
++  static FontFaceSetFilter fonts;
++  return fonts;
++}
++bool g_fonts_installed = false;
 +
 +// Copies at most kMaxFaceLen chars and NUL-terminates. Returns a view of the
 +// copied prefix (empty when the source was empty).
@@ -1301,6 +1594,15 @@ index 0000000..77c2237
 +  (void)renderer;
 +}
 +
++bool InitFontsFromSwitch(std::string_view value) {
++  g_fonts_installed = false;
++  if (!FontsStorage().Init(value)) {
++    return false;
++  }
++  g_fonts_installed = true;
++  return true;
++}
++
 +bool Enabled() {
 +  return g_enabled;
 +}
@@ -1338,6 +1640,25 @@ index 0000000..77c2237
 +
 +std::uint64_t AudioSeed() {
 +  return g_audio;
++}
++
++const FontFaceSetFilter* Fonts() {
++  return g_fonts_installed ? &FontsStorage() : nullptr;
++}
++
++std::string FontSubstituteFor(std::string_view family,
++                              std::span<const std::string_view> candidates) {
++  if (!g_fonts_installed) {
++    return std::string();  // no set installed: stay byte-identical to upstream
++  }
++  // Builds a throwaway substitution view from the installed set. The decision
++  // itself lives in native/font_substitution.h so it can be unit-tested
++  // without Blink; this wrapper only bridges the renderer-side storage.
++  const FontSubstitution substitution = FontSubstitution::From(FontsStorage());
++  if (!substitution.NeedsSubstitute(family)) {
++    return std::string();
++  }
++  return substitution.SubstituteFor(family, candidates);
 +}
 +
 +std::uint64_t WebGLParamsSeed() {
@@ -1444,10 +1765,10 @@ index 0000000..77c2237
 +}  // namespace lengsuo::fp
 diff --git a/lengsuo/native/fp_overrides.h b/lengsuo/native/fp_overrides.h
 new file mode 100644
-index 0000000..9df9ae4
+index 0000000..9b86367
 --- /dev/null
 +++ b/lengsuo/native/fp_overrides.h
-@@ -0,0 +1,26 @@
+@@ -0,0 +1,54 @@
 +// fp_overrides - renderer-side fingerprint override state.
 +// One switch carries everything: --lengsuo-managed-fp=<seed-hex>:<a>:<c>:<r>:<f>:<g>:<u>:<w>
 +// (slots: audio, canvas, rects, fonts, gpu, ua, webgl). Absent => all disabled,
@@ -1455,9 +1776,24 @@ index 0000000..9df9ae4
 +#ifndef LENGSUO_NATIVE_FP_OVERRIDES_H_
 +#define LENGSUO_NATIVE_FP_OVERRIDES_H_
 +#include <cstdint>
++#include <span>
++#include <string>
 +#include <string_view>
++
++#include "font_face_set_filter.h"
++#include "font_substitution.h"
 +namespace lengsuo::fp {
++// Two switches, both optional and both absent by default:
++//   --lengsuo-managed-fp=<seed-hex>:<a>:<c>:<r>:<f>:<g>:<u>:<w>:<vendor>:
++//                        <renderer>:<hwc>:<mem>
++//   --lengsuo-managed-fonts=<comma-separated family list>
++// The font list is a structured, potentially large payload, so it does not
++// ride in a colon-separated field of the fp switch (see
++// docs/fp-switch-contract.md). Both absent => upstream behavior byte-identical.
 +void InitFromSwitch(std::string_view value);
++// Replaces the font availability set. Returns false on a malformed payload, in
++// which case no set is installed and every query keeps its native answer.
++bool InitFontsFromSwitch(std::string_view value);
 +bool Enabled();
 +// WebGL faces resolved from seed+slot (deterministic).
 +std::string_view WebGLVendor();
@@ -1466,6 +1802,19 @@ index 0000000..9df9ae4
 +std::uint32_t DeviceMemoryGB();       // 0 = disabled
 +double RectsJitterPx();               // 0 = disabled
 +std::uint64_t AudioSeed();
++// Font dimension: nullptr until a valid set is installed. Callers must treat
++// nullptr as "this profile says nothing about fonts" and keep native behavior.
++const FontFaceSetFilter* Fonts();
++
++// gamma2: a family the profile declares but the host cannot resolve is aliased
++// onto one of a fixed pool of universally-present families, so the declaration
++// actually takes effect (docs/cc-task-rulings.md §C). Returns the candidate
++// family name to retry with, or an empty string when no substitution applies
++// (no set installed, family not declared, or the caller offered no candidates).
++// The caller supplies `candidates` -- this layer never invents a family
++// inventory, it only chooses within what it is given.
++std::string FontSubstituteFor(std::string_view family,
++                              std::span<const std::string_view> candidates);
 +
 +// Slot 7: deterministic seed for WebGL MAX_* parameter perturbation.
 +std::uint64_t WebGLParamsSeed();            // 0 = disabled
@@ -1748,10 +2097,10 @@ index 0000000..1c23aec
 +#endif
 diff --git a/lengsuo/native/profile_wire.cc b/lengsuo/native/profile_wire.cc
 new file mode 100644
-index 0000000..69b3445
+index 0000000..8ebf1f2
 --- /dev/null
 +++ b/lengsuo/native/profile_wire.cc
-@@ -0,0 +1,91 @@
+@@ -0,0 +1,109 @@
 +#include "profile_wire.h"
 +
 +#include <string_view>
@@ -1823,6 +2172,24 @@ index 0000000..69b3445
 +      return std::nullopt;
 +    }
 +    profile.webrtc_policy = static_cast<std::uint8_t>(value);
++    // Optional trailing font set, before the slot table. Writers that predate
++    // the font dimension (and every schema-1 profile) simply stop here, so
++    // every previously valid profile keeps decoding byte-identically -- the
++    // same optional-tail rule the catalog's GPU section uses.
++    //
++    // The reader accepts exactly one `fonts` section followed by the slot
++    // table. Two-char and four-char lookaheads cannot both be "fonts", so an
++    // accidental `fontsfonts` payload fails instead of being silently skipped.
++    std::string probe;
++    const auto mark = reader.position();
++    if (reader.PeekText(probe) && probe == "fonts") {
++      reader.Seek(mark + 2 + probe.size());
++      std::string families;
++      if (!reader.OptionalText(families, 2048)) {
++        return std::nullopt;
++      }
++      profile.font_families = std::move(families);
++    }
 +  }
 +  if (!reader.Number(value, 2) || value != 7) {
 +    return std::nullopt;
@@ -1845,10 +2212,10 @@ index 0000000..69b3445
 +}  // namespace lengsuo
 diff --git a/lengsuo/native/profile_wire.h b/lengsuo/native/profile_wire.h
 new file mode 100644
-index 0000000..b40855c
+index 0000000..84d8460
 --- /dev/null
 +++ b/lengsuo/native/profile_wire.h
-@@ -0,0 +1,47 @@
+@@ -0,0 +1,53 @@
 +#ifndef LENGSUO_NATIVE_PROFILE_WIRE_H_
 +#define LENGSUO_NATIVE_PROFILE_WIRE_H_
 +
@@ -1885,6 +2252,12 @@ index 0000000..b40855c
 +  std::uint8_t max_touch_points{};
 +  std::string language;
 +  std::string timezone;
++  // Schema 2 only: the font availability set, "Family,Family,...". No
++  // inventory is fabricated client-side -- 对标端's font pool was never captured
++  // -- so an omitted field simply means "the profile says nothing about fonts"
++  // (std::nullopt) and the renderer keeps the host's real list. An empty string
++  // is the distinct statement "no family is available".
++  std::optional<std::string> font_families;
 +  // audio, canvas, client_rects, fonts, gpu, ua, webgl, in canonical order.
 +  std::array<std::uint32_t, 7> slots{};
 +  // Schema 2 only: blink WebRtcIpHandlingPolicy enum value 0..3. Schema 1
@@ -1898,10 +2271,10 @@ index 0000000..b40855c
 +#endif
 diff --git a/lengsuo/native/wire_reader.h b/lengsuo/native/wire_reader.h
 new file mode 100644
-index 0000000..3d4291b
+index 0000000..158007a
 --- /dev/null
 +++ b/lengsuo/native/wire_reader.h
-@@ -0,0 +1,74 @@
+@@ -0,0 +1,107 @@
 +#ifndef LENGSUO_NATIVE_WIRE_READER_H_
 +#define LENGSUO_NATIVE_WIRE_READER_H_
 +
@@ -1964,6 +2337,39 @@ index 0000000..3d4291b
 +  }
 +
 +  bool End() const { return pos_ == bytes_.size(); }
++
++  // Cursor position, needed to build optional trailing sections: a reader may
++  // only consume a tag it has already confirmed, so the caller looks ahead,
++  // then rewinds to just past the tag it accepted.
++  std::size_t position() const { return pos_; }
++  bool Seek(std::size_t position) {
++    if (position > bytes_.size()) {
++      return false;
++    }
++    pos_ = position;
++    return true;
++  }
++
++  // Reads the 2-byte length prefix and the following bytes without moving the
++  // cursor. Returns false (and reads nothing) when the field does not fit.
++  bool PeekText(std::string& out) {
++    const std::size_t mark = pos_;
++    std::uint32_t count;
++    if (!Number(count, 2) || count > bytes_.size() - pos_) {
++      pos_ = mark;  // a lookahead never moves the cursor, on any path
++      return false;
++    }
++    out.clear();
++    for (std::uint32_t i = 0; i < count; ++i) {
++      const auto c = bytes_[pos_ + i];
++      if (c < 32 || c > 126) {
++        pos_ = mark;
++        return false;
++      }
++      out.push_back(static_cast<char>(c));
++    }
++    return true;
++  }
 +
 + private:
 +  std::span<const std::uint8_t> bytes_;
