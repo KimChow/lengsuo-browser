@@ -233,7 +233,7 @@ std::int32_t WebGLParamBias(std::uint32_t pname, std::int32_t original) {
     case 0x0D33:  // GL_MAX_TEXTURE_SIZE
     case 0x8073:  // GL_MAX_3D_TEXTURE_SIZE (WebGL2)
     case 0x84E8:  // GL_MAX_RENDERBUFFER_SIZE
-    case 0x8517:  // GL_MAX_CUBE_MAP_TEXTURE_SIZE
+    case 0x851C:  // GL_MAX_CUBE_MAP_TEXTURE_SIZE
     case 0x8869:  // GL_MAX_VERTEX_ATTRIBS
     case 0x8872:  // GL_MAX_TEXTURE_IMAGE_UNITS
     case 0x88FF:  // GL_MAX_ARRAY_TEXTURE_LAYERS (WebGL2)
@@ -256,11 +256,14 @@ std::int32_t WebGLParamBias(std::uint32_t pname, std::int32_t original) {
   const std::uint64_t mixed =
       Mix(WebGLParamsSeed() ^ (static_cast<std::uint64_t>(pname) << 24) ^
           static_cast<std::uint64_t>(original));
-  // Stay inside +/-25% of the driver value; small caps move by at most 1.
+  // Never advertise more than the driver supports: a page that trusts a
+  // higher cap would allocate a texture/shader that cannot exist and fail at
+  // run time. Only reduce, never raise, so every value inside the reported cap
+  // is still guaranteed to work. Small caps reduce by at most 1.
   const std::int64_t bound = original > 8 ? original / 4 : 1;
-  const std::uint64_t span = 2u * static_cast<std::uint64_t>(bound) + 1u;
-  const std::int64_t delta = static_cast<std::int64_t>(mixed % span) - bound;
-  const std::int64_t biased = static_cast<std::int64_t>(original) + delta;
+  const std::uint64_t span = static_cast<std::uint64_t>(bound) + 1u;
+  const std::int64_t drop = static_cast<std::int64_t>(mixed % span);
+  const std::int64_t biased = static_cast<std::int64_t>(original) - drop;
   return static_cast<std::int32_t>(biased > 0 ? biased : 1);
 }
 

@@ -83,7 +83,10 @@ int main() {
     for (const std::int32_t v : {16384, 2048, 1024, 256, 16, 8, 1}) {
       const std::int32_t biased = lengsuo::fp::WebGLParamBias(cap, v);
       const std::int64_t bound = v > 8 ? v / 4 : 1;
-      CHECK(biased >= v - bound && biased <= v + bound);
+      // Never above the driver value: a page trusting an inflated cap would
+      // allocate resources that cannot exist. Reduction is bounded.
+      CHECK(biased <= v);
+      CHECK(biased >= v - bound);
       CHECK(biased >= 1);
       CHECK(biased == lengsuo::fp::WebGLParamBias(cap, v));  // stable
     }
