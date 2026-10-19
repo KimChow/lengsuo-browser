@@ -19,6 +19,7 @@ class ProfileBootstrapState {
   bool InitializeCatalog(bool requested, bool safe_local_path, const Reader& read);
   const ParsedProfile* profile() const { return profile_ ? &*profile_ : nullptr; }
   const CatalogUaEntry* ua() const;
+  const CatalogGpuEntry* gpu() const;
  private:
   bool attempted_ = false;
   std::optional<ParsedProfile> profile_;

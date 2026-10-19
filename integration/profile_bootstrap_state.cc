@@ -39,4 +39,8 @@ bool ProfileBootstrapState::InitializeCatalog(bool requested,
 const CatalogUaEntry* ProfileBootstrapState::ua() const {
   return catalog_ && profile_ ? ResolveCatalogUa(*catalog_, *profile_) : nullptr;
 }
+const CatalogGpuEntry* ProfileBootstrapState::gpu() const {
+  return catalog_ && profile_ ? ResolveCatalogGpu(*catalog_, *profile_)
+                             : nullptr;
+}
 }  // namespace lengsuo

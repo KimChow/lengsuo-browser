@@ -81,6 +81,7 @@ bool InitializeBrowserProfile(const base::CommandLine& command) {
 }
 const ParsedProfile* BrowserProfile() { return State().profile(); }
 const CatalogUaEntry* BrowserUa() { return State().ua(); }
+const CatalogGpuEntry* BrowserGpu() { return State().gpu(); }
 bool ApplyUaMetadata(const CatalogUaEntry& entry,
                      blink::UserAgentMetadata* metadata) {
   metadata->brand_version_list.clear();

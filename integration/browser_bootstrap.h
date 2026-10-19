@@ -18,6 +18,10 @@ bool IsSafeProfilePath(const base::FilePath& path);
 bool InitializeBrowserProfile(const base::CommandLine& command);
 const ParsedProfile* BrowserProfile();
 const CatalogUaEntry* BrowserUa();
+// GPU face for the active profile's gpu slot, or nullptr when the loaded
+// catalog carries no GPU section or has no matching entry (upstream faces
+// then stay untouched).
+const CatalogGpuEntry* BrowserGpu();
 bool ApplyUaMetadata(const CatalogUaEntry& entry,
                      blink::UserAgentMetadata* metadata);
 // Returns true only when preferences actually change.

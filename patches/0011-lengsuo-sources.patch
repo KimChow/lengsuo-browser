@@ -1,6 +1,6 @@
 diff --git a/lengsuo/integration/BUILD.gn b/lengsuo/integration/BUILD.gn
 new file mode 100644
-index 0000000000..1433ce22bf
+index 0000000..1433ce2
 --- /dev/null
 +++ b/lengsuo/integration/BUILD.gn
 @@ -0,0 +1,41 @@
@@ -47,7 +47,7 @@ index 0000000000..1433ce22bf
 +}
 diff --git a/lengsuo/integration/browser_bootstrap.cc b/lengsuo/integration/browser_bootstrap.cc
 new file mode 100644
-index 0000000000..ff5c2f6f66
+index 0000000..ff5c2f6
 --- /dev/null
 +++ b/lengsuo/integration/browser_bootstrap.cc
 @@ -0,0 +1,181 @@
@@ -234,7 +234,7 @@ index 0000000000..ff5c2f6f66
 +}  // namespace lengsuo
 diff --git a/lengsuo/integration/browser_bootstrap.h b/lengsuo/integration/browser_bootstrap.h
 new file mode 100644
-index 0000000000..978452cfaf
+index 0000000..978452c
 --- /dev/null
 +++ b/lengsuo/integration/browser_bootstrap.h
 @@ -0,0 +1,50 @@
@@ -290,7 +290,7 @@ index 0000000000..978452cfaf
 +#endif
 diff --git a/lengsuo/integration/browser_bootstrap_unittest.cc b/lengsuo/integration/browser_bootstrap_unittest.cc
 new file mode 100644
-index 0000000000..b657c89ea7
+index 0000000..b657c89
 --- /dev/null
 +++ b/lengsuo/integration/browser_bootstrap_unittest.cc
 @@ -0,0 +1,354 @@
@@ -650,7 +650,7 @@ index 0000000000..b657c89ea7
 +}  // namespace lengsuo
 diff --git a/lengsuo/integration/profile_bootstrap_state.cc b/lengsuo/integration/profile_bootstrap_state.cc
 new file mode 100644
-index 0000000000..a144dcbb72
+index 0000000..a144dcb
 --- /dev/null
 +++ b/lengsuo/integration/profile_bootstrap_state.cc
 @@ -0,0 +1,46 @@
@@ -702,7 +702,7 @@ index 0000000000..a144dcbb72
 +}  // namespace lengsuo
 diff --git a/lengsuo/integration/profile_bootstrap_state.h b/lengsuo/integration/profile_bootstrap_state.h
 new file mode 100644
-index 0000000000..3bd62d6f81
+index 0000000..3bd62d6
 --- /dev/null
 +++ b/lengsuo/integration/profile_bootstrap_state.h
 @@ -0,0 +1,30 @@
@@ -738,7 +738,7 @@ index 0000000000..3bd62d6f81
 +#endif
 diff --git a/lengsuo/native/BUILD.gn b/lengsuo/native/BUILD.gn
 new file mode 100644
-index 0000000000..976173410c
+index 0000000..9761734
 --- /dev/null
 +++ b/lengsuo/native/BUILD.gn
 @@ -0,0 +1,27 @@
@@ -771,7 +771,7 @@ index 0000000000..976173410c
 +}
 diff --git a/lengsuo/native/canvas_apply.cc b/lengsuo/native/canvas_apply.cc
 new file mode 100644
-index 0000000000..3eb837cc3b
+index 0000000..3eb837c
 --- /dev/null
 +++ b/lengsuo/native/canvas_apply.cc
 @@ -0,0 +1,73 @@
@@ -850,7 +850,7 @@ index 0000000000..3eb837cc3b
 +}  // namespace lengsuo
 diff --git a/lengsuo/native/canvas_apply.h b/lengsuo/native/canvas_apply.h
 new file mode 100644
-index 0000000000..58558f34c3
+index 0000000..58558f3
 --- /dev/null
 +++ b/lengsuo/native/canvas_apply.h
 @@ -0,0 +1,19 @@
@@ -875,7 +875,7 @@ index 0000000000..58558f34c3
 +#endif
 diff --git a/lengsuo/native/canvas_noise.cc b/lengsuo/native/canvas_noise.cc
 new file mode 100644
-index 0000000000..aab467209c
+index 0000000..aab4672
 --- /dev/null
 +++ b/lengsuo/native/canvas_noise.cc
 @@ -0,0 +1,163 @@
@@ -1044,33 +1044,52 @@ index 0000000000..aab467209c
 +}  // namespace lengsuo::canvas
 diff --git a/lengsuo/native/canvas_noise.h b/lengsuo/native/canvas_noise.h
 new file mode 100644
-index 0000000000..668be59ca4
+index 0000000..b6cced4
 --- /dev/null
 +++ b/lengsuo/native/canvas_noise.h
-@@ -0,0 +1,31 @@
-+// canvas_noiwarning: in the working copy of 'lengsuo/native/fp_overrides.cc', CRLF will be replaced by LF the next time Git touches it
-se v1 — deterministic RGBA8 pixel perturbation (pure algorithm).
-+// Contract: lengsuo kernel repo docs/canvas-component-contract.md (plan A).
-+// Reference bytes: kernel repo tests/canvas_ref/golden_fixture.inc.
+@@ -0,0 +1,53 @@
++// canvas_noise v1 — deterministic RGBA8 pixel perturbation (pure algorithm).
++//
++// Contract: docs/canvas-component-contract.md (frozen 2026-10-18, plan A).
++// Independent reference: tests/canvas_ref/gen_canvas_ref.py (Python).
++// Frozen bytes: tests/canvas_ref/golden_fixture.inc.
++//
++// This component is a pure algorithm library: no Chromium injection, no IPC,
++// no dynamic allocation, no static mutable state. The immutable-source rule
++// is the API contract: reads come only from `src`, writes go only to `dst`.
++
 +#ifndef LENGSUO_NATIVE_CANVAS_NOISE_H_
 +#define LENGSUO_NATIVE_CANVAS_NOISE_H_
++
 +#include <cstdint>
 +#include <span>
++
 +namespace lengsuo::canvas {
++
 +enum class CanvasNoiseStatus : std::uint8_t {
-+  kOk, kUnsupportedVersion, kInvalidGeometry, kBufferTooSmall,
++  kOk,
++  kUnsupportedVersion,
++  kInvalidGeometry,
++  kBufferTooSmall,
 +};
++
 +struct CanvasNoiseConfig {
 +  std::uint32_t algorithm_version{};
 +  bool enabled{};
 +  std::uint64_t seed{};
 +  std::uint32_t slot{};
 +};
++
 +struct CanvasNoiseResult {
 +  CanvasNoiseStatus status{CanvasNoiseStatus::kOk};
 +  std::uint64_t changed_pixels{};
 +  std::uint64_t preserved_pixels{};
 +};
++
++// Applies canvas_noise v1 to an RGBA8 grid. `dst` may alias `src` exactly
++// (in-place, per-pixel read-then-write); any other overlap is undefined
++// input. All validation happens before any write; a failed call leaves
++// `dst` untouched.
 +CanvasNoiseResult ApplyCanvasNoiseV1(const CanvasNoiseConfig& config,
 +                                     std::span<const std::uint8_t> src,
 +                                     std::span<std::uint8_t> dst,
@@ -1078,14 +1097,16 @@ se v1 — deterministic RGBA8 pixel perturbation (pure algorithm).
 +                                     std::uint32_t height,
 +                                     std::uint64_t stride,
 +                                     std::uint64_t buffer_size);
++
 +}  // namespace lengsuo::canvas
-+#endif
++
++#endif  // LENGSUO_NATIVE_CANVAS_NOISE_H_
 diff --git a/lengsuo/native/fp_overrides.cc b/lengsuo/native/fp_overrides.cc
 new file mode 100644
-index 0000000000..10ec1f8bee
+index 0000000..cb7bce5
 --- /dev/null
 +++ b/lengsuo/native/fp_overrides.cc
-@@ -0,0 +1,267 @@
+@@ -0,0 +1,270 @@
 +// fp_overrides - renderer-side fingerprint override state.
 +//
 +// One switch carries everything:
@@ -1321,7 +1342,7 @@ index 0000000000..10ec1f8bee
 +    case 0x0D33:  // GL_MAX_TEXTURE_SIZE
 +    case 0x8073:  // GL_MAX_3D_TEXTURE_SIZE (WebGL2)
 +    case 0x84E8:  // GL_MAX_RENDERBUFFER_SIZE
-+    case 0x8517:  // GL_MAX_CUBE_MAP_TEXTURE_SIZE
++    case 0x851C:  // GL_MAX_CUBE_MAP_TEXTURE_SIZE
 +    case 0x8869:  // GL_MAX_VERTEX_ATTRIBS
 +    case 0x8872:  // GL_MAX_TEXTURE_IMAGE_UNITS
 +    case 0x88FF:  // GL_MAX_ARRAY_TEXTURE_LAYERS (WebGL2)
@@ -1344,18 +1365,21 @@ index 0000000000..10ec1f8bee
 +  const std::uint64_t mixed =
 +      Mix(WebGLParamsSeed() ^ (static_cast<std::uint64_t>(pname) << 24) ^
 +          static_cast<std::uint64_t>(original));
-+  // Stay inside +/-25% of the driver value; small caps move by at most 1.
++  // Never advertise more than the driver supports: a page that trusts a
++  // higher cap would allocate a texture/shader that cannot exist and fail at
++  // run time. Only reduce, never raise, so every value inside the reported cap
++  // is still guaranteed to work. Small caps reduce by at most 1.
 +  const std::int64_t bound = original > 8 ? original / 4 : 1;
-+  const std::uint64_t span = 2u * static_cast<std::uint64_t>(bound) + 1u;
-+  const std::int64_t delta = static_cast<std::int64_t>(mixed % span) - bound;
-+  const std::int64_t biased = static_cast<std::int64_t>(original) + delta;
++  const std::uint64_t span = static_cast<std::uint64_t>(bound) + 1u;
++  const std::int64_t drop = static_cast<std::int64_t>(mixed % span);
++  const std::int64_t biased = static_cast<std::int64_t>(original) - drop;
 +  return static_cast<std::int32_t>(biased > 0 ? biased : 1);
 +}
 +
 +}  // namespace lengsuo::fp
 diff --git a/lengsuo/native/fp_overrides.h b/lengsuo/native/fp_overrides.h
 new file mode 100644
-index 0000000000..9df9ae4f7a
+index 0000000..9df9ae4
 --- /dev/null
 +++ b/lengsuo/native/fp_overrides.h
 @@ -0,0 +1,26 @@
@@ -1387,14 +1411,14 @@ index 0000000000..9df9ae4f7a
 +#endif
 diff --git a/lengsuo/native/golden.inc b/lengsuo/native/golden.inc
 new file mode 100644
-index 0000000000..42c2deb283
+index 0000000..42c2deb
 --- /dev/null
 +++ b/lengsuo/native/golden.inc
 @@ -0,0 +1 @@
 +constexpr unsigned char kGolden[] = {76,66,80,70,49,0,0,0,1,0,0,0,1,0,5,101,110,118,45,49,0,2,112,49,0,1,2,3,4,5,6,7,0,0,0,7,128,0,0,4,56,24,0,0,3,232,0,8,0,0,32,0,0,0,5,101,110,45,85,83,0,3,85,84,67,0,7,0,5,97,117,100,105,111,0,0,0,3,0,6,99,97,110,118,97,115,0,0,0,1,0,12,99,108,105,101,110,116,95,114,101,99,116,115,0,0,0,5,0,5,102,111,110,116,115,0,0,0,4,0,3,103,112,117,0,0,0,6,0,2,117,97,0,0,0,7,0,5,119,101,98,103,108,0,0,0,2};
 diff --git a/lengsuo/native/profile_catalog.cc b/lengsuo/native/profile_catalog.cc
 new file mode 100644
-index 0000000000..dcde68dc4a
+index 0000000..dcde68d
 --- /dev/null
 +++ b/lengsuo/native/profile_catalog.cc
 @@ -0,0 +1,155 @@
@@ -1519,8 +1543,7 @@ index 0000000000..dcde68dc4a
 +      return std::nullopt;
 +    }
 +    if (!reader.End()) {
-+      return stdwarning: in the working copy of 'lengsuo/native/profile_wire.cc', CRLF will be replaced by LF the next time Git touches it
-::nullopt;
++      return std::nullopt;
 +    }
 +  }
 +  return catalog;
@@ -1556,7 +1579,7 @@ index 0000000000..dcde68dc4a
 +}  // namespace lengsuo
 diff --git a/lengsuo/native/profile_catalog.h b/lengsuo/native/profile_catalog.h
 new file mode 100644
-index 0000000000..1c23aec506
+index 0000000..1c23aec
 --- /dev/null
 +++ b/lengsuo/native/profile_catalog.h
 @@ -0,0 +1,67 @@
@@ -1629,7 +1652,7 @@ index 0000000000..1c23aec506
 +#endif
 diff --git a/lengsuo/native/profile_wire.cc b/lengsuo/native/profile_wire.cc
 new file mode 100644
-index 0000000000..a768f91d1e
+index 0000000..69b3445
 --- /dev/null
 +++ b/lengsuo/native/profile_wire.cc
 @@ -0,0 +1,91 @@
@@ -1726,7 +1749,7 @@ index 0000000000..a768f91d1e
 +}  // namespace lengsuo
 diff --git a/lengsuo/native/profile_wire.h b/lengsuo/native/profile_wire.h
 new file mode 100644
-index 0000000000..b40855cad5
+index 0000000..b40855c
 --- /dev/null
 +++ b/lengsuo/native/profile_wire.h
 @@ -0,0 +1,47 @@
@@ -1779,7 +1802,7 @@ index 0000000000..b40855cad5
 +#endif
 diff --git a/lengsuo/native/wire_reader.h b/lengsuo/native/wire_reader.h
 new file mode 100644
-index 0000000000..3d4291b20a
+index 0000000..3d4291b
 --- /dev/null
 +++ b/lengsuo/native/wire_reader.h
 @@ -0,0 +1,74 @@
