@@ -34,6 +34,21 @@ struct ParsedProfile {
   std::uint8_t max_touch_points{};
   std::string language;
   std::string timezone;
+  // Schema 2 only: the font dimension, shaped like every other overridable
+  // dimension -- {switcher, value, mask} (docs/font-dimension.md §3.1). `value`
+  // is the semicolon-separated family string 对标端 ships ("Arial;Arial Black");
+  // no structured inventory is fabricated client-side because the server-side
+  // pool was never captured. `mask` is the font_fingerprint_mask bit that turns
+  // the metric-noise mechanism on independently of a non-empty value. An omitted
+  // section means "the profile says nothing about fonts" (std::nullopt) and the
+  // host's real metrics are kept. An empty `value` is a legal statement ("decide
+  // by mask"), matching the empty-field convention the other dimensions use.
+  struct FontDimension {
+    std::uint8_t switcher{};
+    std::string value;
+    std::uint8_t mask{};
+  };
+  std::optional<FontDimension> fonts;
   // audio, canvas, client_rects, fonts, gpu, ua, webgl, in canonical order.
   std::array<std::uint32_t, 7> slots{};
   // Schema 2 only: blink WebRtcIpHandlingPolicy enum value 0..3. Schema 1

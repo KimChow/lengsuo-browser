@@ -22,6 +22,10 @@ source_set("canvas_noise") {
     "canvas_noise.cc",
     "fp_overrides.cc",
     "fp_overrides.h",
+    "font_family_traits.cc",
+    "font_family_traits.h",
+    "font_metrics.cc",
+    "font_metrics.h",
     "canvas_noise.h",
     "product_brand.h",
   ]
