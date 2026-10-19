@@ -5,6 +5,8 @@ source_set("bootstrap") {
   sources = [
     "browser_bootstrap.cc",
     "browser_bootstrap.h",
+    "official_defaults.cc",
+    "official_defaults.h",
     "profile_bootstrap_state.cc",
     "profile_bootstrap_state.h",
   ]
@@ -27,7 +29,10 @@ source_set("bootstrap") {
 
 test("bootstrap_unittests") {
   testonly = true
-  sources = [ "browser_bootstrap_unittest.cc" ]
+  sources = [
+    "browser_bootstrap_unittest.cc",
+    "official_defaults_unittest.cc",
+  ]
   deps = [
     ":bootstrap",
     "//base",

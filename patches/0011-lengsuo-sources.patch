@@ -1,9 +1,9 @@
 diff --git a/lengsuo/integration/BUILD.gn b/lengsuo/integration/BUILD.gn
 new file mode 100644
-index 0000000..1433ce2
+index 0000000..8d95954
 --- /dev/null
 +++ b/lengsuo/integration/BUILD.gn
-@@ -0,0 +1,41 @@
+@@ -0,0 +1,46 @@
 +import("//testing/test.gni")
 +
 +# Browser-only dependency. No chrome/browser dependency (avoids a cycle).
@@ -11,6 +11,8 @@ index 0000000..1433ce2
 +  sources = [
 +    "browser_bootstrap.cc",
 +    "browser_bootstrap.h",
++    "official_defaults.cc",
++    "official_defaults.h",
 +    "profile_bootstrap_state.cc",
 +    "profile_bootstrap_state.h",
 +  ]
@@ -33,7 +35,10 @@ index 0000000..1433ce2
 +
 +test("bootstrap_unittests") {
 +  testonly = true
-+  sources = [ "browser_bootstrap_unittest.cc" ]
++  sources = [
++    "browser_bootstrap_unittest.cc",
++    "official_defaults_unittest.cc",
++  ]
 +  deps = [
 +    ":bootstrap",
 +    "//base",

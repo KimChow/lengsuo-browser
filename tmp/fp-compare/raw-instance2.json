@@ -1,0 +1,298 @@
+{
+  "ok": true,
+  "tab_id": 1713045903,
+  "value": {
+    "audioSum": 27.13671072293073,
+    "basic": {
+      "appCodeName": "Mozilla",
+      "appName": "Netscape",
+      "appVersion": "5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/155.0.0.0 Safari/537.36",
+      "cookieEnabled": true,
+      "deviceMemory": 32,
+      "doNotTrack": null,
+      "hardwareConcurrency": 24,
+      "language": "zh-CN",
+      "languages": [
+        "zh-CN",
+        "zh"
+      ],
+      "maxTouchPoints": 10,
+      "oscpu": null,
+      "pdfViewerEnabled": true,
+      "platform": "Win32",
+      "product": "Gecko",
+      "productSub": "20030107",
+      "userAgent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/155.0.0.0 Safari/537.36",
+      "vendor": "Google Inc.",
+      "webdriver": false
+    },
+    "canvasHash": 847084844,
+    "chromeObject": {
+      "keys": [
+        "app",
+        "csi",
+        "loadTimes"
+      ],
+      "typeofChrome": "object"
+    },
+    "clientRects": [
+      13.358671188354492,
+      7.108671188354492,
+      100.49268341064452,
+      19.988739013671875
+    ],
+    "display": {
+      "devicePixelRatio": 1.1100000143051147,
+      "inner": [
+        1717,
+        781
+      ],
+      "outer": [
+        1731,
+        931
+      ],
+      "screen": {
+        "availHeight": 930,
+        "availWidth": 1730,
+        "colorDepth": 24,
+        "height": 973,
+        "pixelDepth": 24,
+        "width": 1730
+      }
+    },
+    "fonts": [
+      "Arial",
+      "Arial Black",
+      "Calibri",
+      "Cambria",
+      "Candara",
+      "Comic Sans MS",
+      "Consolas",
+      "Constantia",
+      "Corbel",
+      "Courier New",
+      "Georgia",
+      "Impact",
+      "Lucida Console",
+      "Microsoft YaHei",
+      "Palatino Linotype",
+      "Segoe UI",
+      "SimSun",
+      "Tahoma",
+      "Times New Roman",
+      "Trebuchet MS",
+      "Verdana"
+    ],
+    "intl": {
+      "calendar": "gregory",
+      "dateFormatSample": "2026年1月15日星期四 GMT+8 20:00:00",
+      "epochString": "Thu Jan 01 1970 08:00:00 GMT+0800 (中国标准时间)",
+      "locale": "zh-CN",
+      "numberingSystem": "latn",
+      "timeZone": "Asia/Shanghai",
+      "tzOffsetJan": -480,
+      "tzOffsetJul": -480
+    },
+    "mimeTypes": [
+      "application/pdf",
+      "text/pdf"
+    ],
+    "plugins": [
+      "PDF Viewer",
+      "Chrome PDF Viewer",
+      "Chromium PDF Viewer",
+      "Microsoft Edge PDF Viewer",
+      "WebKit built-in PDF"
+    ],
+    "uaDataHigh": {
+      "architecture": "x86",
+      "bitness": "64",
+      "formFactors": [
+        "Desktop"
+      ],
+      "fullVersionList": [
+        [
+          "Google Chrome",
+          "155.0.8059.80"
+        ],
+        [
+          "Chromium",
+          "155.0.8059.80"
+        ],
+        [
+          "Not(A:Brand",
+          "24.0.0.0"
+        ]
+      ],
+      "model": "",
+      "platformVersion": "19.0.0",
+      "uaFullVersion": "155.0.8059.80",
+      "wow64": true
+    },
+    "uaDataLow": {
+      "brands": [
+        [
+          "Google Chrome",
+          "155"
+        ],
+        [
+          "Chromium",
+          "155"
+        ],
+        [
+          "Not(A:Brand",
+          "24"
+        ]
+      ],
+      "mobile": false,
+      "platform": "Windows"
+    },
+    "webgl1": {
+      "activeTexture": 33984,
+      "aliasedLineWidthRange": [
+        1,
+        1
+      ],
+      "aliasedPointSizeRange": [
+        1,
+        1024
+      ],
+      "available": true,
+      "extensions": [
+        "ANGLE_instanced_arrays",
+        "EXT_blend_minmax",
+        "EXT_clip_control",
+        "EXT_color_buffer_half_float",
+        "EXT_depth_clamp",
+        "EXT_disjoint_timer_query",
+        "EXT_float_blend",
+        "EXT_frag_depth",
+        "EXT_polygon_offset_clamp",
+        "EXT_sRGB",
+        "EXT_shader_texture_lod",
+        "EXT_texture_compression_bptc",
+        "EXT_texture_compression_rgtc",
+        "EXT_texture_filter_anisotropic",
+        "EXT_texture_mirror_clamp_to_edge",
+        "KHR_parallel_shader_compile",
+        "OES_element_index_uint",
+        "OES_fbo_render_mipmap",
+        "OES_standard_derivatives",
+        "OES_texture_float",
+        "OES_texture_float_linear",
+        "OES_texture_half_float",
+        "OES_texture_half_float_linear",
+        "OES_vertex_array_object",
+        "WEBGL_blend_func_extended",
+        "WEBGL_color_buffer_float",
+        "WEBGL_compressed_texture_s3tc",
+        "WEBGL_compressed_texture_s3tc_srgb",
+        "WEBGL_debug_renderer_info",
+        "WEBGL_debug_shaders",
+        "WEBGL_depth_texture",
+        "WEBGL_draw_buffers",
+        "WEBGL_lose_context",
+        "WEBGL_multi_draw",
+        "WEBGL_polygon_mode"
+      ],
+      "maxCombinedTextureImageUnits": 32,
+      "maxCubeMapTextureSize": 16384,
+      "maxFragmentUniformVectors": 1024,
+      "maxRenderbufferSize": 16384,
+      "maxTextureImageUnits": 16,
+      "maxTextureSize": 16384,
+      "maxVaryingVectors": 30,
+      "maxVertexAttribs": 16,
+      "maxVertexTextureImageUnits": 16,
+      "maxVertexUniformVectors": 4095,
+      "maxViewportDims": [
+        32767,
+        32767
+      ],
+      "renderer": "WebKit WebGL",
+      "shadingLanguageVersion": "WebGL GLSL ES 1.0 (OpenGL ES GLSL ES 1.0 Chromium)",
+      "unmaskedRenderer": "ANGLE (NVIDIA, NVIDIA GeForce RTX 3060 (0x00002504) Direct3D11 vs_5_0 ps_5_0, D3D11)",
+      "unmaskedVendor": "Google Inc. (NVIDIA)",
+      "vendor": "WebKit",
+      "version": "WebGL 1.0 (OpenGL ES 2.0 Chromium)",
+      "viewport": [
+        0,
+        0,
+        300,
+        150
+      ]
+    },
+    "webgl2": {
+      "activeTexture": 33984,
+      "aliasedLineWidthRange": [
+        1,
+        1
+      ],
+      "aliasedPointSizeRange": [
+        1,
+        1024
+      ],
+      "available": true,
+      "extensions": [
+        "EXT_clip_control",
+        "EXT_color_buffer_float",
+        "EXT_color_buffer_half_float",
+        "EXT_conservative_depth",
+        "EXT_depth_clamp",
+        "EXT_disjoint_timer_query_webgl2",
+        "EXT_float_blend",
+        "EXT_polygon_offset_clamp",
+        "EXT_render_snorm",
+        "EXT_texture_compression_bptc",
+        "EXT_texture_compression_rgtc",
+        "EXT_texture_filter_anisotropic",
+        "EXT_texture_mirror_clamp_to_edge",
+        "EXT_texture_norm16",
+        "KHR_parallel_shader_compile",
+        "NV_shader_noperspective_interpolation",
+        "OES_draw_buffers_indexed",
+        "OES_sample_variables",
+        "OES_shader_multisample_interpolation",
+        "OES_texture_float_linear",
+        "OVR_multiview2",
+        "WEBGL_blend_func_extended",
+        "WEBGL_clip_cull_distance",
+        "WEBGL_compressed_texture_s3tc",
+        "WEBGL_compressed_texture_s3tc_srgb",
+        "WEBGL_debug_renderer_info",
+        "WEBGL_debug_shaders",
+        "WEBGL_lose_context",
+        "WEBGL_multi_draw",
+        "WEBGL_polygon_mode",
+        "WEBGL_provoking_vertex",
+        "WEBGL_stencil_texturing"
+      ],
+      "maxCombinedTextureImageUnits": 32,
+      "maxCubeMapTextureSize": 16384,
+      "maxFragmentUniformVectors": 1024,
+      "maxRenderbufferSize": 16384,
+      "maxTextureImageUnits": 16,
+      "maxTextureSize": 16384,
+      "maxVaryingVectors": 30,
+      "maxVertexAttribs": 16,
+      "maxVertexTextureImageUnits": 16,
+      "maxVertexUniformVectors": 4095,
+      "maxViewportDims": [
+        32767,
+        32767
+      ],
+      "renderer": "WebKit WebGL",
+      "shadingLanguageVersion": "WebGL GLSL ES 3.00 (OpenGL ES GLSL ES 3.0 Chromium)",
+      "unmaskedRenderer": "ANGLE (NVIDIA, NVIDIA GeForce RTX 3060 (0x00002504) Direct3D11 vs_5_0 ps_5_0, D3D11)",
+      "unmaskedVendor": "Google Inc. (NVIDIA)",
+      "vendor": "WebKit",
+      "version": "WebGL 2.0 (OpenGL ES 3.0 Chromium)",
+      "viewport": [
+        0,
+        0,
+        300,
+        150
+      ]
+    }
+  }
+}

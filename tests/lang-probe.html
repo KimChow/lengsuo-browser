@@ -1,0 +1,73 @@
+<!doctype html><meta charset="utf-8"><title>lang-probe</title>
+<pre id="out">running…</pre>
+<script>
+// What a real install reports for languages, and where each value comes from.
+// The question this answers: is the fallback tag ("en" after "en-US") derived
+// from the locale, or is it a stored preference list? If it is derived, we can
+// reproduce it; if it is stored, the server has to send it.
+const out = {};
+const n = navigator;
+
+out.language = n.language;
+out.languages = n.languages;
+out.languagesLength = n.languages ? n.languages.length : null;
+
+// Intl sees a different pipeline from navigator.languages; a mismatch between
+// them is itself a signal, so record both.
+try {
+  out.intlLocale = Intl.DateTimeFormat().resolvedOptions().locale;
+} catch (e) { out.intlLocale = 'ERR:' + e; }
+
+try {
+  out.intlLocaleUpper = Intl.DateTimeFormat('en-US', { locale: 'best fit' })
+      .resolvedOptions().locale;
+} catch (e) { out.intlLocaleUpper = 'ERR:' + e; }
+
+// Which of these tags does the platform actually have data for?
+const sample = ['en', 'en-US', 'en-GB', 'zh', 'zh-CN', 'zh-Hans', 'ja', 'de'];
+out.availableTags = {};
+for (const tag of sample) {
+  try {
+    out.availableTags[tag] = Intl.DateTimeFormat.supportedLocalesOf([tag]).length > 0;
+  } catch (e) { out.availableTags[tag] = 'ERR'; }
+}
+
+// The HTTP header the browser sends must agree with navigator.languages: both
+// are derived from the same preference list, so comparing them shows whether
+// the list exists as stored state or is rebuilt from the locale. The probe
+// posts its own result back, and the server records the request headers on the
+// same exchange - one round trip yields both halves.
+let workerSeen = false;
+function maybeReport() {
+  if (!workerSeen) return;
+  render();
+  if (new URLSearchParams(location.search).get('report') !== '1') return;
+  try {
+    const xhr = new XMLHttpRequest();
+    xhr.open('POST', '/report', false);
+    xhr.setRequestHeader('Content-Type', 'application/json');
+    xhr.send(JSON.stringify(out));
+  } catch (e) {
+    document.title = 'REPORT-FAILED';
+  }
+}
+
+// A worker sees navigator.language but not the full list in every engine.
+try {
+  const src = 'postMessage({language:navigator.language,'
+            + 'languages:navigator.languages})';
+  const w = new Worker(URL.createObjectURL(new Blob([src], {type: 'text/javascript'})));
+  w.onmessage = (e) => {
+    out.workerLanguage = e.data.language;
+    out.workerLanguages = e.data.languages;
+    workerSeen = true;
+    maybeReport();
+  };
+} catch (e) { out.workerError = String(e); workerSeen = true; }
+
+function render() {
+  document.getElementById('out').textContent = JSON.stringify(out, null, 2);
+  window.__LANG_PROBE__ = out;
+}
+render();
+</script>

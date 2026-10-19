@@ -1,0 +1,136 @@
+{
+  "label": "ours-profile",
+  "probe_url": "http://127.0.0.1:8803/fp-probe.html?report=1",
+  "transport": "page-self-report",
+  "value": {
+    "audioSum": 27.136710112914443,
+    "basic": {
+      "appCodeName": "Mozilla",
+      "appName": "Netscape",
+      "appVersion": "5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/155.0.0.0 Safari/537.36",
+      "cookieEnabled": true,
+      "deviceMemory": 32,
+      "doNotTrack": null,
+      "hardwareConcurrency": 32,
+      "language": "en-US",
+      "languages": [
+        "en-US"
+      ],
+      "maxTouchPoints": 0,
+      "oscpu": null,
+      "pdfViewerEnabled": true,
+      "platform": "Linux x86_64",
+      "product": "Gecko",
+      "productSub": "20030107",
+      "userAgent": "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/155.0.0.0 Safari/537.36",
+      "vendor": "Google Inc.",
+      "webdriver": false
+    },
+    "canvasHash": 2511232492,
+    "chromeObject": {
+      "keys": [
+        "app",
+        "csi",
+        "loadTimes"
+      ],
+      "typeofChrome": "object"
+    },
+    "clientRects": [
+      13.359375,
+      7.109375,
+      100.5,
+      20
+    ],
+    "display": {
+      "devicePixelRatio": 1,
+      "inner": [
+        945,
+        973
+      ],
+      "outer": [
+        0,
+        0
+      ],
+      "screen": {
+        "availHeight": 1080,
+        "availWidth": 1920,
+        "colorDepth": 24,
+        "height": 1080,
+        "pixelDepth": 24,
+        "width": 1920
+      }
+    },
+    "fonts": [
+      "Arial",
+      "Calibri",
+      "Cambria",
+      "Courier New",
+      "Times New Roman",
+      "DejaVu Sans",
+      "Liberation Sans",
+      "Noto Sans CJK SC"
+    ],
+    "intl": {
+      "calendar": "gregory",
+      "dateFormatSample": "Thursday, January 15, 2026 at 8:00:00 PM GMT+8",
+      "epochString": "Thu Jan 01 1970 08:00:00 GMT+0800 (China Standard Time)",
+      "locale": "en-US",
+      "numberingSystem": "latn",
+      "timeZone": "Asia/Shanghai",
+      "tzOffsetJan": -480,
+      "tzOffsetJul": -480
+    },
+    "mimeTypes": [
+      "application/pdf",
+      "text/pdf"
+    ],
+    "plugins": [
+      "PDF Viewer",
+      "Chrome PDF Viewer",
+      "Chromium PDF Viewer",
+      "Microsoft Edge PDF Viewer",
+      "WebKit built-in PDF"
+    ],
+    "uaDataHigh": {
+      "architecture": "x86",
+      "bitness": "64",
+      "formFactors": [
+        "Desktop"
+      ],
+      "fullVersionList": [
+        [
+          "Chromium",
+          "155.0.8059.85"
+        ],
+        [
+          "Not(A:Brand",
+          "24.0.0.0"
+        ]
+      ],
+      "model": "",
+      "platformVersion": "",
+      "uaFullVersion": "155.0.8059.85",
+      "wow64": false
+    },
+    "uaDataLow": {
+      "brands": [
+        [
+          "Chromium",
+          "155"
+        ],
+        [
+          "Not(A:Brand",
+          "24"
+        ]
+      ],
+      "mobile": false,
+      "platform": "Linux"
+    },
+    "webgl1": {
+      "available": false
+    },
+    "webgl2": {
+      "available": false
+    }
+  }
+}

@@ -59,11 +59,15 @@
     },
     {
       "path": "patches/0011-lengsuo-sources.patch",
-      "sha256": "0c27692cc5f63c4989e342af3b0c27285bd37d5e545a1f1f95f9430ccbfc0738"
+      "sha256": "afc0be018719941693355630746015943dcfad3607bfb52d4ddef170a1ea4bcf"
     },
     {
       "path": "patches/0012-ua-ch-brand.patch",
       "sha256": "3663661061af77bc5a5dd9247ac79be84c2a5085755eea2aa2f3793f14de9bc9"
+    },
+    {
+      "path": "patches/0013-official-feature-defaults.patch",
+      "sha256": "4c3bd2260c0dadb00e480cebc284d7fda62ab46b82c886abebaf4e22a9dfd561"
     }
   ]
 }
