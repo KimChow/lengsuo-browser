@@ -14,6 +14,41 @@ log('timezone', Intl.DateTimeFormat().resolvedOptions().timeZone);
 log('tzOffsetMin', new Date('2026-01-15').getTimezoneOffset());
 log('userAgent', navigator.userAgent);
 
+// --- UA-CH 品牌：Chrome 与 Chromium 的分水岭 ---
+// 真实 Chrome 一定有 Google Chrome 这一项；只有 Chromium 就是构建品牌位没接。
+const fmt = (list) => list ? list.map((b) => b.brand + '/' + b.version).join(', ') : null;
+const uad = navigator.userAgentData;
+log('uaData.brands', fmt(uad && uad.brands));
+if (uad && uad.getHighEntropyValues) {
+  uad.getHighEntropyValues(['fullVersionList', 'platform', 'uaFullVersion'])
+      .then((h) => {
+        out.push('uaData.fullVersionList'.padEnd(24) + JSON.stringify(fmt(h.fullVersionList)));
+        out.push('uaData.uaFullVersion'.padEnd(24) + JSON.stringify(h.uaFullVersion));
+        render();
+      })
+      .catch((e) => { out.push('uaData.error'.padEnd(24) + String(e)); render(); });
+}
+
+// --- Worker 一致性：站点会用 Worker 交叉校验主线程，不一致比单个值更可疑 ---
+try {
+  const src = 'postMessage({ua:navigator.userAgent,platform:navigator.platform,' +
+              'cores:navigator.hardwareConcurrency,mem:navigator.deviceMemory,' +
+              'langs:navigator.languages,' +
+              'brands:(navigator.userAgentData?navigator.userAgentData.brands:null)})';
+  const w = new Worker(URL.createObjectURL(new Blob([src], {type: 'text/javascript'})));
+  w.onmessage = (e) => {
+    const m = e.data;
+    out.push('worker.userAgent'.padEnd(24) + JSON.stringify(m.ua));
+    out.push('worker.platform'.padEnd(24) + JSON.stringify(m.platform));
+    out.push('worker.cores/mem'.padEnd(24) + JSON.stringify([m.cores, m.mem]));
+    out.push('worker.languages'.padEnd(24) + JSON.stringify(m.langs));
+    out.push('worker.brands'.padEnd(24) + JSON.stringify(fmt(m.brands)));
+    render();
+  };
+} catch (e) {
+  out.push('worker.error'.padEnd(24) + String(e));
+}
+
 // --- WebGL ---
 const gl = document.createElement('canvas').getContext('webgl');
 log('gl.VENDOR', gl.getParameter(gl.VENDOR));

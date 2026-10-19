@@ -20,6 +20,27 @@ void Check(bool ok, const char* expr, int line) {
 
 #define CHECK(cond) Check((cond), #cond, __LINE__)
 
+namespace {
+// Values a shipping driver actually reports for capability caps: powers of two
+// and a short list of architecture constants. Anything else (e.g. 6364 for a
+// 8192 cap) is a giveaway that the value was generated rather than measured.
+bool PlausibleCap(std::int32_t value) {
+  if (value <= 0) {
+    return false;
+  }
+  if ((value & (value - 1)) == 0) {
+    return true;  // power of two
+  }
+  for (const std::int32_t common :
+       {16, 24, 30, 31, 32, 48, 60, 64, 96, 128, 256}) {
+    if (value == common) {
+      return true;
+    }
+  }
+  return false;
+}
+}  // namespace
+
 int main() {
   // 1. Empty / malformed payloads leave everything native.
   lengsuo::fp::InitFromSwitch(std::string_view(""));
@@ -82,12 +103,19 @@ int main() {
   for (const std::uint32_t cap : caps) {
     for (const std::int32_t v : {16384, 2048, 1024, 256, 16, 8, 1}) {
       const std::int32_t biased = lengsuo::fp::WebGLParamBias(cap, v);
-      const std::int64_t bound = v > 8 ? v / 4 : 1;
+      // Bound is one tier down at most (half the driver value): a bigger drop
+      // would contradict the renderer string the profile advertises.
+      const std::int64_t bound = v > 8 ? v / 2 : 1;
       // Never above the driver value: a page trusting an inflated cap would
       // allocate resources that cannot exist. Reduction is bounded.
       CHECK(biased <= v);
       CHECK(biased >= v - bound);
       CHECK(biased >= 1);
+      // And it must be a value a real driver could report: the driver's own
+      // value, a power of two, or one of the architecture constants below.
+      // An arbitrary integer in range (6364 for a 8192 cap) is *more*
+      // distinctive than the untouched value, so this is a hard rule.
+      CHECK(biased == v || PlausibleCap(biased));
       CHECK(biased == lengsuo::fp::WebGLParamBias(cap, v));  // stable
     }
   }

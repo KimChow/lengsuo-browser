@@ -25,6 +25,7 @@ MAPPING = (
     ("native/canvas_apply.cc", "lengsuo/native/canvas_apply.cc"),
     ("native/fp_overrides.h", "lengsuo/native/fp_overrides.h"),
     ("native/fp_overrides.cc", "lengsuo/native/fp_overrides.cc"),
+    ("native/product_brand.h", "lengsuo/native/product_brand.h"),
     ("integration/browser_bootstrap.cc", "lengsuo/integration/browser_bootstrap.cc"),
     ("integration/browser_bootstrap.h", "lengsuo/integration/browser_bootstrap.h"),
     ("integration/profile_bootstrap_state.cc",

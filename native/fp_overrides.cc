@@ -115,6 +115,15 @@ std::uint64_t DeriveSlotSeed(std::uint32_t slot, std::uint64_t salt) {
   return slot != 0 ? Mix(g_seed ^ salt ^ static_cast<std::uint64_t>(slot)) : 0;
 }
 
+// Largest power of two <= value; value must be positive.
+std::int64_t PowerOfTwoAtMost(std::int64_t value) {
+  std::int64_t result = 1;
+  while (result <= value / 2) {
+    result *= 2;
+  }
+  return result;
+}
+
 }  // namespace
 
 void InitFromSwitch(std::string_view value) {
@@ -256,15 +265,65 @@ std::int32_t WebGLParamBias(std::uint32_t pname, std::int32_t original) {
   const std::uint64_t mixed =
       Mix(WebGLParamsSeed() ^ (static_cast<std::uint64_t>(pname) << 24) ^
           static_cast<std::uint64_t>(original));
-  // Never advertise more than the driver supports: a page that trusts a
-  // higher cap would allocate a texture/shader that cannot exist and fail at
-  // run time. Only reduce, never raise, so every value inside the reported cap
-  // is still guaranteed to work. Small caps reduce by at most 1.
-  const std::int64_t bound = original > 8 ? original / 4 : 1;
-  const std::uint64_t span = static_cast<std::uint64_t>(bound) + 1u;
-  const std::int64_t drop = static_cast<std::int64_t>(mixed % span);
-  const std::int64_t biased = static_cast<std::int64_t>(original) - drop;
-  return static_cast<std::int32_t>(biased > 0 ? biased : 1);
+  // Report a value a real driver could actually report.
+  //
+  // Drivers do not hand back arbitrary integers here; the caps people look at
+  // (texture size, renderbuffer size, uniform/varying counts) come from a small
+  // set of shapes: powers of two, the *_BITS fields stepping by 1, and a handful
+  // of architecture constants. 6364 is not one of them — a randomised number in
+  // that range is more distinctive than the unmodified driver value, which is
+  // the opposite of what this override is for.
+  //
+  // Never advertise more than the driver supports: a page that trusts a higher
+  // cap would allocate a texture/shader that cannot exist and fail at run time.
+  // So the candidate set is filtered to <= original, and the step count is
+  // measured on that filtered set to keep the distribution uniform.
+  //
+  // The driver's own value stays a candidate. That is deliberate and it is the
+  // honest outcome: on a machine with a real GPU the driver value is already a
+  // true measurement, and lowering it only makes sense as "this profile is the
+  // next tier down" - which also has to change the renderer string. Until the
+  // server sends per-tier parameter tables, most profiles therefore keep the
+  // driver value, and this dimension carries almost no entropy. That is the
+  // correct trade: a plausible value beats a perturbed one.
+  std::int32_t candidates[16];
+  std::size_t count = 0;
+  const auto add_candidate = [&](std::int64_t value) {
+    if (value <= 0 || value > original || count >= 16) {
+      return;
+    }
+    for (std::size_t i = 0; i < count; ++i) {
+      if (candidates[i] == value) {
+        return;
+      }
+    }
+    candidates[count++] = static_cast<std::int32_t>(value);
+  };
+  // The driver's own value is always a candidate: leaving a cap untouched is
+  // the most plausible outcome of all.
+  add_candidate(original);
+  // Powers of two at and below the driver value, down to three steps.
+  for (int shift = 0; shift <= 3; ++shift) {
+    const std::int64_t step = PowerOfTwoAtMost(original) >> shift;
+    if (step > 0) {
+      add_candidate(step);
+    }
+  }
+  // Real cards commonly report these exact values.
+  for (std::int64_t common : {16, 24, 30, 31, 32, 48, 60, 64, 96, 128, 256}) {
+    add_candidate(common);
+  }
+  // Stay within half the driver value: one real tier down at most. A larger
+  // drop would contradict the renderer string the profile advertises (a card
+  // claiming 32K textures does not report 4K).
+  const std::int64_t bound = original > 8 ? original / 2 : 1;
+  const std::int64_t floor_value = original - bound;
+  if (count == 0) {
+    return original;
+  }
+  const std::int32_t pick =
+      candidates[static_cast<std::size_t>(mixed % count)];
+  return pick >= floor_value ? pick : original;
 }
 
 }  // namespace lengsuo::fp

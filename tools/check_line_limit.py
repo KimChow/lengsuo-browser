@@ -37,6 +37,10 @@ def main():
             continue
         if "fixtures" in path.relative_to(root).parts or path.name.endswith(".lock"):
             continue
+        # Captured device data, not authored source: a real GPU signature is a
+        # few thousand lines of measured values and cannot be split.
+        if "samples" in path.relative_to(root).parts:
+            continue
         count = len(path.read_text(encoding="utf-8").splitlines())
         checked += 1
         if count > 700:

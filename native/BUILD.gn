@@ -23,5 +23,6 @@ source_set("canvas_noise") {
     "fp_overrides.cc",
     "fp_overrides.h",
     "canvas_noise.h",
+    "product_brand.h",
   ]
 }

@@ -1,0 +1,24 @@
+diff --git a/components/embedder_support/user_agent_utils.cc b/components/embedder_support/user_agent_utils.cc
+index 5d96c60405..2b90060466 100644
+--- a/components/embedder_support/user_agent_utils.cc
++++ b/components/embedder_support/user_agent_utils.cc
+@@ -31,6 +31,7 @@
+ #include "components/policy/core/common/policy_pref_names.h"
+ #include "components/prefs/pref_service.h"
+ #include "components/version_info/version_info.h"
++#include "lengsuo/native/product_brand.h"
+ #include "net/http/http_util.h"
+ #include "third_party/blink/public/common/features.h"
+ #include "third_party/blink/public/common/user_agent/user_agent_metadata.h"
+@@ -165,6 +166,11 @@ const blink::UserAgentBrandList GetUserAgentBrandList(
+   std::optional<std::string> brand;
+ #if !BUILDFLAG(CHROMIUM_BRANDING)
+   brand = version_info::GetProductName();
++#else
++  // Unbranded builds would otherwise advertise only `Chromium`, which no real
++  // Chrome install does. The label lives in product_brand.h; the version still
++  // comes from chrome/VERSION so brand and version cannot drift apart.
++  brand = std::string(lengsuo::native::kProductBrand);
+ #endif
+ 
+   std::string brand_version =
