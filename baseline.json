@@ -39,7 +39,7 @@
     },
     {
       "path": "patches/0008-profile-timezone.patch",
-      "sha256": "867b3e70ae9588986f9eace97a2354da14c2821ff370bb6b2ca487b0f56a33c5"
+      "sha256": "08ee04d795242205e183245fb82fa0643f0977c8feed21376301b5def4a05df8"
     },
     {
       "path": "patches/0007-canvas-readback.patch",
