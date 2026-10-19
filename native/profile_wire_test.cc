@@ -209,6 +209,83 @@ int main() {
     Check(s1.has_value() && s1->schema_version == 1 &&
           !s1->webrtc_policy.has_value());
   }
+  // --- Font dimension (optional trailing section, schema 2 only) ---
+  //
+  // The font set is written after the webrtc policy byte and before the slot
+  // table as Text("fonts") + Text("Family,Family,..."). A schema-2 writer that
+  // predates it must keep decoding byte-for-byte (the block above already
+  // proves that), and a profile that omits the section must stay
+  // distinguishable from one that states "no fonts".
+  {
+    auto bytes2 = Schema2(golden, 2);
+    // Slot table starts at 66 for schema 2; splice the section in front of it.
+    const Bytes section = {0, 5, 'f', 'o', 'n', 't', 's', 0, 3, 'a', 'b', 'c'};
+    bytes2.insert(At(bytes2, 66), section.begin(), section.end());
+    auto decoded = lengsuo::DecodeProfile(bytes2);
+    Check(decoded.has_value());
+    Check(decoded->font_families.has_value() &&
+          *decoded->font_families == "abc");
+    // Everything else is untouched by the insertion.
+    Check(decoded->slots == std::array<std::uint32_t, 7>{3, 1, 5, 4, 6, 7, 2});
+    Check(decoded->webrtc_policy.has_value() && *decoded->webrtc_policy == 2);
+    Check(decoded->language == "en-US" && decoded->timezone == "UTC");
+  }
+  // Absent section and empty section are different statements.
+  {
+    auto absent = lengsuo::DecodeProfile(Schema2(golden, 2));
+    Check(absent.has_value() && !absent->font_families.has_value());
+
+    auto bytes2 = Schema2(golden, 2);
+    const Bytes empty_section = {0, 5, 'f', 'o', 'n', 't', 's', 0, 0};
+    bytes2.insert(At(bytes2, 66), empty_section.begin(), empty_section.end());
+    auto stated_none = lengsuo::DecodeProfile(bytes2);
+    Check(stated_none.has_value());
+    Check(stated_none->font_families.has_value() &&
+          stated_none->font_families->empty());
+  }
+  // A section longer than the 2048-byte field limit is rejected, not truncated.
+  {
+    auto bytes2 = Schema2(golden, 2);
+    Bytes section = {0, 5, 'f', 'o', 'n', 't', 's'};
+    section.push_back(8);          // length high byte (2049 = 0x0801)
+    section.push_back(1);
+    section.insert(section.end(), 2049, 'a');
+    bytes2.insert(At(bytes2, 66), section.begin(), section.end());
+    Bad(bytes2);
+  }
+  // Section present but the slot table is missing: still malformed.
+  {
+    auto bytes2 = Schema2(golden, 2);
+    const Bytes section = {0, 5, 'f', 'o', 'n', 't', 's', 0, 3, 'a', 'b', 'c'};
+    bytes2.insert(At(bytes2, 66), section.begin(), section.end());
+    bytes2.erase(At(bytes2, bytes2.size() - 5), At(bytes2, bytes2.size()));
+    Bad(bytes2);
+  }
+  // The section is a schema-2 statement only; a schema-1 profile carrying the
+  // same bytes must not decode (schema 1 has no policy byte, so the slot
+  // count would misread).
+  {
+    Bytes bytes1 = golden;
+    const Bytes section = {0, 5, 'f', 'o', 'n', 't', 's', 0, 3, 'a', 'b', 'c'};
+    bytes1.insert(At(bytes1, 65), section.begin(), section.end());
+    Bad(bytes1);
+  }
+  // Duplicated font section is rejected rather than silently skipped.
+  {
+    auto bytes2 = Schema2(golden, 2);
+    const Bytes section = {0, 5, 'f', 'o', 'n', 't', 's', 0, 3, 'a', 'b', 'c'};
+    bytes2.insert(At(bytes2, 66), section.begin(), section.end());
+    bytes2.insert(At(bytes2, 66), section.begin(), section.end());
+    Bad(bytes2);
+  }
+  // A font list that is not the "fonts" tag is not consumed: the data shifts
+  // the slot table and the stream must fail rather than skip unknown bytes.
+  {
+    auto bytes2 = Schema2(golden, 2);
+    const Bytes wrong_tag = {0, 5, 'f', 'o', 'n', 'X', 's', 0, 3, 'a', 'b', 'c'};
+    bytes2.insert(At(bytes2, 66), wrong_tag.begin(), wrong_tag.end());
+    Bad(bytes2);
+  }
   for (auto policy : {4, 255}) {
     Bad(Schema2(golden, static_cast<std::uint8_t>(policy)));
   }

@@ -3,8 +3,11 @@
 // One switch carries everything:
 //   --lengsuo-managed-fp=<seed-hex>:<canvas>:<audio>:<rects>:<fonts>:<gpu>:
 //                        <ua>:<webgl-params>:<vendor>:<renderer>:<hwc>:<mem>
-// 0 (or empty, for the two strings) keeps that dimension native. Absent switch
-// => everything disabled and upstream behavior stays byte-identical.
+// 0 (or empty, for the two strings) keeps that dimension native. The font
+// dimension is the exception: it is not a seed but an explicit family list,
+// and it therefore arrives in its own --lengsuo-managed-fonts switch (see
+// docs/fp-switch-contract.md). Absent switches => everything disabled and
+// upstream behavior stays byte-identical.
 #include "lengsuo/native/fp_overrides.h"
 
 #include <array>
@@ -59,6 +62,16 @@ std::array<char, kMaxFaceLen + 1> g_vendor_storage{};
 std::array<char, kMaxFaceLen + 1> g_renderer_storage{};
 std::uint32_t g_hw_concurrency = 0;
 std::uint32_t g_device_memory = 0;
+
+// Font availability set. Unlike the numeric slots above this is not a seed:
+// the profile hands over an explicit family list (对标端 does not expose a font
+// pool, so nothing is ever invented here -- see docs/font-dimension.md). The
+// storage is a function-local static so it has no exit-time destructor.
+FontFaceSetFilter& FontsStorage() {
+  static FontFaceSetFilter fonts;
+  return fonts;
+}
+bool g_fonts_installed = false;
 
 // Copies at most kMaxFaceLen chars and NUL-terminates. Returns a view of the
 // copied prefix (empty when the source was empty).
@@ -186,6 +199,15 @@ void InitFromSwitch(std::string_view value) {
   (void)renderer;
 }
 
+bool InitFontsFromSwitch(std::string_view value) {
+  g_fonts_installed = false;
+  if (!FontsStorage().Init(value)) {
+    return false;
+  }
+  g_fonts_installed = true;
+  return true;
+}
+
 bool Enabled() {
   return g_enabled;
 }
@@ -223,6 +245,10 @@ double RectsJitterPx() {
 
 std::uint64_t AudioSeed() {
   return g_audio;
+}
+
+const FontFaceSetFilter* Fonts() {
+  return g_fonts_installed ? &g_fonts : nullptr;
 }
 
 std::uint64_t WebGLParamsSeed() {

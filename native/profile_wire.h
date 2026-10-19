@@ -34,6 +34,12 @@ struct ParsedProfile {
   std::uint8_t max_touch_points{};
   std::string language;
   std::string timezone;
+  // Schema 2 only: the font availability set, "Family,Family,...". No
+  // inventory is fabricated client-side -- 对标端's font pool was never captured
+  // -- so an omitted field simply means "the profile says nothing about fonts"
+  // (std::nullopt) and the renderer keeps the host's real list. An empty string
+  // is the distinct statement "no family is available".
+  std::optional<std::string> font_families;
   // audio, canvas, client_rects, fonts, gpu, ua, webgl, in canonical order.
   std::array<std::uint32_t, 7> slots{};
   // Schema 2 only: blink WebRtcIpHandlingPolicy enum value 0..3. Schema 1
