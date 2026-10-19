@@ -159,6 +159,81 @@ async function audioSum() {
   }
 }
 
+// Workers read navigator through a different object (WorkerNavigator) and a
+// different process context. Detectors compare it against the main thread and
+// call any difference a contradiction, so the probe has to read it too —
+// otherwise "main thread says Windows" passes while the worker says Linux.
+function workerNavigator() {
+  return new Promise((resolve) => {
+    const source = `
+      self.onmessage = () => {
+        const n = self.navigator;
+        self.postMessage({
+          userAgent: n.userAgent,
+          appVersion: n.appVersion,
+          platform: n.platform,
+          hardwareConcurrency: n.hardwareConcurrency,
+          deviceMemory: n.deviceMemory ?? null,
+          language: n.language,
+          languages: n.languages,
+          vendor: n.vendor,
+          productSub: n.productSub,
+          webdriver: n.webdriver,
+          uaBrands: n.userAgentData
+              ? n.userAgentData.brands.map((b) => [b.brand, b.version]) : null,
+        });
+      };
+    `;
+    let worker;
+    try {
+      worker = new Worker(URL.createObjectURL(
+          new Blob([source], { type: 'text/javascript' })));
+    } catch (e) {
+      resolve({ error: 'worker blocked: ' + e });
+      return;
+    }
+    const timer = setTimeout(() => {
+      worker.terminate();
+      resolve({ error: 'timeout' });
+    }, 4000);
+    worker.onmessage = (event) => {
+      clearTimeout(timer);
+      worker.terminate();
+      resolve(event.data);
+    };
+    worker.onerror = (event) => {
+      clearTimeout(timer);
+      worker.terminate();
+      resolve({ error: 'worker error: ' + (event.message || 'unknown') });
+    };
+    worker.postMessage('go');
+  });
+}
+
+// Service workers get their own navigator and are the classic blind spot:
+// DevTools-based overrides cannot reach them. Needs a same-origin script, so
+// this stays inert unless the report server serves /sw.js.
+async function serviceWorkerNavigator() {
+  if (!('serviceWorker' in navigator)) return { error: 'unsupported' };
+  try {
+    const registration = await navigator.serviceWorker.register('/sw.js');
+    const ready = await navigator.serviceWorker.ready;
+    const target = ready.active || registration.active || registration.waiting;
+    if (!target) return { error: 'no active worker' };
+    return await new Promise((resolve) => {
+      const channel = new MessageChannel();
+      const timer = setTimeout(() => resolve({ error: 'timeout' }), 5000);
+      channel.port1.onmessage = (event) => {
+        clearTimeout(timer);
+        resolve(event.data);
+      };
+      target.postMessage({ kind: 'probe' }, [channel.port2]);
+    });
+  } catch (e) {
+    return { error: 'register failed: ' + e };
+  }
+}
+
 async function probe() {
   const nav = navigator;
   const r = {};
@@ -258,6 +333,8 @@ async function probe() {
   r.clientRects = clientRects();
   r.audioSum = await audioSum();
   r.fonts = await fontsPromise;
+  r.workerNavigator = await workerNavigator();
+  r.serviceWorkerNavigator = await serviceWorkerNavigator();
 
   return r;
 }

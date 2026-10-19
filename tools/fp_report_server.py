@@ -25,6 +25,9 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
 ROOT = pathlib.Path(__file__).resolve().parents[1]
 PROBE = ROOT / "tests" / "fp-probe.html"
+# Served at /sw.js so the page can read the service-worker-side navigator: a
+# service worker has its own, and overrides applied elsewhere do not reach it.
+SERVICE_WORKER = ROOT / "tests" / "sw.js"
 INDEX = (b"<!doctype html><meta charset=utf-8><title>probe</title>"
          b"<pre id=out>open /fp-probe.html?report=1</pre>")
 
@@ -50,6 +53,11 @@ class Handler(BaseHTTPRequestHandler):
         path = self.path.split("?", 1)[0]
         if path in ("/fp-probe.html", "/"):
             self._send(200, PROBE.read_bytes(), "text/html; charset=utf-8")
+        elif path == "/sw.js":
+            # A service worker must be served with a JS content type and from
+            # the same origin, or registration fails.
+            self._send(200, SERVICE_WORKER.read_bytes(),
+                       "text/javascript; charset=utf-8")
         else:
             self._send(200, INDEX, "text/html; charset=utf-8")
 

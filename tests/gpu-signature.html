@@ -1,0 +1,152 @@
+<!doctype html>
+<html lang="en">
+<meta charset="utf-8">
+<title>gpu-signature</title>
+<style>body{font:13px system-ui;margin:12px}pre{white-space:pre-wrap}</style>
+<pre id="out">collecting…</pre>
+<script>
+// Capture one machine's complete WebGL "L1" signature so a profile can replay it
+// as a whole. Spoofing a single renderer string is worse than doing nothing:
+// the extension list, parameters and shader precisions still describe the real
+// renderer, and the contradiction is what detectors look for.
+//
+// Two enumeration tricks keep this complete without hardcoding the GL spec:
+//   * parameters: every numeric constant on the WebGL context prototype is a
+//     candidate enum; getParameter() decides whether it is readable.
+//   * precision: the shader-type x precision-type matrix is small and fixed.
+//
+// Values are recorded verbatim. Nothing here decides what is "normal".
+
+const SHADER_TYPES = { '35633': 'VERTEX_SHADER', '35632': 'FRAGMENT_SHADER' };
+const PRECISION_TYPES = {
+  '36336': 'LOW_FLOAT', '36337': 'MEDIUM_FLOAT', '36338': 'HIGH_FLOAT',
+  '36341': 'LOW_INT', '36342': 'MEDIUM_INT', '36343': 'HIGH_INT',
+};
+
+function enumNames(gl) {
+  // Constants live on the prototype chain, not on the instance.
+  const names = new Map();
+  let proto = Object.getPrototypeOf(gl);
+  while (proto) {
+    for (const name of Object.getOwnPropertyNames(proto)) {
+      if (!/^[A-Z][A-Z0-9_]*$/.test(name)) continue;
+      const value = proto[name];
+      if (typeof value === 'number' && !names.has(value)) names.set(value, name);
+    }
+    proto = Object.getPrototypeOf(proto);
+  }
+  return names;
+}
+
+function encodeValue(value) {
+  if (value === null || value === undefined) return null;
+  if (typeof value === 'number' || typeof value === 'string' ||
+      typeof value === 'boolean') return value;
+  if (Array.isArray(value) || ArrayBuffer.isView(value)) return Array.from(value);
+  // WebGL objects (buffers, programs, ...) are not fingerprint material.
+  return null;
+}
+
+function collectParameters(gl, names) {
+  const params = {};
+  for (const [enumValue, name] of names) {
+    // Skip enums that are not gettable parameters: getParameter throws or
+    // returns null for those, and both are simply absent from the result.
+    try {
+      const value = gl.getParameter(enumValue);
+      const encoded = encodeValue(value);
+      if (encoded === null) continue;
+      params[String(enumValue)] = { name, value: encoded };
+    } catch (e) {
+      /* not a readable parameter */
+    }
+  }
+  return params;
+}
+
+function collectPrecision(gl) {
+  const out = {};
+  for (const [shaderType, shaderName] of Object.entries(SHADER_TYPES)) {
+    for (const [precisionType, precisionName] of Object.entries(PRECISION_TYPES)) {
+      try {
+        const format = gl.getShaderPrecisionFormat(
+            Number(shaderType), Number(precisionType));
+        if (!format) continue;
+        out[shaderType + ',' + precisionType] = {
+          shader: shaderName,
+          precisionType: precisionName,
+          rangeMin: format.rangeMin,
+          rangeMax: format.rangeMax,
+          precision: format.precision,
+        };
+      } catch (e) {
+        /* unsupported combination */
+      }
+    }
+  }
+  return out;
+}
+
+function collectContext(gl) {
+  try {
+    const attrs = gl.getContextAttributes();
+    if (!attrs) return null;
+    return Object.fromEntries(Object.entries(attrs));
+  } catch (e) {
+    return null;
+  }
+}
+
+function collect(type) {
+  const canvas = document.createElement('canvas');
+  canvas.width = 64;
+  canvas.height = 64;
+  const gl = canvas.getContext(type);
+  if (!gl) return { available: false };
+
+  const names = enumNames(gl);
+  const debug = gl.getExtension('WEBGL_debug_renderer_info');
+  const read = (pname) => {
+    try { return encodeValue(gl.getParameter(pname)); } catch (e) { return null; }
+  };
+
+  let extensions = [];
+  try {
+    extensions = (gl.getSupportedExtensions() || []).slice().sort();
+  } catch (e) {
+    extensions = [];
+  }
+
+  return {
+    available: true,
+    version: read(gl.VERSION),
+    shadingLanguageVersion: read(gl.SHADING_LANGUAGE_VERSION),
+    vendor: read(gl.VENDOR),
+    renderer: read(gl.RENDERER),
+    unmaskedVendor: debug ? read(debug.UNMASKED_VENDOR_WEBGL) : null,
+    unmaskedRenderer: debug ? read(debug.UNMASKED_RENDERER_WEBGL) : null,
+    extensions,
+    contextAttributes: collectContext(gl),
+    parameters: collectParameters(gl, names),
+    shaderPrecision: collectPrecision(gl),
+  };
+}
+
+function run() {
+  const result = {
+    capturedAt: new Date().toISOString(),
+    userAgent: navigator.userAgent,
+    hardwareConcurrency: navigator.hardwareConcurrency,
+    deviceMemory: navigator.deviceMemory ?? null,
+    webgl1: collect('webgl'),
+    webgl2: collect('webgl2'),
+  };
+  const text = JSON.stringify(result, null, 2);
+  window.__GPU_SIGNATURE_TEXT__ = text;
+  document.getElementById('out').textContent = text;
+  return result;
+}
+
+window.__GPU_SIGNATURE__ = Promise.resolve().then(run);
+</script>
+</html>
