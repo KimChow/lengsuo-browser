@@ -16,6 +16,10 @@ REVIEWS=$ROOT/reviews
 OUT=$SRC/out/lengsuo
 LOG=$REVIEWS/rebuild.log
 
+# Must match baseline.json / fetch_chromium.sh; stage_clean refuses to touch a
+# tree that is not on this revision.
+REV=0e66b94549a8bd85f03fbdf189b752d6e7b63c32
+
 # Same proxy the fetch used: the host has no direct route to googlesource.
 PROXY=${LENGSUO_PROXY:-http://127.0.0.1:18080}
 export http_proxy=$PROXY https_proxy=$PROXY

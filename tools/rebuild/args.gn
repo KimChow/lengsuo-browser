@@ -24,6 +24,5 @@ blink_symbol_level = 0
 # "Chromium" without "Google Chrome"; see docs/official-comparison.md.
 is_official_build = false
 
-enable_nacl = false
 use_remoteexec = false
 treat_warnings_as_errors = false
