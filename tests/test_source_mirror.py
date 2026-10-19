@@ -105,5 +105,29 @@ class SourceMirrorTests(unittest.TestCase):
                             "overlay maps missing source %s" % source)
 
 
+class LineEndingTests(unittest.TestCase):
+    """Shell scripts must be LF-only: a CRLF shebang fails on the build host.
+
+    This bit twice while rebuilding — a Python rewrite on Windows silently
+    turned every newline into CRLF, and the script then died with
+    "$'\r': command not found" on Linux.
+    """
+
+    def test_shell_scripts_are_lf_only(self):
+        scripts = sorted((ROOT / "tools").rglob("*.sh"))
+        self.assertGreater(len(scripts), 0, "no shell scripts found")
+        for script in scripts:
+            data = script.read_bytes()
+            self.assertNotIn(
+                b"\r\n", data,
+                "%s contains CRLF; it will fail to run on the build host"
+                % script.relative_to(ROOT))
+
+    def test_generated_patch_is_lf_only(self):
+        data = SOURCE_PATCH.read_bytes()
+        self.assertNotIn(b"\r\n", data,
+                         "patch 0011 contains CRLF; digests differ per platform")
+
+
 if __name__ == "__main__":
     unittest.main()
