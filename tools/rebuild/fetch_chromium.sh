@@ -131,10 +131,13 @@ solutions = [
 EOF
     fi
     # Use the depot_tools wrapper, not \`python3 gclient.py\`: the wrapper runs
-    # bootstrap_python3, which the gn wrapper later needs.
-    PATH="$DEPS:$PATH" "$DEPS/gclient" sync --nohooks --noprehooks --no-history \
-        --jobs 4 --revision "src@$REV" \
-        --output-json "$REVIEWS/chromium-deps-solutions.json"
+    # bootstrap_python3, which the gn wrapper later needs. It also has to run
+    # from $ROOT, where .gclient lives — running elsewhere reports
+    # "client not configured".
+    ( cd "$ROOT" && PATH="$DEPS:$PATH" "$DEPS/gclient" sync \
+        --nohooks --noprehooks --no-history --jobs 4 \
+        --revision "src@$REV" \
+        --output-json "$REVIEWS/chromium-deps-solutions.json" )
     local rc=$?
     receipt chromium_deps $rc
     say "sync rc=$rc"

@@ -1,0 +1,29 @@
+# Canonical GN args for the lengsuo kernel build.
+#
+# These were previously undocumented — the only surviving note was "must be
+# is_component_build=false" buried in integration/BUILD.gn. A rebuild that
+# guesses its arguments produces a different browser, so the arguments are
+# versioned here and copied verbatim by tools/rebuild/build_chrome.sh.
+
+# Release behaviour: no DCHECKs, no debug UI. Fingerprint surfaces must behave
+# exactly as they do for end users.
+is_debug = false
+dcheck_always_on = false
+
+# Required. Integration/BUILD.gn depends on //content/public/common's "common"
+# group, which is visibility-restricted to //content/*; in component builds the
+# group resolves through content/browser and creates a dependency cycle (0005).
+is_component_build = false
+
+# No debug info in the shipped binary: it inflates the link step and the
+# artifact, and nothing consumes it.
+symbol_level = 0
+blink_symbol_level = 0
+
+# Not a Google-branded build. Note this is exactly why UA-CH reports
+# "Chromium" without "Google Chrome"; see docs/official-comparison.md.
+is_official_build = false
+
+enable_nacl = false
+use_remoteexec = false
+treat_warnings_as_errors = false
