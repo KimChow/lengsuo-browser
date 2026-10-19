@@ -46,6 +46,12 @@ if [ ! -f "$BRIEF" ]; then
     exit 1
 fi
 
+# Model routing note: ANTHROPIC_MODEL is what the gateway reads, so `auto` goes
+# there. Passing `--model auto` instead makes Claude Code complain that it does
+# not recognise the name (it only knows its own aliases) and fall back to a
+# guessed context window - harmless but noisy, and it hides real warnings.
+# So: select the model through the environment, not through --model.
+
 for task in $TASKS; do
     work="$ROOT/$task"
     mkdir -p "$work"
@@ -69,7 +75,7 @@ Chromium 构建树在 $CHROMIUM（只读参考，不要在里面改我们自己�
 
     ANTHROPIC_BASE_URL="$GATEWAY" \
     ANTHROPIC_MODEL="$MODEL" \
-    setsid nohup claude --model "$MODEL" --permission-mode acceptEdits \
+    setsid nohup claude --permission-mode acceptEdits \
         -p "$prompt" > "$work/session.log" 2>&1 < /dev/null &
     echo $! > "$work/session.pid"
     echo "started $task pid=$(cat "$work/session.pid")"
