@@ -5,11 +5,17 @@ via WebGL and reports them back; compares native / managed / repeat runs.
 """
 import http.server
 import json
+import os
 import subprocess
 import threading
 import time
 
-CHROME = "/home/ubuntu/lengsuo-browser-dev/chromium-src/out/lengsuo/chrome"
+# The gclient solution is named `src`, and the dependencies live there too, so
+# the build tree is .../lengsuo-browser-dev/src - not chromium-src. Override with
+# LENGSUO_CHROME when the tree lives elsewhere.
+CHROME = os.environ.get(
+    "LENGSUO_CHROME",
+    "/home/ubuntu/lengsuo-browser-dev/src/out/lengsuo/chrome")
 PAGE = """<!doctype html><html><body><script>
 const out = {};
 try {
@@ -87,14 +93,36 @@ print("native :", json.dumps(native, ensure_ascii=False)[:300])
 print("managed:", json.dumps(managed, ensure_ascii=False)[:300])
 
 failures = []
+
+
+def is_real_cap(value):
+    """True when a shipping driver could report this capability cap.
+
+    Drivers report powers of two, or a short list of architecture constants
+    (MAX_VARYING_VECTORS=31, MAX_TEXTURE_IMAGE_UNITS=16, ...). An arbitrary
+    integer in range - 6364 for an 8192 cap - does not exist in the wild and is
+    therefore *more* distinctive than leaving the driver value alone.
+    """
+    if value <= 0:
+        return False
+    if value & (value - 1) == 0:
+        return True
+    return value in {16, 24, 30, 31, 32, 48, 60, 64, 96, 128, 256}
+
+
 if not native or not managed or not managed2:
     failures.append("missing run data")
 else:
     for key in ("max_tex", "max_attribs", "max_varying", "max_units"):
         delta = managed.get(key, 0) - native.get(key, 0)
-        bound = max(native[key] // 4, 1)
-        status = "PASS" if abs(delta) <= bound else "FAIL"
-        print(f"{key}: {native[key]} -> {managed[key]} (delta {delta:+d}) {status}")
+        value = managed.get(key, 0)
+        # Never above the driver value (a page trusting an inflated cap would
+        # allocate resources that cannot exist), and at most one tier down.
+        bound = max(native[key] // 2, 1)
+        plausible = is_real_cap(value) or value == native[key]
+        status = "PASS" if (-bound <= delta <= 0 and plausible) else "FAIL"
+        note = "" if plausible else "  <- not a real driver value"
+        print(f"{key}: {native[key]} -> {value} (delta {delta:+d}) {status}{note}")
         if status == "FAIL":
             failures.append(key)
     if managed.get("active_texture") != native.get("active_texture"):

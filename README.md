@@ -32,6 +32,22 @@ hardwareConcurrency / deviceMemory / UA / language / timezone 已接线并通过
 [指纹 switch 契约](docs/fp-switch-contract.md)，人工验收步骤见
 [手工验收手册](docs/manual-acceptance.md)（含 `tests/fp-lab.html` 测试页）。
 
+外显一致性现状（2026-10-19，与官方 Chrome 逐字段比对）：
+
+- **UA-CH 品牌已补齐**：非 branded 构建原本只报 `Chromium`（读 UA-CH 的站点一眼可判
+  非官方 Chrome），现经 `native/product_brand.h` + `patches/0012-ua-ch-brand.patch`
+  输出 `[Google Chrome, Chromium, Not(A:Brand]`，与官方同形。实测主线程与
+  Worker / Service Worker 逐项一致。见[官方对比](docs/official-comparison.md)。
+- **WebGL `MAX_*` 与画像一致**：驱动原值即正确值，**不做随机扰动**——真实驱动只报
+  2 的幂或固定架构常数，人造值比原值更显眼。见[手工验收手册](docs/manual-acceptance.md) §2。
+
+服务端下发契约（按对标端客户端实证冻结，**待我方拍板**）：字段表、`ua_ch` 陷阱、
+R1–R15 校验规则与两套错误码隔离见 [ProfileSpecV1 契约](docs/profile-spec-v1.md)；
+GPU 维度细节见 [服务端 GPU 字段需求](docs/server-gpu-fields-request.md)；
+三层能力边界（元数据 / 像素 / 时序）见 [GPU 与检测面方案](docs/gpu-and-detection-plan.md)。
+⛔ 注意 `60003` 是**同号异义**（对标端=路径不存在，我方=画像矛盾），
+书写必须带归属限定语，由 `tests/test_error_code_docs.py` 强制。
+
 项目源码公开可查看；项目许可证尚未确定，不宣称已授予开源许可或
 已经符合任何免费代码签名服务资格。Chromium 等上游组件保留各自许可。
 
