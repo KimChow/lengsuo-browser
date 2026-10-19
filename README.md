@@ -28,7 +28,8 @@ SharedWorker和ServiceWorker时区扩展回归亦已双平台通过，见[Worker
 
 指纹覆盖现状（2026-10-19）：canvas / audio / clientRects / GPU 人脸 / WebGL 参数 /
 hardwareConcurrency / deviceMemory / UA / language / timezone 已接线并通过端到端验收；
-**字体维度未实现**（slot 已解析、无消费点）。switch 字段契约见
+**字体维度未实现**（slot 已解析、无消费点；根因是 `ParsedProfile` 把它编码成一个档位号，与对标端统一的 `{switcher, value}` 形状对不上）。
+落地方案见 [字体维度方案](docs/font-dimension-reference-approach.md)。switch 字段契约见
 [指纹 switch 契约](docs/fp-switch-contract.md)，人工验收步骤见
 [手工验收手册](docs/manual-acceptance.md)（含 `tests/fp-lab.html` 测试页）。
 
