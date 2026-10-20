@@ -87,17 +87,36 @@ class Handler(http.server.BaseHTTPRequestHandler):
 
 
 def make_document(origin: str, key: str, value: str, timestamp: int) -> str:
-    body = (
-        "L3W1\n"
-        f"pins 1\n"
-        f"{origin}|local|{key}|{value}\n"
-        "cookies 0\n"
-        "ext 0\n"
-        "rules 0\n"
-    )
-    import hashlib
-    sign = f"{hashlib.md5(body.encode('utf-8')).hexdigest()}_v1_t{timestamp}"
-    return body + f"sign {sign}\n"
+    """Build the L3 document with the production encoder.
+
+    The document used to be hand-assembled here, with its own MD5 call. That
+    is a second implementation of the wire format: if the production encoder
+    ever changes, the acceptance run would keep testing the old shape and
+    pass. Now the document is produced by the real EncodeL3Wire through a
+    tiny helper binary (tools/rebuild/make_l3_sample), so the bytes under
+    test are the bytes the browser will parse.
+
+    The cookie domain has to match the origin host, because the consistency
+    gate treats "cookie declared but storage present and unequal" as a hard
+    mismatch. Passing the bare host keeps the mirror rule applicable.
+    """
+    helper = pathlib.Path(tempfile.gettempdir()) / "make_l3_sample"
+    if not helper.exists():
+        print(f"helper not built: {helper}")
+        print("build it first:")
+        print("  g++ -std=c++20 -I native tools/rebuild/make_l3_sample.cc \\")
+        print("      native/l3_wire.cc native/storage_pin.cc \\")
+        print("      native/storage_consistency.cc native/cache_record.cc \\")
+        print("      native/extension_pin.cc -o /tmp/make_l3_sample")
+        raise SystemExit(2)
+    host = origin.split("://", 1)[-1].split("/", 1)[0].split(":", 1)[0]
+    out = pathlib.Path(tempfile.mkdtemp(prefix="l3-doc-")) / "l3.wire"
+    subprocess.run(
+        [str(helper), str(out), str(timestamp), origin, key, value, host, "_bee"],
+        check=True, capture_output=True)
+    text = out.read_text(encoding="utf-8")
+    shutil.rmtree(out.parent, ignore_errors=True)
+    return text
 
 
 def main() -> int:
