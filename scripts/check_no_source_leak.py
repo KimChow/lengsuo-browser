@@ -62,8 +62,15 @@ SEMANTIC_HINTS = (
 
 # 结构性禁词：即使不在词表里，这些形态也高度可疑
 # （对标产品常见形态 + 仓外绝对路径）
+#
+# ⚠️ 中性代号（NEUTRAL_ALIASES）会让整行豁免，所以**这里绝不能放任何
+# 中性代号本身**——放了就是死代码，规则永远不触发，而它本该拦下的
+# 仓外路径会原样进仓。要新增模式，先确认它不在别名表里。
 STRUCTURAL_PATTERNS = (
-    re.compile(r"/home/ubuntu/ref/"),
+    # 仓外 Linux 绝对路径（构建机上的对照资料目录）。
+    # 用户段泛化、只锁 ref/reference 目录段：既不写死整条路径
+    # （否则脚本自身成了路径泄漏源），也不误伤 /home/<用户>/本项目/...。
+    re.compile(r"/home/[A-Za-z0-9_.-]+/(?:ref|reference)[A-Za-z0-9_.-]*/?"),
     re.compile(r"[A-Za-z]:/OneDrive/project/"),
     re.compile(r"\b(?:ref|reference)/[A-Za-z0-9_.-]*(?:docs?|devguide|samples?)\b"),
 )
@@ -97,9 +104,14 @@ SKIP_DIRS = {
     "__pycache__", ".claude", ".next", ".cache",
 }
 
+# 泄漏检查器自己的测试：它**必须**构造泄漏样本才能验证规则，
+# 所以其中的路径/词都是故意写的，不算泄漏。
+# 排除规则只对这一份文件生效，不扩大到整个 tests/ 目录。
+SELF_TEST_FILES = frozenset({"tests/test_no_source_leak.py"})
+
 # 本地工作区状态目录：内容不入库，其中的来源标识**不算泄漏**
 # （但仍需保证它被 .gitignore 覆盖，故单独检查 ignore 状态）
-# 目录名从词表推导，避免脚本正文写出具体来源词
+# 目录名从词表推导或环境变量读取，避免脚本正文写出具体来源词
 LOCAL_STATE_DIRS: tuple[str, ...] = ()
 
 
@@ -116,14 +128,7 @@ def load_terms(explicit: str | None) -> list[str]:
     candidates = []
     if explicit:
         candidates.append(Path(explicit))
-    env = os.environ.get("LENGSUO_LEAK_TERMS")
-    if env:
-        candidates.append(Path(env))
-    candidates.append(Path.home() / _LOCAL_CONFIG_DIRNAME / "source-privacy-terms.txt")
-    # 兜底：从环境变量指定的本地配置目录查找
-    local_cfg = os.environ.get("LENGSUO_LEAK_TERMS_DIR")
-    if local_cfg:
-        candidates.append(Path(local_cfg) / "source-privacy-terms.txt")
+    candidates.extend(_terms_file_candidates())
     for path in candidates:
         try:
             if path.is_file():
@@ -131,7 +136,9 @@ def load_terms(explicit: str | None) -> list[str]:
                 terms = [
                     line.strip()
                     for line in text.splitlines()
-                    if line.strip() and not line.strip().startswith("#")
+                    if line.strip()
+                    and not line.strip().startswith("#")
+                    and not line.strip().startswith("local_state_dirs=")
                 ]
                 if terms:
                     return terms
@@ -141,12 +148,43 @@ def load_terms(explicit: str | None) -> list[str]:
 
 
 def derive_local_state_dirs(terms: list[str]) -> tuple[str, ...]:
-    """从禁词表推导本地状态目录名（形如 ".xxx"），避免脚本写死来源词。"""
-    found = []
-    for term in terms:
-        if term.startswith(".") and term.count(".") == 1 and len(term) > 3:
-            found.append(term)
-    return tuple(sorted(set(found)))
+    """推导本地状态目录名（形如 ".xxx"）。
+
+    这些目录是**工具机制**（本地记忆/工具配置），不是"借鉴来源标识"，
+    因此单独管理：优先取环境变量 ``LENGSUO_LOCAL_STATE_DIRS``（逗号分隔），
+    否则读仓外配置文件的 ``local_state_dirs=`` 行。
+    """
+    env = os.environ.get("LENGSUO_LOCAL_STATE_DIRS", "")
+    found = [d.strip() for d in env.split(",") if d.strip()]
+    if found:
+        return tuple(sorted(set(found)))
+
+    for path in _terms_file_candidates():
+        try:
+            if not path.is_file():
+                continue
+            for line in path.read_text(encoding="utf-8", errors="replace").splitlines():
+                line = line.strip()
+                if line.startswith("local_state_dirs="):
+                    return tuple(
+                        d.strip() for d in line.split("=", 1)[1].split(",") if d.strip()
+                    )
+        except OSError:
+            continue
+    return ()
+
+
+def _terms_file_candidates() -> list[Path]:
+    """禁词表候选位置（仓外）。"""
+    out = []
+    env = os.environ.get("LENGSUO_LEAK_TERMS")
+    if env:
+        out.append(Path(env))
+    local_cfg = os.environ.get("LENGSUO_LEAK_TERMS_DIR")
+    if local_cfg:
+        out.append(Path(local_cfg) / "source-privacy-terms.txt")
+    out.append(Path.home() / _LOCAL_CONFIG_DIRNAME / "source-privacy-terms.txt")
+    return out
 
 
 def tracked_files(repo: Path) -> list[str]:
@@ -215,16 +253,32 @@ def check_names(repo: Path, terms: list[str], local_dirs: tuple[str, ...]) -> li
 
 
 def check_local_state_ignored(repo: Path, local_dirs: tuple[str, ...]) -> list[str]:
-    """本地状态目录必须被 .gitignore 覆盖，否则会被误提交。"""
+    """本地状态目录必须既被 .gitignore 覆盖，又**未被 git 跟踪**。
+
+    注意：.gitignore 对**已跟踪**文件无效，所以只查 ignore 状态会漏判
+    "目录在 .gitignore 里但历史上已被提交" 的情况（内容照样进仓）。
+    """
     problems = []
     for name in local_dirs:
         if not (repo / name).exists():
             continue
-        try:
-            out = run_git(repo, "check-ignore", "-q", name)
-        except (subprocess.CalledProcessError, FileNotFoundError):
+        # 1) 是否仍被 git 跟踪
+        result = subprocess.run(
+            ["git", "-C", str(repo), "ls-files", "--error-unmatch", name],
+            capture_output=True, text=True,
+        )
+        if result.returncode == 0:
+            problems.append(
+                "本地状态目录 %s/ 仍被 git 跟踪（.gitignore 对已跟踪文件无效）"
+                "——需 git rm -r --cached %s" % (name, name)
+            )
             continue
-        if out.returncode != 0:
+        # 2) 是否被 .gitignore 覆盖
+        ignored = subprocess.run(
+            ["git", "-C", str(repo), "check-ignore", "-q", name],
+            capture_output=True, text=True,
+        )
+        if ignored.returncode != 0:
             problems.append(
                 "本地状态目录 %s/ 未被 .gitignore 覆盖（会被提交）" % name
             )
@@ -254,6 +308,8 @@ def check_content(repo: Path, terms: list[str], local_dirs: tuple[str, ...]) -> 
     for abs_path, rel in iter_targets(repo, local_dirs):
         if not is_probably_text(abs_path):
             continue
+        if rel.replace("\\", "/") in SELF_TEST_FILES:
+            continue
         try:
             text = abs_path.read_text(encoding="utf-8", errors="replace")
         except OSError:
@@ -261,6 +317,9 @@ def check_content(repo: Path, terms: list[str], local_dirs: tuple[str, ...]) -> 
         for number, line in enumerate(text.splitlines(), 1):
             low = line.lower()
             if _line_is_open_source_only(line):
+                continue
+            # .gitignore 天然含本地工具目录名（机制配置，非借鉴来源标识）
+            if rel == ".gitignore":
                 continue
             for term in terms:
                 if term and term.lower() in low:
