@@ -51,12 +51,15 @@ from pathlib import Path
 source, repo = Path(sys.argv[1]), Path(sys.argv[2])
 lock = json.loads((repo / "baseline.json").read_text(encoding="utf-8"))
 names = [Path(e["path"]).name for e in lock["patches"]]
-# 0011 is a pure file-creation snapshot that tools.overlay supersedes.
-# 0007-canvas-readback is superseded by 0008-fp-overrides: both wire the same
-# three files at the same anchors (browser_client / renderer BUILD.gn /
-# renderer_main), and 0008 carries the superset including the canvas wiring.
-skipped = [n for n in names if n in ("0011-lengsuo-sources.patch",
-                                     "0007-canvas-readback.patch")]
+# 0011 is a pure file-creation snapshot that tools.overlay supersedes: the
+# overlay places exactly the same files, so applying 0011 on top of it fails
+# on already-existing paths.
+#
+# 0007-canvas-readback used to be skipped too, because it carried leftover
+# empty sections for browser_client and renderer_main - files that 0016 has
+# since taken over. Those empty sections are gone, and the patch now applies
+# cleanly on its own, so it is no longer skipped.
+skipped = [n for n in names if n in ("0011-lengsuo-sources.patch",)]
 applied, failed = [], None
 for name in names:
     if name in skipped:
