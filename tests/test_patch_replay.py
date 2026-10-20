@@ -36,6 +36,19 @@ def _added_or_modified_paths(patch_text):
     ]
 
 
+def _git_blob(rel: str):
+    """The repository's content for `rel`, staged content first."""
+    import subprocess
+    for spec in (f":{rel}", f"HEAD:{rel}"):
+        try:
+            return subprocess.run(
+                ["git", "cat-file", "blob", spec],
+                cwd=ROOT, capture_output=True, check=True).stdout
+        except (subprocess.CalledProcessError, FileNotFoundError):
+            continue
+    return None
+
+
 class PatchLockTests(unittest.TestCase):
     def test_every_patch_is_locked(self):
         locked = {entry["path"] for entry in _lock()["patches"]}
@@ -50,10 +63,25 @@ class PatchLockTests(unittest.TestCase):
         self.assertEqual(len(locked), len(_lock()["patches"]))
 
     def test_locked_digests_match(self):
+        """The lock must match the repository content, not the working tree.
+
+        On Windows the working tree serves CRLF while the repository stores
+        LF. Hashing the working tree produced a lock that the Linux build
+        host could never satisfy: every patch was rejected with "digest
+        differs from baseline". The digest therefore has to be taken from
+        the blob git actually holds, which is what a fresh clone gives.
+        """
         for entry in _lock()["patches"]:
             path = ROOT / entry["path"]
             digest = hashlib.sha256(path.read_bytes()).hexdigest()
-            self.assertEqual(digest, entry["sha256"], entry["path"])
+            blob = _git_blob(entry["path"])
+            if blob is None:
+                # Not tracked by git: the working tree is all there is.
+                self.assertEqual(digest, entry["sha256"], entry["path"])
+                continue
+            self.assertEqual(
+                hashlib.sha256(blob).hexdigest(), entry["sha256"],
+                f"{entry['path']}: lock does not match the repository content")
 
     def test_lengsuo_sources_are_shipped(self):
         """Every lengsuo/ file the tree needs must come from some patch."""
