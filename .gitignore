@@ -16,3 +16,7 @@ tmp/
 # 智能体本地记忆与工作区状态（含内部路径与来源信息，不入库）
 .claude/settings.local.json
 .reference-platform/
+
+# 智能体本地记忆与工作区状态（不入库）
+.reference-platform/
+.claude/settings.local.json
