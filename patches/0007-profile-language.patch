@@ -38,8 +38,8 @@
    return ComputeAcceptLanguageFromPref(
        content::ReduceAcceptLanguageUtils::GetLanguagesWithMaxCount(
            profile_->IsOffTheRecord() ? language::GetIncognitoLanguageList(
---- a/chrome/browser/chrome_content_browser_client.cc
-+++ b/chrome/browser/net/BUILD.gn
+--- a/chrome/browser/BUILD.gn
++++ b/chrome/browser/BUILD.gn
 @@ -166,6 +166,7 @@
    ]
  
@@ -48,4 +48,3 @@
      ":key_pinning_proto",
      "//base:build_time",
      "//chrome/browser:browser_features",
---- a/chrome/browser/chrome_content_browser_client.cc

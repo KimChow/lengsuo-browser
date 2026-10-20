@@ -112,6 +112,63 @@ class PatchContentTests(unittest.TestCase):
             text = patch.read_text(encoding="utf-8", errors="replace")
             self.assertIsNone(forbidden.search(text), patch.name)
 
+    def test_hunk_headers_agree_on_the_target_file(self):
+        """Every file section names the same path in its --- and +++ lines.
+
+        A section whose --- and +++ disagree makes `patch` take the *old* name
+        as the target while the hunk body belongs to the *new* file. That
+        silently drops build-system edits into a source file: patches/0007
+        shipped `--- a/chrome/browser/chrome_content_browser_client.cc` with
+        `+++ b/chrome/browser/net/BUILD.gn`, which put a GN dependency line
+        into the middle of a C++ include list and broke the build with
+        "expected unqualified-id".
+        """
+        for patch in _patch_files():
+            text = patch.read_text(encoding="utf-8", errors="replace")
+            old_path = None
+            for line in text.splitlines():
+                if line.startswith("--- "):
+                    old_path = line[4:].strip()
+                    if old_path == "/dev/null":
+                        old_path = None
+                elif line.startswith("+++ "):
+                    new_path = line[4:].strip()
+                    if new_path == "/dev/null":
+                        new_path = None
+                    if old_path is not None and new_path is not None:
+                        # Strip the a/ b/ prefix so the comparison is on the
+                        # repository path itself.
+                        self.assertEqual(
+                            old_path[2:] if old_path[:2] in ("a/", "b/") else old_path,
+                            new_path[2:] if new_path[:2] in ("a/", "b/") else new_path,
+                            f"{patch.name}: hunk header disagrees on target file "
+                            f"({old_path} vs {new_path})")
+                    old_path = None
+
+    def test_no_source_file_contains_gn_build_syntax(self):
+        """A GN fragment inside a .cc/.h means a hunk landed in the wrong file.
+
+        This is the same defect as the header mismatch above, caught from the
+        other side: rather than trusting the header pair, look at what the
+        hunk body actually contains and refuse GN-only lines in source files.
+        """
+        gn_only = re.compile(
+            r"^\+\s*(deps|public_deps|private_deps|visibility|defines)\s*=\s*\[",
+            re.MULTILINE)
+        for patch in _patch_files():
+            text = patch.read_text(encoding="utf-8", errors="replace")
+            target = None
+            for line in text.splitlines():
+                if line.startswith("+++ "):
+                    target = line[4:].strip()
+                elif target and (target.endswith(".cc") or target.endswith(".h")):
+                    if gn_only.search(line):
+                        self.fail(
+                            f"{patch.name}: GN build syntax added to {target}: "
+                            f"{line.strip()!r}")
+                    if not line.startswith(("+", "-", " ", "\\")) and line:
+                        target = None
+
 
 if __name__ == "__main__":
     unittest.main()

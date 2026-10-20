@@ -27,7 +27,7 @@
     },
     {
       "path": "patches/0007-profile-language.patch",
-      "sha256": "9bffde3927e34f35b29804634b3c1530d410498b88f57c7cbe1ec9bd5b68643c"
+      "sha256": "def322a932bd967c0d3e86383012f4c38d23d893d994f9e219b6a48578098215"
     },
     {
       "path": "patches/0008-fp-overrides.patch",
