@@ -69,6 +69,35 @@ std::optional<ParsedProfile> DecodeProfile(
       return std::nullopt;
     }
     profile.webrtc_policy = static_cast<std::uint8_t>(value);
+    // Optional trailing font section, before the slot table. Writers that
+    // predate the font dimension (and every schema-1 profile) simply stop
+    // here, so every previously valid profile keeps decoding byte-identically
+    // -- the same optional-tail rule the catalog's GPU section uses.
+    //
+    // The section is one `fonts` tag followed by the {switcher, value, mask}
+    // triple: a 1-byte switcher (online encoding 1/2/3), the
+    // semicolon-separated family string, and a 1-byte mask. The reader accepts
+    // exactly one such section followed by the slot table. Two-char and
+    // four-char lookaheads cannot both be "fonts", so an accidental
+    // `fontsfonts` payload fails instead of being silently skipped.
+    std::string probe;
+    const auto mark = reader.position();
+    if (reader.PeekText(probe) && probe == "fonts") {
+      reader.Seek(mark + 2 + probe.size());
+      ParsedProfile::FontDimension fonts;
+      if (!reader.Number(value, 1) || !InRange(value, 1, 3)) {
+        return std::nullopt;
+      }
+      fonts.switcher = static_cast<std::uint8_t>(value);
+      if (!reader.OptionalText(fonts.value, 4096)) {
+        return std::nullopt;
+      }
+      if (!reader.Number(value, 1) || value > 1) {
+        return std::nullopt;
+      }
+      fonts.mask = static_cast<std::uint8_t>(value);
+      profile.fonts = std::move(fonts);
+    }
   }
   if (!reader.Number(value, 2) || value != 7) {
     return std::nullopt;

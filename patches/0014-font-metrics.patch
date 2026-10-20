@@ -1,0 +1,106 @@
+diff --git a/chrome/browser/chrome_content_browser_client.cc b/chrome/browser/chrome_content_browser_client.cc
+index 6902984550..8ec8035f87 100644
+--- a/chrome/browser/chrome_content_browser_client.cc
++++ b/chrome/browser/chrome_content_browser_client.cc
+@@ -2907,6 +2907,17 @@ void ChromeContentBrowserClient::AppendExtraCommandLineSwitches(
+           "lengsuo-managed-fp",
+           browser_cmd.GetSwitchValueASCII("lengsuo-managed-fp"));
+     }
++    // Same direct-passthrough for the font dimension. It is a {switcher,
++    // value, mask} triple whose value can be ~4 KB, so it travels in its own
++    // switch rather than a colon field of --lengsuo-managed-fp
++    // (docs/fp-switch-contract.md). Appended verbatim from the browser's own
++    // command line; profile-wire delivery waits on the schema-2 gate.
++    if (browser_cmd.HasSwitch("lengsuo-managed-fonts") &&
++        !command_line->HasSwitch("lengsuo-managed-fonts")) {
++      command_line->AppendSwitchASCII(
++          "lengsuo-managed-fonts",
++          browser_cmd.GetSwitchValueASCII("lengsuo-managed-fonts"));
++    }
+     if (const auto* browser_profile = lengsuo::BrowserProfile()) {
+       command_line->AppendSwitchASCII("lengsuo-managed-language",
+                                       browser_profile->language);
+diff --git a/content/renderer/renderer_main.cc b/content/renderer/renderer_main.cc
+index cc2d2fd932..f75299f238 100644
+--- a/content/renderer/renderer_main.cc
++++ b/content/renderer/renderer_main.cc
+@@ -168,6 +168,13 @@ int RendererMain(MainFunctionParams parameters) {
+     lengsuo::fp::InitFromSwitch(
+         command_line.GetSwitchValueASCII("lengsuo-managed-fp"));
+   }
++  // Font dimension: {switcher, value, mask}. Absent => nothing is installed and
++  // every measurement keeps its native value. A malformed payload installs
++  // nothing rather than a half-applied dimension (native/font_family_traits.h).
++  if (command_line.HasSwitch("lengsuo-managed-fonts")) {
++    lengsuo::fp::InitFontsFromSwitch(
++        command_line.GetSwitchValueASCII("lengsuo-managed-fonts"));
++  }
+   if (command_line.HasSwitch("lengsuo-managed-language")) {
+     const auto locale =
+         command_line.GetSwitchValueASCII("lengsuo-managed-language");
+diff --git a/third_party/blink/renderer/platform/BUILD.gn b/third_party/blink/renderer/platform/BUILD.gn
+index 94334c1ce1..3fd24c10c4 100644
+--- a/third_party/blink/renderer/platform/BUILD.gn
++++ b/third_party/blink/renderer/platform/BUILD.gn
+@@ -1819,6 +1819,7 @@ component("platform") {
+     "//ui/native_theme/features",
+   ]
+   deps = [
++    "//lengsuo/native:canvas_noise",
+     ":rustfft_ffi",
+     "fonts:font_format_bindings",
+     "fonts:ift_patcher_bindings",
+diff --git a/third_party/blink/renderer/platform/fonts/skia/skia_text_metrics.cc b/third_party/blink/renderer/platform/fonts/skia/skia_text_metrics.cc
+index 1d66d6c248..d99e0c3a21 100644
+--- a/third_party/blink/renderer/platform/fonts/skia/skia_text_metrics.cc
++++ b/third_party/blink/renderer/platform/fonts/skia/skia_text_metrics.cc
+@@ -6,6 +6,7 @@
+ 
+ #include "base/containers/span.h"
+ #include "build/build_config.h"
++#include "lengsuo/native/fp_overrides.h"
+ #include "third_party/blink/renderer/platform/fonts/shaping/harfbuzz_face.h"
+ #include "third_party/blink/renderer/platform/wtf/math_extras.h"
+ #include "third_party/skia/include/core/SkFont.h"
+@@ -32,7 +33,17 @@ void SkFontGetGlyphWidthForHarfBuzz(const SkStrikeRef& strike_ref,
+   if (!subpixel) {
+     sk_width = SkScalarRoundToInt(sk_width);
+   }
+-  *width = SkiaScalarToHarfBuzzPosition(sk_width);
++  // Lengsuo font dimension: perturb the measured advance, which is what a page
++  // reads back through measureText(). The accepted mechanism is a deterministic
++  // mask over the real value (docs/cc-task-rulings.md §C), applied here because
++  // this function -- shared by the HarfBuzz and Skia advance paths -- is the
++  // single point every measured advance passes through, while FontFaceSet::
++  // check() has its own availability path and stays untouched. No switch => the
++  // native advance is returned unchanged, bit for bit.
++  const hb_position_t native_width = SkiaScalarToHarfBuzzPosition(sk_width);
++  const hb_position_t perturbed = static_cast<hb_position_t>(
++      lengsuo::fp::PerturbGlyphAdvance(static_cast<float>(native_width)));
++  *width = perturbed;
+ }
+ 
+ void SkFontGetGlyphWidthForHarfBuzz(const SkStrikeRef& strike_ref,
+@@ -88,6 +99,22 @@ void SkFontGetGlyphWidthForHarfBuzz(const SkStrikeRef& strike_ref,
+       }
+     }
+   }
++
++  // Lengsuo font dimension: perturb the measured advances in place, after the
++  // native fixed-point conversion, so the same deterministic mask the
++  // single-glyph path applies also reaches batched shaping (the hot path
++  // measureText uses). Off or dormant => every value is left as native.
++  // The consumed pointer `advance` was advanced by the conversion loop above,
++  // so this pass walks the output from its own base (`advances`).
++  // SAFETY: `advances` holds `count` hb_position_t values at `advance_stride_32`
++  // stride, as established above.
++  for (unsigned i = 0; i < count; ++i) {
++    hb_position_t* const slot = UNSAFE_BUFFERS(
++        reinterpret_cast<hb_position_t*>(advances + i * advance_stride_32));
++    UNSAFE_BUFFERS(*slot = static_cast<hb_position_t>(
++                       lengsuo::fp::PerturbGlyphAdvance(
++                           static_cast<float>(*slot))));
++  }
+ }
+ 
+ // HarfBuzz callback to retrieve glyph extents, mainly used by HarfBuzz for
