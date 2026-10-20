@@ -58,6 +58,9 @@ class StoragePin {
   // origins (duplicates count once).
   std::size_t size() const;
 
+  // Read-only view in parse order; callers must not mutate through it.
+  const std::vector<DomainPin>& Domains() const { return domains_; }
+
  private:
   bool ParseLine(const std::string& line);
 

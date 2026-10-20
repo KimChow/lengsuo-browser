@@ -36,6 +36,9 @@ class ExtensionPin {
 
   size_t size() const { return ids_.size(); }
 
+  // Sorted view; used by the L3 document encoder.
+  const std::set<std::string>& Ids() const { return ids_; }
+
   // 32 characters of [a-p] (Chromium extension ID alphabet).
   static bool IsValidId(const std::string& id);
 
