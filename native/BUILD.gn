@@ -26,3 +26,33 @@ source_set("canvas_noise") {
     "product_brand.h",
   ]
 }
+
+# L3 storage layer. Split into four source sets so each can be pulled in
+# independently by the integration patches; see docs/cc-task-brief-l3.md.
+source_set("storage_pin") {
+  sources = [
+    "storage_pin.cc",
+    "storage_pin.h",
+  ]
+}
+
+source_set("storage_consistency") {
+  sources = [
+    "storage_consistency.cc",
+    "storage_consistency.h",
+  ]
+}
+
+source_set("cache_record") {
+  sources = [
+    "cache_record.cc",
+    "cache_record.h",
+  ]
+}
+
+source_set("extension_pin") {
+  sources = [
+    "extension_pin.cc",
+    "extension_pin.h",
+  ]
+}
