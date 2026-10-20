@@ -1,4 +1,4 @@
-"""Extract the two Mojo method-name tables from the Reference chrome.dll.
+"""Extract the two Mojo method-name tables from the the reference chrome.dll.
 
 Stage 2 of the scan found two distinct string tables in .rdata:
 

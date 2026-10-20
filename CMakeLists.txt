@@ -38,7 +38,7 @@ add_executable(profile_catalog_test native/profile_catalog_test.cc)
 target_link_libraries(profile_catalog_test PRIVATE profile_catalog)
 
 # L3 storage layer: storage pinning, cross-store consistency, cache record
-# format, extension pinning. Sourced from the Reference Chromium-leg findings;
+# format, extension pinning. Sourced from the the reference Chromium-leg findings;
 # see docs/cc-task-brief-l3.md and docs/l3-reports/.
 add_library(storage_pin native/storage_pin.cc)
 target_compile_features(storage_pin PUBLIC cxx_std_20)

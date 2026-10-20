@@ -1,4 +1,4 @@
-"""Locate the code that implements the Reference Mojo fingerprint methods.
+"""Locate the code that implements the the reference Mojo fingerprint methods.
 
 Why this exists
 ---------------

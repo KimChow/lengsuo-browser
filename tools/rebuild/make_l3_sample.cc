@@ -4,7 +4,7 @@
 // bytes on disk are exactly what the browser will parse, and the signature is
 // a genuine MD5 over the document body. Nothing here is hand-rolled.
 //
-// The scenario mirrors the Reference finding: localStorage "finger-key_0.1.5"
+// The scenario mirrors the the reference finding: localStorage "finger-key_0.1.5"
 // and the cookie "_bee" must carry the same value, and the rules block
 // declares that equality so the launch consistency gate enforces it.
 //
@@ -47,7 +47,7 @@ int main(int argc, char** argv) {
   const std::string key = argc > 4 ? argv[4] : "finger-key_0.1.5";
   const std::string value =
       argc > 5 ? argv[5] : "fp-7a3c9e21b4d80652";
-  // The cookie mirrors the pinned value: that equality is what the Reference
+  // The cookie mirrors the pinned value: that equality is what the the reference
   // evidence says a platform checks, and the rules block makes the launch
   // consistency gate enforce it.
   const std::string cookie_domain = argc > 6 ? argv[6] : ".example.com";

@@ -10,5 +10,10 @@ __pycache__/
 /native/*.bin
 .zcode-work/
 
-# 对标端逆向取证（本地开发参考，不入库）
+# 本地逆向取证与对照资料（本地开发参考，不入库）
 tmp/
+
+# 智能体本地记忆与工作区状态（含内部路径与来源信息，不入库）
+.reference-platform/
+.claude/settings.local.json
+.reference-platform/

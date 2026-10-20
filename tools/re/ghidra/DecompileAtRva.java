@@ -2,7 +2,7 @@
 //
 // Why this script exists
 // ----------------------
-// chrome.dll from the Reference environment kit is 276 MB. A full Ghidra
+// chrome.dll from the the reference environment kit is 276 MB. A full Ghidra
 // auto-analysis of that image does not fit in the REA startup budget, so the
 // "open the DLL and ask for a function" flow is unusable for it.
 //

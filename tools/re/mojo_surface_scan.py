@@ -1,4 +1,4 @@
-"""Targeted scan of chrome.dll for the Reference Mojo interface surface.
+"""Targeted scan of chrome.dll for the the reference Mojo interface surface.
 
 Stage 1 of the previous scan showed the interface names live in Chromium's
 constant string pool, so the bytes next to them are unrelated. This scan
