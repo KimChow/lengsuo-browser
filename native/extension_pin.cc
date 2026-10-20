@@ -13,6 +13,12 @@ namespace {
 // hostile document cannot silently narrow the whitelist.
 class JsonIdArrayReader {
  public:
+  // The text is held by value. Chromium's chromium-rawref and
+  // chromium-rawptr checks reject both native references and native pointers
+  // as members; raw_ref<> would fix that but drags in a //base dependency,
+  // and this directory is deliberately buildable with a plain C++20
+  // toolchain. The document is a short array of 32-character ids, so one
+  // copy costs nothing.
   explicit JsonIdArrayReader(const std::string& text) : text_(text) {}
 
   // Returns true only when the entire input is `[ "id", ... ]` with every
@@ -139,7 +145,7 @@ class JsonIdArrayReader {
     }
   }
 
-  const std::string& text_;
+  std::string text_;
   std::size_t pos_ = 0;
 };
 
