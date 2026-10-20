@@ -11,6 +11,21 @@ SRC=/home/ubuntu/lengsuo-browser-dev/src
 REPO=/home/ubuntu/lengsuo-browser-dev/recipe
 
 cd "$REPO" || exit 1
+
+# The overlay refuses to overwrite an existing target whose content differs
+# ("Existing overlay target differs"). That guard is right for files someone
+# may have hand-edited in the tree, but it also blocks the normal case of
+# replaying after a source file changed upstream: lengsuo/integration/BUILD.gn
+# gained the l3_bootstrap.cc entry, the tree still holds the old copy, and
+# the whole replay aborts.
+#
+# The overlay targets are recipe-owned (tools/overlay.py MAPPING copies them
+# from the recipe into the tree), so the tree copy is never the source of
+# truth. Removing the lengsuo/ overlay directory before replaying makes the
+# overlay a clean re-create and keeps the guard meaningful for anything
+# outside lengsuo/.
+rm -rf "$SRC/lengsuo"
+
 python3 -m tools.overlay --source "$SRC" --repository "$REPO" \
   --lock "$REPO/baseline.json" --apply --allow-patched-baseline \
   > /tmp/overlay_receipt.json 2>&1
