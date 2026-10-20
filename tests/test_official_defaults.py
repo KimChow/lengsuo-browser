@@ -14,6 +14,13 @@ Two independent pieces are required to fix it, and either one alone is inert:
 
 The second point cost real time to find, so it is pinned here: adding the
 startup call without the allow-list entry looks correct and changes nothing.
+
+Where the two pieces live
+-------------------------
+They do **not** live in the same patch any more. The patch series gives
+`chrome_browser_main.cc` a single owner (0016), so the startup call is in
+0016 while the renderer allow-list stays in 0013. The requirement that
+matters is that both land in the replayed tree, not that they share a file.
 """
 
 import pathlib
@@ -21,6 +28,7 @@ import unittest
 
 ROOT = pathlib.Path(__file__).resolve().parents[1]
 PATCH = ROOT / "patches" / "0013-official-feature-defaults.patch"
+WIRING_PATCH = ROOT / "patches" / "0016-browser-wiring.patch"
 HEADER = ROOT / "integration" / "official_defaults.h"
 IMPL = ROOT / "integration" / "official_defaults.cc"
 TEST = ROOT / "integration" / "official_defaults_unittest.cc"
@@ -29,7 +37,9 @@ BUILD_GN = ROOT / "integration" / "BUILD.gn"
 
 class OfficialDefaultsTests(unittest.TestCase):
     def test_startup_switch_is_appended(self):
-        text = PATCH.read_text(encoding="utf-8")
+        # chrome_browser_main.cc has a single owner (0016), so the startup
+        # call is asserted there.
+        text = WIRING_PATCH.read_text(encoding="utf-8")
         self.assertIn("ApplyOfficialFeatureDefaults", text)
         self.assertIn("chrome_browser_main.cc", text)
 
@@ -39,11 +49,14 @@ class OfficialDefaultsTests(unittest.TestCase):
         self.assertIn("render_process_host_impl.cc", text)
         self.assertIn("kDisableReduceAcceptLanguage", text)
 
-    def test_both_pieces_land_in_one_patch(self):
+    def test_both_pieces_reach_the_replayed_tree(self):
         """They only work together; splitting them invites a half-fix."""
-        text = PATCH.read_text(encoding="utf-8")
-        self.assertIn("chrome_browser_main.cc", text)
-        self.assertIn("render_process_host_impl.cc", text)
+        wiring = WIRING_PATCH.read_text(encoding="utf-8")
+        allow_list = PATCH.read_text(encoding="utf-8")
+        self.assertIn("chrome_browser_main.cc", wiring)
+        self.assertIn("ApplyOfficialFeatureDefaults", wiring)
+        self.assertIn("render_process_host_impl.cc", allow_list)
+        self.assertIn("kDisableReduceAcceptLanguage", allow_list)
 
     def test_declares_the_required_feature(self):
         text = HEADER.read_text(encoding="utf-8")
