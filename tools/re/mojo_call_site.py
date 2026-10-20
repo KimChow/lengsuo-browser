@@ -19,6 +19,26 @@ this tool also resolves direct ``call rel32`` / ``jmp rel32`` targets to RVAs,
 because the interesting ones here are calls to the payload allocator and the
 argument serializer.
 
+Reading per-field types out of a serializer
+-------------------------------------------
+The call site only carries *totals* (param count, struct byte size). Per-field
+types live one level down, in the serializer it calls, and they are readable
+without a decompiler. Mojo's generated serializer walks the params struct by
+offset, and a ``std::string`` field is the giveaway:
+
+    cmp byte ptr [rax + OFF], 0      ; OFF+0x17 style: the SSO flag byte
+    js  <heap branch>                ; mov rdx,[rax+OFF] / mov r8,[rax+OFF+8]
+    mov rcx,[rax + OFF+0x10]         ; length (SSO form)
+    movups xmm0,[rax + OFF]          ; 16 B inline buffer copy
+
+So ``OFF`` from the ``cmp byte ptr [rax+OFF],0`` operand is the field offset,
+and the neighbour ``mov eax, dword ptr [rax+OFF]`` gives the ``int32`` fields.
+Sanity check: the struct's last byte offset + 8 should equal the byte count in
+the call site's destructor ``mov edx, <imm>``.
+
+    python mojo_call_site.py <dll> 0x030FA6F0   # call site  -> id/count/size
+    python mojo_call_site.py <dll> 0x030FCB60   # serializer -> field offsets
+
 Usage
 -----
     python mojo_call_site.py <image.dll> <rva> [<rva> ...] [--json]
