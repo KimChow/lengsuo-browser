@@ -5,6 +5,8 @@ source_set("bootstrap") {
   sources = [
     "browser_bootstrap.cc",
     "browser_bootstrap.h",
+    "l3_bootstrap.cc",
+    "l3_bootstrap.h",
     "official_defaults.cc",
     "official_defaults.h",
     "profile_bootstrap_state.cc",
@@ -14,6 +16,10 @@ source_set("bootstrap") {
     "//base",
     "//lengsuo/native:profile_wire",
     "//lengsuo/native:profile_catalog",
+    # L3BootstrapState decodes the L3W1 document, so the browser side needs
+    # the decoder. Without this the linker reports undefined
+    # lengsuo::L3BootstrapState::Initialize.
+    "//lengsuo/native:l3_wire",
     "//ui/display",
   ]
   # The "common" group is required: :common_sources is visibility-restricted
