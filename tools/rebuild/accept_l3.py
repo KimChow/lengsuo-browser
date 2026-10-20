@@ -175,8 +175,23 @@ def main() -> int:
         if not args.keep:
             shutil.rmtree(work, ignore_errors=True)
         return 1
-    payload = json.loads(dom.split(marker, 1)[1].split("</title>")[0]
-                          .split('"')[0].replace("&quot;", '"'))
+    # The result rides in <title> as "L3RESULT{...}". Take everything from
+    # the marker up to the closing tag and let the JSON decoder find the
+    # object boundaries. The earlier version split on the first double quote,
+    # which is the opening quote of the JSON object itself, so it parsed "{"
+    # and died.
+    tail = dom.split(marker, 1)[1]
+    end = tail.find("</title>")
+    blob = tail[:end] if end >= 0 else tail
+    blob = blob.replace("&quot;", '"').replace("&amp;", "&")
+    try:
+        payload = json.loads(blob)
+    except json.JSONDecodeError as error:
+        print(f"FAIL: result payload is not valid JSON: {error}")
+        print("payload:", blob[:600])
+        if not args.keep:
+            shutil.rmtree(work, ignore_errors=True)
+        return 1
 
     print("\n=== L3 end-to-end acceptance ===")
     print("origin:", origin)
