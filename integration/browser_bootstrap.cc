@@ -1,5 +1,9 @@
 #include "lengsuo/integration/browser_bootstrap.h"
 #include <string>
+#include <vector>
+#include "base/base64.h"
+#include "base/time/time.h"
+#include "lengsuo/integration/l3_bootstrap.h"
 #include "third_party/icu/source/i18n/unicode/timezone.h"
 #include "base/files/file_util.h"
 #include "base/no_destructor.h"
@@ -37,6 +41,26 @@ ProfileBootstrapState& State() {
   static base::NoDestructor<ProfileBootstrapState> state;
   return *state;
 }
+// The L3 document is larger than the profile wire (it carries pin, cookie and
+// rule tables), so it gets its own bounded reader. The limit matches
+// fp::kMaxL3WireBytes; anything longer is rejected rather than truncated.
+std::optional<std::string> ReadL3Wire(const base::FilePath& path) {
+  base::File::Info info;
+  if (base::IsLink(path) || !base::GetFileInfo(path, &info) || info.is_directory ||
+      info.is_symbolic_link || info.size < 1 ||
+      info.size > static_cast<int64_t>(fp::kMaxL3WireBytes))
+    return std::nullopt;
+  std::string bytes;
+  if (!base::ReadFileToStringWithMaxSize(path, &bytes, fp::kMaxL3WireBytes))
+    return std::nullopt;
+  return bytes;
+}
+
+L3BootstrapState& L3State() {
+  static base::NoDestructor<L3BootstrapState> state;
+  return *state;
+}
+
 std::optional<std::string> ReadWire(const base::FilePath& path) {
   // Runner owns this local file and must prevent replacement/redirection.
   // Bounded reads are not wall-clock timeouts or authorization checks.
@@ -79,6 +103,31 @@ bool InitializeBrowserProfile(const base::CommandLine& command) {
   return State().InitializeCatalog(command.HasSwitch(kCatalogWireSwitch),
       IsSafeProfilePath(catalog_path), [&]() { return ReadWire(catalog_path); });
 }
+bool InitializeBrowserL3(const base::CommandLine& command) {
+  const bool requested = command.HasSwitch(kL3WireSwitch);
+  const auto path = command.GetSwitchValuePath(kL3WireSwitch);
+  // The anti-rollback window is checked against the browser's clock here, so
+  // the renderer never has to trust its own.
+  const int64_t now = base::Time::Now().ToDeltaSinceWindowsEpoch().InSeconds();
+  if (!L3State().Initialize(requested, IsSafeProfilePath(path),
+                             [&]() { return ReadL3Wire(path); }, now,
+                             kL3MaxAgeSeconds)) {
+    return false;
+  }
+  return true;
+}
+
+std::string BrowserL3Base64() {
+  const auto* config = L3State().config();
+  if (config == nullptr) {
+    return std::string();
+  }
+  // Re-serialize the frozen snapshot so the renderer receives exactly the
+  // document the browser verified, byte for byte.
+  const std::string wire = fp::EncodeL3Wire(*config, config->signed_unix);
+  return base::Base64Encode(base::as_byte_span(wire));
+}
+
 const ParsedProfile* BrowserProfile() { return State().profile(); }
 const CatalogUaEntry* BrowserUa() { return State().ua(); }
 const CatalogGpuEntry* BrowserGpu() { return State().gpu(); }

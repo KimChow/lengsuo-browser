@@ -1,8 +1,15 @@
 """Apply the L3 storage pin wiring to a Chromium checkout (task K).
 
 Every edit is an exact-string replacement against revision 0e66b94549a, so a
-mismatch fails loudly instead of silently mis-patching. Run from the checkout
-root; pair with revert_l3_wiring.py when generating the patch.
+mismatch fails loudly instead of silently mis-patching. Pair with
+tools/rebuild/replay_overlay_patches.sh to rebuild the tree from scratch.
+
+Blink-side API details this file encodes (verified against 155.0.8059.85):
+  * blink::String has FromUtf8(std::string_view), not FromUTF8.
+  * StorageArea::GetDOMWindow() is not const while getItem() is, so the origin
+    is cached in a member at construction time instead of being re-derived.
+  * The origin form the pin table uses is the security origin's
+    "https://host" spelling, which is what SecurityOrigin::ToString() returns.
 """
 
 import pathlib
@@ -14,7 +21,7 @@ def patch(path, pairs):
     text = target.read_text(encoding="utf-8")
     for old, new in pairs:
         if old not in text:
-            sys.exit(f"anchor not found in {path}:\n{old[:200]}")
+            sys.exit(f"anchor not found in {path}:\n{old[:240]}")
         text = text.replace(old, new, 1)
     target.write_text(text, encoding="utf-8")
     print(f"patched {path}")
@@ -30,6 +37,20 @@ STORAGE_AREA_H = [
   // right after creation so the first script observes them. No-op when the
   // runtime has no snapshot or the origin has no pins.
   void SeedStoragePins();
+
+ private:
+  // Cached origin of the owning document, in the "https://host" form the pin
+  // table uses. Cached because GetDOMWindow() is not const while the read path
+  // (getItem) is, and because the security origin does not change during the
+  // lifetime of the area.
+  String origin_;
+""",
+    ),
+    (
+        """#include "third_party/blink/renderer/platform/wtf/forward.h"
+""",
+        """#include "third_party/blink/renderer/platform/wtf/forward.h"
+#include "third_party/blink/renderer/platform/wtf/text/wtf_string.h"
 """,
     ),
 ]
@@ -41,6 +62,21 @@ STORAGE_AREA_CC = [
         '#include "lengsuo/native/l3_runtime.h"\n',
     ),
     (
+        """    : ExecutionContextClient(window),
+      cached_area_(std::move(storage_area)),
+      storage_type_(storage_type),
+      should_enqueue_events_(should_enqueue_events) {
+  DCHECK(window);
+  DCHECK(cached_area_);""",
+        """    : ExecutionContextClient(window),
+      cached_area_(std::move(storage_area)),
+      storage_type_(storage_type),
+      should_enqueue_events_(should_enqueue_events),
+      origin_(window->GetSecurityOrigin()->ToString()) {
+  DCHECK(window);
+  DCHECK(cached_area_);""",
+    ),
+    (
         """  return cached_area_->GetItem(key);
 }
 
@@ -49,9 +85,9 @@ NamedPropertySetterResult StorageArea::setItem(""",
   // pinned keys, so the answer never depends on what the store holds now.
   if (storage_type_ == StorageType::kLocalStorage) {
     const std::string* pinned = lengsuo::fp::GetL3Runtime().PinnedValue(
-        GetDOMWindow()->GetSecurityOrigin()->ToString().Utf8(), key.Utf8());
+        origin_.Utf8(), key.Utf8());
     if (pinned) {
-      return String::FromUTF8(*pinned);
+      return String::FromUtf8(*pinned);
     }
   }
   return cached_area_->GetItem(key);
@@ -64,9 +100,7 @@ NamedPropertySetterResult StorageArea::setItem(""",
         """  // Pinned keys are read-only: the environment froze platform-issued device
   // fields, so page writes are dropped silently, matching a pinned store.
   if (storage_type_ == StorageType::kLocalStorage &&
-      lengsuo::fp::GetL3Runtime().IsLocked(
-          GetDOMWindow()->GetSecurityOrigin()->ToString().Utf8(),
-          key.Utf8())) {
+      lengsuo::fp::GetL3Runtime().IsLocked(origin_.Utf8(), key.Utf8())) {
     return NamedPropertySetterResult::kIntercepted;
   }
   if (!cached_area_->SetItem(key, value, this)) {
@@ -78,9 +112,7 @@ NamedPropertySetterResult StorageArea::setItem(""",
 """,
         """  // Pinned keys cannot be removed for the same reason they cannot be set.
   if (storage_type_ == StorageType::kLocalStorage &&
-      lengsuo::fp::GetL3Runtime().IsLocked(
-          GetDOMWindow()->GetSecurityOrigin()->ToString().Utf8(),
-          key.Utf8())) {
+      lengsuo::fp::GetL3Runtime().IsLocked(origin_.Utf8(), key.Utf8())) {
     return NamedPropertyDeleterResult::kDidNotDelete;
   }
   cached_area_->RemoveItem(key, this);
@@ -97,11 +129,11 @@ bool StorageArea::Contains(""",
   // would break legitimate cleanup and leak the pin set via bisection.
   Vector<std::pair<String, String>> restore;
   if (storage_type_ == StorageType::kLocalStorage) {
-    if (const auto* pins = lengsuo::fp::GetL3Runtime().LocalPins(
-            GetDOMWindow()->GetSecurityOrigin()->ToString().Utf8())) {
+    if (const auto* pins =
+            lengsuo::fp::GetL3Runtime().LocalPins(origin_.Utf8())) {
       for (const lengsuo::fp::PinnedEntry& pinned : *pins) {
-        restore.emplace_back(String::FromUTF8(pinned.key),
-                             String::FromUTF8(pinned.value));
+        restore.emplace_back(String::FromUtf8(pinned.key),
+                             String::FromUtf8(pinned.value));
       }
     }
   }
@@ -119,8 +151,7 @@ void StorageArea::SeedStoragePins() {
   if (!runtime.ready()) {
     return;
   }
-  const String origin = GetDOMWindow()->GetSecurityOrigin()->ToString();
-  const auto* pins = runtime.LocalPins(origin.Utf8());
+  const auto* pins = runtime.LocalPins(origin_.Utf8());
   if (!pins) {
     return;
   }
@@ -128,8 +159,8 @@ void StorageArea::SeedStoragePins() {
     // The pinned value wins over whatever the store already holds; a missing
     // entry and a differing entry are seeded identically. Neither key nor
     // value is logged: pinned values are device identity, not diagnostics.
-    cached_area_->SetItem(String::FromUTF8(pinned.key),
-                          String::FromUTF8(pinned.value), this);
+    cached_area_->SetItem(String::FromUtf8(pinned.key),
+                          String::FromUtf8(pinned.value), this);
   }
 }
 
@@ -170,12 +201,6 @@ STORAGE_BUILD_GN = [
     ),
 ]
 
-# Anchors below match the *pristine* revision 0e66b94549a tree. When patches
-# 0007/0008 have already been applied, the lengsuo includes exist and the
-# anchors below would not be found - in that case patch renderer_main.cc by
-# hand against the lengsuo block instead. The pristine anchors are the default
-# because tools.patch_apply applies 0015 last, before the overlay tooling ever
-# runs this script.
 RENDERER_MAIN_CC = [
     (
         """#if BUILDFLAG(MOJO_RANDOM_DELAYS_ENABLED)
@@ -187,6 +212,7 @@ RENDERER_MAIN_CC = [
 #endif
 
 #include "lengsuo/native/l3_runtime.h"
+#include "base/base64.h"
 """,
     ),
     (
@@ -215,6 +241,51 @@ RENDERER_MAIN_CC = [
 ]
 
 
+BROWSER_MAIN_CC = [
+    (
+        """  if (!lengsuo::InitializeBrowserProfile(*base::CommandLine::ForCurrentProcess())) {
+    LOG(ERROR) << "Lengsuo profile bootstrap rejected";
+    return CHROME_RESULT_CODE_INVALID_CMDLINE_URL;
+  }
+""",
+        """  if (!lengsuo::InitializeBrowserProfile(*base::CommandLine::ForCurrentProcess())) {
+    LOG(ERROR) << "Lengsuo profile bootstrap rejected";
+    return CHROME_RESULT_CODE_INVALID_CMDLINE_URL;
+  }
+
+  // Storage-layer pins (L3). A requested but unreadable or unverifiable
+  // document aborts startup: continuing would unpin values a platform may
+  // already have observed, which reads as "the device changed".
+  if (!lengsuo::InitializeBrowserL3(*base::CommandLine::ForCurrentProcess())) {
+    LOG(ERROR) << "Lengsuo L3 bootstrap rejected";
+    return CHROME_RESULT_CODE_INVALID_CMDLINE_URL;
+  }
+""",
+    ),
+]
+
+BROWSER_CLIENT_CC = [
+    (
+        """    if (const auto* browser_profile = lengsuo::BrowserProfile())
+      command_line->AppendSwitchASCII("lengsuo-managed-language",
+                                      browser_profile->language);
+""",
+        """    if (const auto* browser_profile = lengsuo::BrowserProfile())
+      command_line->AppendSwitchASCII("lengsuo-managed-language",
+                                      browser_profile->language);
+    // Storage-layer pins (L3). The document is re-serialized from the frozen
+    // snapshot and base64-encoded, so the renderer receives exactly what the
+    // browser verified. Transitional transport; see docs/fp-switch-contract.md
+    // for the move to a managed file plus Mojo.
+    if (const std::string l3_b64 = lengsuo::BrowserL3Base64();
+        !l3_b64.empty() && !command_line->HasSwitch("lengsuo-managed-l3")) {
+      command_line->AppendSwitchASCII("lengsuo-managed-l3", l3_b64);
+    }
+""",
+    ),
+]
+
+
 def main():
     patch("third_party/blink/renderer/modules/storage/storage_area.h",
           STORAGE_AREA_H)
@@ -225,7 +296,9 @@ def main():
     patch("third_party/blink/renderer/modules/storage/BUILD.gn",
           STORAGE_BUILD_GN)
     patch("content/renderer/renderer_main.cc", RENDERER_MAIN_CC)
-    print("all five files wired")
+    patch("chrome/browser/chrome_browser_main.cc", BROWSER_MAIN_CC)
+    patch("chrome/browser/chrome_content_browser_client.cc", BROWSER_CLIENT_CC)
+    print("all seven files wired")
 
 
 if __name__ == "__main__":

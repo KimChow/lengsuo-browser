@@ -1,17 +1,20 @@
 diff --git a/content/renderer/renderer_main.cc b/content/renderer/renderer_main.cc
-index 2fd21f7ee5..fe3203998f 100644
+index 2fd21f7ee5..4731d25127 100644
 --- a/content/renderer/renderer_main.cc
 +++ b/content/renderer/renderer_main.cc
-@@ -89,6 +89,8 @@
+@@ -89,6 +89,11 @@
  #include "mojo/public/cpp/bindings/lib/test_random_mojo_delays.h"
  #endif
  
 +#include "lengsuo/native/l3_runtime.h"
 +
++#include "lengsuo/native/canvas_apply.h"
++#include "lengsuo/native/fp_overrides.h"
++
  namespace content {
  namespace {
  
-@@ -155,6 +157,23 @@ int RendererMain(MainFunctionParams parameters) {
+@@ -155,6 +160,56 @@ int RendererMain(MainFunctionParams parameters) {
  
    const base::CommandLine& command_line = *parameters.command_line;
  
@@ -30,6 +33,39 @@ index 2fd21f7ee5..fe3203998f 100644
 +                                          /*max_age_seconds=*/1)) {
 +      return 1;
 +    }
++  }
++
++  // Browser passes only the frozen language, never the profile file or secrets.
++  // Linux zygote children inherit ICU state; --lang alone does not reset it.
++  if (command_line.HasSwitch("lengsuo-managed-language")) {
++    const auto locale =
++        command_line.GetSwitchValueASCII("lengsuo-managed-language");
++    if (locale.empty()) return 1;
++    base::i18n::SetICUDefaultLocale(locale);
++  }
++
++  // Browser passes only the frozen language, never the profile file or secrets.
++  // Linux zygote children inherit ICU state; --lang alone does not reset it.
++  if (command_line.HasSwitch("lengsuo-managed-canvas")) {
++    lengsuo::InitCanvasNoiseFromSwitch(
++        command_line.GetSwitchValueASCII("lengsuo-managed-canvas").c_str());
++  }
++  if (command_line.HasSwitch("lengsuo-managed-fp")) {
++    lengsuo::fp::InitFromSwitch(
++        command_line.GetSwitchValueASCII("lengsuo-managed-fp"));
++  }
++  // Font dimension: {switcher, value, mask}. Absent => nothing is installed and
++  // every measurement keeps its native value. A malformed payload installs
++  // nothing rather than a half-applied dimension (native/font_family_traits.h).
++  if (command_line.HasSwitch("lengsuo-managed-fonts")) {
++    lengsuo::fp::InitFontsFromSwitch(
++        command_line.GetSwitchValueASCII("lengsuo-managed-fonts"));
++  }
++  if (command_line.HasSwitch("lengsuo-managed-language")) {
++    const auto locale =
++        command_line.GetSwitchValueASCII("lengsuo-managed-language");
++    if (locale.empty()) return 1;
++    base::i18n::SetICUDefaultLocale(locale);
 +  }
 +
  #if BUILDFLAG(IS_MAC)
@@ -65,7 +101,7 @@ index 23e1819080..5e20c017a9 100644
  }
  
 diff --git a/third_party/blink/renderer/modules/storage/storage_area.cc b/third_party/blink/renderer/modules/storage/storage_area.cc
-index 131a62a60d..d0f7040fe5 100644
+index 131a62a60d..6e855542fc 100644
 --- a/third_party/blink/renderer/modules/storage/storage_area.cc
 +++ b/third_party/blink/renderer/modules/storage/storage_area.cc
 @@ -44,6 +44,7 @@
@@ -76,7 +112,17 @@ index 131a62a60d..d0f7040fe5 100644
  
  namespace blink {
  
-@@ -116,6 +117,15 @@ String StorageArea::getItem(const String& key,
+@@ -83,7 +84,8 @@ StorageArea::StorageArea(LocalDOMWindow* window,
+     : ExecutionContextClient(window),
+       cached_area_(std::move(storage_area)),
+       storage_type_(storage_type),
+-      should_enqueue_events_(should_enqueue_events) {
++      should_enqueue_events_(should_enqueue_events),
++      origin_(window->GetSecurityOrigin()->ToString()) {
+   DCHECK(window);
+   DCHECK(cached_area_);
+   cached_area_->RegisterSource(this);
+@@ -116,6 +118,15 @@ String StorageArea::getItem(const String& key,
      exception_state.ThrowSecurityError(StorageArea::kAccessDeniedMessage);
      return String();
    }
@@ -84,44 +130,40 @@ index 131a62a60d..d0f7040fe5 100644
 +  // pinned keys, so the answer never depends on what the store holds now.
 +  if (storage_type_ == StorageType::kLocalStorage) {
 +    const std::string* pinned = lengsuo::fp::GetL3Runtime().PinnedValue(
-+        GetDOMWindow()->GetSecurityOrigin()->ToString().Utf8(), key.Utf8());
++        origin_.Utf8(), key.Utf8());
 +    if (pinned) {
-+      return String::FromUTF8(*pinned);
++      return String::FromUtf8(*pinned);
 +    }
 +  }
    return cached_area_->GetItem(key);
  }
  
-@@ -127,6 +137,14 @@ NamedPropertySetterResult StorageArea::setItem(
+@@ -127,6 +138,12 @@ NamedPropertySetterResult StorageArea::setItem(
      exception_state.ThrowSecurityError(StorageArea::kAccessDeniedMessage);
      return NamedPropertySetterResult::kIntercepted;
    }
 +  // Pinned keys are read-only: the environment froze platform-issued device
 +  // fields, so page writes are dropped silently, matching a pinned store.
 +  if (storage_type_ == StorageType::kLocalStorage &&
-+      lengsuo::fp::GetL3Runtime().IsLocked(
-+          GetDOMWindow()->GetSecurityOrigin()->ToString().Utf8(),
-+          key.Utf8())) {
++      lengsuo::fp::GetL3Runtime().IsLocked(origin_.Utf8(), key.Utf8())) {
 +    return NamedPropertySetterResult::kIntercepted;
 +  }
    if (!cached_area_->SetItem(key, value, this)) {
      QuotaExceededError::Throw(
          exception_state,
-@@ -143,6 +161,13 @@ NamedPropertyDeleterResult StorageArea::removeItem(
+@@ -143,6 +160,11 @@ NamedPropertyDeleterResult StorageArea::removeItem(
      exception_state.ThrowSecurityError(StorageArea::kAccessDeniedMessage);
      return NamedPropertyDeleterResult::kDidNotDelete;
    }
 +  // Pinned keys cannot be removed for the same reason they cannot be set.
 +  if (storage_type_ == StorageType::kLocalStorage &&
-+      lengsuo::fp::GetL3Runtime().IsLocked(
-+          GetDOMWindow()->GetSecurityOrigin()->ToString().Utf8(),
-+          key.Utf8())) {
++      lengsuo::fp::GetL3Runtime().IsLocked(origin_.Utf8(), key.Utf8())) {
 +    return NamedPropertyDeleterResult::kDidNotDelete;
 +  }
    cached_area_->RemoveItem(key, this);
    return NamedPropertyDeleterResult::kDeleted;
  }
-@@ -152,7 +177,45 @@ void StorageArea::clear(ExceptionState& exception_state) {
+@@ -152,7 +174,44 @@ void StorageArea::clear(ExceptionState& exception_state) {
      exception_state.ThrowSecurityError(StorageArea::kAccessDeniedMessage);
      return;
    }
@@ -130,11 +172,11 @@ index 131a62a60d..d0f7040fe5 100644
 +  // would break legitimate cleanup and leak the pin set via bisection.
 +  Vector<std::pair<String, String>> restore;
 +  if (storage_type_ == StorageType::kLocalStorage) {
-+    if (const auto* pins = lengsuo::fp::GetL3Runtime().LocalPins(
-+            GetDOMWindow()->GetSecurityOrigin()->ToString().Utf8())) {
++    if (const auto* pins =
++            lengsuo::fp::GetL3Runtime().LocalPins(origin_.Utf8())) {
 +      for (const lengsuo::fp::PinnedEntry& pinned : *pins) {
-+        restore.emplace_back(String::FromUTF8(pinned.key),
-+                             String::FromUTF8(pinned.value));
++        restore.emplace_back(String::FromUtf8(pinned.key),
++                             String::FromUtf8(pinned.value));
 +      }
 +    }
 +  }
@@ -152,8 +194,7 @@ index 131a62a60d..d0f7040fe5 100644
 +  if (!runtime.ready()) {
 +    return;
 +  }
-+  const String origin = GetDOMWindow()->GetSecurityOrigin()->ToString();
-+  const auto* pins = runtime.LocalPins(origin.Utf8());
++  const auto* pins = runtime.LocalPins(origin_.Utf8());
 +  if (!pins) {
 +    return;
 +  }
@@ -161,17 +202,25 @@ index 131a62a60d..d0f7040fe5 100644
 +    // The pinned value wins over whatever the store already holds; a missing
 +    // entry and a differing entry are seeded identically. Neither key nor
 +    // value is logged: pinned values are device identity, not diagnostics.
-+    cached_area_->SetItem(String::FromUTF8(pinned.key),
-+                          String::FromUTF8(pinned.value), this);
++    cached_area_->SetItem(String::FromUtf8(pinned.key),
++                          String::FromUtf8(pinned.value), this);
 +  }
  }
  
  bool StorageArea::Contains(const String& key,
 diff --git a/third_party/blink/renderer/modules/storage/storage_area.h b/third_party/blink/renderer/modules/storage/storage_area.h
-index 1c1a642705..35fe2059c9 100644
+index 1c1a642705..c5b3b37a1b 100644
 --- a/third_party/blink/renderer/modules/storage/storage_area.h
 +++ b/third_party/blink/renderer/modules/storage/storage_area.h
-@@ -95,6 +95,12 @@ class StorageArea final : public ScriptWrappable,
+@@ -33,6 +33,7 @@
+ #include "third_party/blink/renderer/platform/bindings/script_wrappable.h"
+ #include "third_party/blink/renderer/platform/heap/garbage_collected.h"
+ #include "third_party/blink/renderer/platform/wtf/forward.h"
++#include "third_party/blink/renderer/platform/wtf/text/wtf_string.h"
+ 
+ namespace blink {
+ 
+@@ -95,6 +96,19 @@ class StorageArea final : public ScriptWrappable,
  
    LocalDOMWindow* GetDOMWindow() override;
  
@@ -180,6 +229,13 @@ index 1c1a642705..35fe2059c9 100644
 +  // right after creation so the first script observes them. No-op when the
 +  // runtime has no snapshot or the origin has no pins.
 +  void SeedStoragePins();
++
++ private:
++  // Cached origin of the owning document, in the "https://host" form the pin
++  // table uses. Cached because GetDOMWindow() is not const while the read path
++  // (getItem) is, and because the security origin does not change during the
++  // lifetime of the area.
++  String origin_;
 +
   private:
    void RecordModificationInMetrics();

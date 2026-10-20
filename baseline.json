@@ -72,10 +72,6 @@
     {
       "path": "patches/0014-font-metrics.patch",
       "sha256": "4196cd1512f7f34af856be367bbfc482de1ef9a3fbd1784a37be7c5f32f4ffda"
-    },
-    {
-      "path": "patches/0015-l3-storage.patch",
-      "sha256": "7eda50c3a809cf3dffe991cac8f553bf8757d8fd93ee27f8b429f0eea33a15bf"
     }
   ]
 }

@@ -12,6 +12,8 @@ namespace lengsuo {
 bool IsValidProfileTimezone(std::string_view zone);
 inline constexpr char kProfileWireSwitch[] = "lengsuo-profile-wire";
 inline constexpr char kCatalogWireSwitch[] = "lengsuo-catalog-wire";
+// Managed L3 document (pins / extension whitelist / consistency rules).
+inline constexpr char kL3WireSwitch[] = "lengsuo-l3-wire";
 bool IsManagedBrowserCommand(const base::CommandLine& command);
 bool IsSafeProfilePath(const base::FilePath& path);
 // Called exactly once from BrowserMainParts before BrowserProcess creation.
@@ -22,6 +24,14 @@ const CatalogUaEntry* BrowserUa();
 // catalog carries no GPU section or has no matching entry (upstream faces
 // then stay untouched).
 const CatalogGpuEntry* BrowserGpu();
+// Loads the managed L3 document (l3_bootstrap.h) and freezes it. Returns
+// false when a document was requested but could not be loaded or verified;
+// the caller must abort startup rather than continue unpinned.
+bool InitializeBrowserL3(const base::CommandLine& command);
+// Base64 of the frozen L3 document, ready to hand to a renderer. Empty when
+// no document is loaded. The encoding keeps the multi-line document off the
+// command line verbatim.
+std::string BrowserL3Base64();
 bool ApplyUaMetadata(const CatalogUaEntry& entry,
                      blink::UserAgentMetadata* metadata);
 // Returns true only when preferences actually change.

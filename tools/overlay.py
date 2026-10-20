@@ -31,6 +31,8 @@ MAPPING = (
     ("native/font_metrics.cc", "lengsuo/native/font_metrics.cc"),
     ("native/product_brand.h", "lengsuo/native/product_brand.h"),
     ("integration/browser_bootstrap.cc", "lengsuo/integration/browser_bootstrap.cc"),
+    ("integration/official_defaults.h", "lengsuo/integration/official_defaults.h"),
+    ("integration/official_defaults.cc", "lengsuo/integration/official_defaults.cc"),
     ("integration/browser_bootstrap.h", "lengsuo/integration/browser_bootstrap.h"),
     ("integration/profile_bootstrap_state.cc",
      "lengsuo/integration/profile_bootstrap_state.cc"),
