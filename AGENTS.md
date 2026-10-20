@@ -68,3 +68,7 @@ python scripts/check_no_source_leak.py
 重写并强制推送。**重写会改变全部 commit SHA**，持有旧 SHA 的外部引用（CI 缓存、他人分支）
 会失效；重写前须确认无外部依赖。
 <!-- source-privacy:end -->
+
+
+> 本规范同时内联在 `AGENTS.md` 的 `source-privacy` 段（智能体启动时自动加载），
+> 因此**不再单独维护一份 `docs/source-privacy.md`**——两份副本迟早会分叉。
