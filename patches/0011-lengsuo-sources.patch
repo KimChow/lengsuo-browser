@@ -1,9 +1,9 @@
 diff --git a/lengsuo/integration/BUILD.gn b/lengsuo/integration/BUILD.gn
 new file mode 100644
-index 0000000..8d95954
+index 0000000..e6cfc65
 --- /dev/null
 +++ b/lengsuo/integration/BUILD.gn
-@@ -0,0 +1,46 @@
+@@ -0,0 +1,52 @@
 +import("//testing/test.gni")
 +
 +# Browser-only dependency. No chrome/browser dependency (avoids a cycle).
@@ -11,6 +11,8 @@ index 0000000..8d95954
 +  sources = [
 +    "browser_bootstrap.cc",
 +    "browser_bootstrap.h",
++    "l3_bootstrap.cc",
++    "l3_bootstrap.h",
 +    "official_defaults.cc",
 +    "official_defaults.h",
 +    "profile_bootstrap_state.cc",
@@ -20,6 +22,10 @@ index 0000000..8d95954
 +    "//base",
 +    "//lengsuo/native:profile_wire",
 +    "//lengsuo/native:profile_catalog",
++    # L3BootstrapState decodes the L3W1 document, so the browser side needs
++    # the decoder. Without this the linker reports undefined
++    # lengsuo::L3BootstrapState::Initialize.
++    "//lengsuo/native:l3_wire",
 +    "//ui/display",
 +  ]
 +  # The "common" group is required: :common_sources is visibility-restricted
@@ -52,12 +58,16 @@ index 0000000..8d95954
 +}
 diff --git a/lengsuo/integration/browser_bootstrap.cc b/lengsuo/integration/browser_bootstrap.cc
 new file mode 100644
-index 0000000..ff5c2f6
+index 0000000..92a7757
 --- /dev/null
 +++ b/lengsuo/integration/browser_bootstrap.cc
-@@ -0,0 +1,181 @@
+@@ -0,0 +1,230 @@
 +#include "lengsuo/integration/browser_bootstrap.h"
 +#include <string>
++#include <vector>
++#include "base/base64.h"
++#include "base/time/time.h"
++#include "lengsuo/integration/l3_bootstrap.h"
 +#include "third_party/icu/source/i18n/unicode/timezone.h"
 +#include "base/files/file_util.h"
 +#include "base/no_destructor.h"
@@ -95,6 +105,26 @@ index 0000000..ff5c2f6
 +  static base::NoDestructor<ProfileBootstrapState> state;
 +  return *state;
 +}
++// The L3 document is larger than the profile wire (it carries pin, cookie and
++// rule tables), so it gets its own bounded reader. The limit matches
++// fp::kMaxL3WireBytes; anything longer is rejected rather than truncated.
++std::optional<std::string> ReadL3Wire(const base::FilePath& path) {
++  base::File::Info info;
++  if (base::IsLink(path) || !base::GetFileInfo(path, &info) || info.is_directory ||
++      info.is_symbolic_link || info.size < 1 ||
++      info.size > static_cast<int64_t>(fp::kMaxL3WireBytes))
++    return std::nullopt;
++  std::string bytes;
++  if (!base::ReadFileToStringWithMaxSize(path, &bytes, fp::kMaxL3WireBytes))
++    return std::nullopt;
++  return bytes;
++}
++
++L3BootstrapState& L3State() {
++  static base::NoDestructor<L3BootstrapState> state;
++  return *state;
++}
++
 +std::optional<std::string> ReadWire(const base::FilePath& path) {
 +  // Runner owns this local file and must prevent replacement/redirection.
 +  // Bounded reads are not wall-clock timeouts or authorization checks.
@@ -137,6 +167,31 @@ index 0000000..ff5c2f6
 +  return State().InitializeCatalog(command.HasSwitch(kCatalogWireSwitch),
 +      IsSafeProfilePath(catalog_path), [&]() { return ReadWire(catalog_path); });
 +}
++bool InitializeBrowserL3(const base::CommandLine& command) {
++  const bool requested = command.HasSwitch(kL3WireSwitch);
++  const auto path = command.GetSwitchValuePath(kL3WireSwitch);
++  // The anti-rollback window is checked against the browser's clock here, so
++  // the renderer never has to trust its own.
++  const int64_t now = base::Time::Now().ToDeltaSinceWindowsEpoch().InSeconds();
++  if (!L3State().Initialize(requested, IsSafeProfilePath(path),
++                             [&]() { return ReadL3Wire(path); }, now,
++                             kL3MaxAgeSeconds)) {
++    return false;
++  }
++  return true;
++}
++
++std::string BrowserL3Base64() {
++  const auto* config = L3State().config();
++  if (config == nullptr) {
++    return std::string();
++  }
++  // Re-serialize the frozen snapshot so the renderer receives exactly the
++  // document the browser verified, byte for byte.
++  const std::string wire = fp::EncodeL3Wire(*config, config->signed_unix);
++  return base::Base64Encode(base::as_byte_span(wire));
++}
++
 +const ParsedProfile* BrowserProfile() { return State().profile(); }
 +const CatalogUaEntry* BrowserUa() { return State().ua(); }
 +const CatalogGpuEntry* BrowserGpu() { return State().gpu(); }
@@ -239,10 +294,10 @@ index 0000000..ff5c2f6
 +}  // namespace lengsuo
 diff --git a/lengsuo/integration/browser_bootstrap.h b/lengsuo/integration/browser_bootstrap.h
 new file mode 100644
-index 0000000..978452c
+index 0000000..889b8b7
 --- /dev/null
 +++ b/lengsuo/integration/browser_bootstrap.h
-@@ -0,0 +1,50 @@
+@@ -0,0 +1,60 @@
 +#ifndef LENGSUO_INTEGRATION_BROWSER_BOOTSTRAP_H_
 +#define LENGSUO_INTEGRATION_BROWSER_BOOTSTRAP_H_
 +#include <string_view>
@@ -257,6 +312,8 @@ index 0000000..978452c
 +bool IsValidProfileTimezone(std::string_view zone);
 +inline constexpr char kProfileWireSwitch[] = "lengsuo-profile-wire";
 +inline constexpr char kCatalogWireSwitch[] = "lengsuo-catalog-wire";
++// Managed L3 document (pins / extension whitelist / consistency rules).
++inline constexpr char kL3WireSwitch[] = "lengsuo-l3-wire";
 +bool IsManagedBrowserCommand(const base::CommandLine& command);
 +bool IsSafeProfilePath(const base::FilePath& path);
 +// Called exactly once from BrowserMainParts before BrowserProcess creation.
@@ -267,6 +324,14 @@ index 0000000..978452c
 +// catalog carries no GPU section or has no matching entry (upstream faces
 +// then stay untouched).
 +const CatalogGpuEntry* BrowserGpu();
++// Loads the managed L3 document (l3_bootstrap.h) and freezes it. Returns
++// false when a document was requested but could not be loaded or verified;
++// the caller must abort startup rather than continue unpinned.
++bool InitializeBrowserL3(const base::CommandLine& command);
++// Base64 of the frozen L3 document, ready to hand to a renderer. Empty when
++// no document is loaded. The encoding keeps the multi-line document off the
++// command line verbatim.
++std::string BrowserL3Base64();
 +bool ApplyUaMetadata(const CatalogUaEntry& entry,
 +                     blink::UserAgentMetadata* metadata);
 +// Returns true only when preferences actually change.
@@ -653,6 +718,382 @@ index 0000000..b657c89
 +  EXPECT_EQ(24, infos.current().depth);
 +}
 +}  // namespace lengsuo
+diff --git a/lengsuo/integration/l3_bootstrap.cc b/lengsuo/integration/l3_bootstrap.cc
+new file mode 100644
+index 0000000..57cfdf9
+--- /dev/null
++++ b/lengsuo/integration/l3_bootstrap.cc
+@@ -0,0 +1,56 @@
++#include "lengsuo/integration/l3_bootstrap.h"
++
++#include <string_view>
++
++namespace lengsuo {
++namespace {
++
++bool ExceedsLimit(const std::string& wire) {
++  return wire.empty() || wire.size() > fp::kMaxL3WireBytes;
++}
++
++}  // namespace
++
++L3BootstrapState::L3BootstrapState() = default;
++L3BootstrapState::~L3BootstrapState() = default;
++
++bool L3BootstrapState::Initialize(bool requested,
++                                 bool safe_local_path,
++                                 const Reader& read,
++                                 int64_t now_unix,
++                                 int64_t max_age_seconds) {
++  // Single-shot: a second call never re-reads, so a swapped file on disk
++  // cannot change the snapshot after the browser has started.
++  if (attempted_) {
++    return false;
++  }
++  attempted_ = true;
++  if (!requested) {
++    return true;
++  }
++  // An unusable path or clock window is a configuration error, not "absent".
++  if (!safe_local_path || now_unix <= 0 || max_age_seconds <= 0) {
++    load_failed_ = true;
++    return false;
++  }
++  const std::optional<std::string> wire = read();
++  if (!wire || ExceedsLimit(*wire)) {
++    load_failed_ = true;
++    return false;
++  }
++
++  fp::L3Config decoded;
++  const bool ok = fp::DecodeL3Wire(std::string_view(*wire), now_unix,
++                                   max_age_seconds, &decoded, nullptr);
++  // The local copy of the wire is dropped here: the decoded snapshot is what
++  // lives on, so the path and raw bytes (which carry pinned secrets) do not
++  // stay resident.
++  if (!ok) {
++    load_failed_ = true;
++    return false;
++  }
++  config_ = std::move(decoded);
++  return true;
++}
++
++}  // namespace lengsuo
+diff --git a/lengsuo/integration/l3_bootstrap.h b/lengsuo/integration/l3_bootstrap.h
+new file mode 100644
+index 0000000..c2f0b62
+--- /dev/null
++++ b/lengsuo/integration/l3_bootstrap.h
+@@ -0,0 +1,71 @@
++// l3_bootstrap - browser-side L3 configuration load, frozen at startup.
++//
++// The browser reads one managed L3W1 document before any renderer exists and
++// keeps it immutable afterwards. Three outcomes are deliberately distinct:
++//
++//   * not requested        -> Initialize returns true, config() is nullptr.
++//     No L3 statement, upstream behavior is untouched.
++//   * requested but broken -> Initialize returns false. The caller must abort
++//     startup: a half-valid snapshot is never downgraded to "no L3", because
++//     that would silently unpin values the platform already observed.
++//   * requested and valid  -> Initialize returns true, config() is non-null.
++//
++// Clock injection: the signature carries a unix timestamp and VerifySign
++// needs "now", so `now_unix` is an explicit argument rather than a call to
++// base::Time inside the decoder. Tests therefore never depend on wall time.
++//
++// Size limit: the profile wire caps at 4096 bytes, but an L3 document holds
++// pin/cookie/rule tables and is legitimately larger, so this reader accepts up
++// to fp::kMaxL3WireBytes (64 KiB) and nothing beyond it.
++#ifndef LENGSUO_INTEGRATION_L3_BOOTSTRAP_H_
++#define LENGSUO_INTEGRATION_L3_BOOTSTRAP_H_
++
++#include <cstdint>
++#include <functional>
++#include <optional>
++#include <string>
++
++#include "lengsuo/native/l3_wire.h"
++
++namespace lengsuo {
++
++// The command-line switch naming the managed L3 document lives in
++// browser_bootstrap.h (kL3WireSwitch) so that there is exactly one definition
++// of the switch name; a second one would be a redefinition error in any
++// translation unit that includes both headers.
++
++// Default anti-rollback window for the document signature.
++inline constexpr int64_t kL3MaxAgeSeconds = 7 * 24 * 60 * 60;
++
++class L3BootstrapState {
++ public:
++  using Reader = std::function<std::optional<std::string>()>;
++
++  L3BootstrapState();
++  ~L3BootstrapState();
++  L3BootstrapState(const L3BootstrapState&) = delete;
++  L3BootstrapState& operator=(const L3BootstrapState&) = delete;
++
++  // Single-shot. `requested` false succeeds without loading. A load or
++  // verification failure returns false and leaves config() untouched.
++  bool Initialize(bool requested,
++                  bool safe_local_path,
++                  const Reader& read,
++                  int64_t now_unix,
++                  int64_t max_age_seconds);
++
++  const fp::L3Config* config() const { return config_ ? &*config_ : nullptr; }
++
++  // True when a document was requested but failed to load; callers use this to
++  // distinguish "absent" from "broken" when reporting startup failure.
++  bool load_failed() const { return load_failed_; }
++
++ private:
++  bool attempted_ = false;
++  bool load_failed_ = false;
++  std::optional<fp::L3Config> config_;
++};
++
++}  // namespace lengsuo
++
++#endif  // LENGSUO_INTEGRATION_L3_BOOTSTRAP_H_
+diff --git a/lengsuo/integration/official_defaults.cc b/lengsuo/integration/official_defaults.cc
+new file mode 100644
+index 0000000..fa2a132
+--- /dev/null
++++ b/lengsuo/integration/official_defaults.cc
+@@ -0,0 +1,72 @@
++#include "lengsuo/integration/official_defaults.h"
++
++#include <array>
++#include <vector>
++
++#include "base/command_line.h"
++#include "base/strings/string_split.h"
++#include "base/strings/string_util.h"
++
++namespace lengsuo {
++namespace {
++
++constexpr char kDisableFeaturesSwitch[] = "disable-features";
++
++// Blink reads this from the renderer's own command line to decide whether to
++// keep navigator.languages at full length. It has to be appended here *and*
++// allow-listed in RenderProcessHostImpl's kSwitchNames; the renderer does not
++// rebuild its feature list from the browser's --disable-features.
++constexpr char kDisableReduceAcceptLanguageSwitch[] =
++    "disable-reduce-accept-language";
++
++// Keeps the merge order deterministic and preserves the user's own ordering,
++// so an operator-supplied flag list still reads the way they wrote it.
++std::string JoinUnique(const std::vector<std::string>& ordered) {
++  std::vector<std::string> unique;
++  for (const std::string& item : ordered) {
++    if (item.empty()) {
++      continue;
++    }
++    bool seen = false;
++    for (const std::string& kept : unique) {
++      if (kept == item) {
++        seen = true;
++        break;
++      }
++    }
++    if (!seen) {
++      unique.push_back(item);
++    }
++  }
++  return base::JoinString(unique, ",");
++}
++
++}  // namespace
++
++std::string MergeDisabledFeatures(std::string_view existing) {
++  const std::string current(existing);
++  std::vector<std::string> parts = base::SplitString(
++      current, ",", base::TRIM_WHITESPACE, base::SPLIT_WANT_NONEMPTY);
++  for (const std::string_view feature : kFeaturesChromeDisables) {
++    parts.emplace_back(feature);
++  }
++  return JoinUnique(parts);
++}
++
++void ApplyOfficialFeatureDefaults(base::CommandLine* command) {
++  if (command == nullptr) {
++    return;
++  }
++  const std::string current = command->GetSwitchValueASCII(kDisableFeaturesSwitch);
++  const std::string merged = MergeDisabledFeatures(current);
++  if (merged != current) {
++    command->AppendSwitchASCII(kDisableFeaturesSwitch, merged);
++  }
++  // The renderer ignores the browser's feature list; Blink exposes a dedicated
++  // switch for the one behaviour we need to match. Appending it is idempotent.
++  if (!command->HasSwitch(kDisableReduceAcceptLanguageSwitch)) {
++    command->AppendSwitch(kDisableReduceAcceptLanguageSwitch);
++  }
++}
++
++}  // namespace lengsuo
+diff --git a/lengsuo/integration/official_defaults.h b/lengsuo/integration/official_defaults.h
+new file mode 100644
+index 0000000..6792c06
+--- /dev/null
++++ b/lengsuo/integration/official_defaults.h
+@@ -0,0 +1,52 @@
++// official_defaults - keep feature defaults aligned with shipped Chrome.
++//
++// Our engine is Chromium, but the product is meant to be indistinguishable from
++// a real Chrome install. Chromium's own feature defaults legitimately differ
++// from Chrome's: a feature can be disabled in the published browser while the
++// open-source default (or the local build configuration) leaves it on. When
++// that happens the difference is invisible in the UI and shows up only in a
++// fingerprint field, which is exactly the class of problem that is expensive to
++// find later.
++//
++// `ReduceAcceptLanguage` is the worked example. Chromium truncates
++// `navigator.languages` to the first entry when it is enabled, so a page sees
++// ["en-US"] instead of ["en-US","en"]. Official Chrome leaves it off, so the
++// two disagree on identical hardware and locale. Measured on the research host:
++// our build reported ["en-US"] while Chrome 144 reported ["en-US","en"], and
++// passing --disable-features=ReduceAcceptLanguage made the two identical.
++//
++// The browser process is the right place to fix this: the renderer inherits
++// --disable-features through its own command line, so one correction here
++// covers the main thread, dedicated workers and service workers at once.
++#ifndef LENGSUO_INTEGRATION_OFFICIAL_DEFAULTS_H_
++#define LENGSUO_INTEGRATION_OFFICIAL_DEFAULTS_H_
++
++#include <string>
++#include <string_view>
++
++namespace base {
++class CommandLine;
++}
++
++namespace lengsuo {
++
++// Features that must be off to match shipped Chrome. Each entry is a comment
++// explaining the observable difference, because a bare name here is not
++// reviewable later.
++inline constexpr std::string_view kFeaturesChromeDisables[] = {
++    // Truncates navigator.languages to one entry.
++    "ReduceAcceptLanguage",
++};
++
++// Merges the list above into the process command line's --disable-features.
++// Idempotent: re-running adds nothing, and an existing user-supplied value is
++// preserved rather than replaced.
++void ApplyOfficialFeatureDefaults(base::CommandLine* command);
++
++// Exposed for tests: the comma-separated value that should end up in
++// --disable-features given the value already present on the command line.
++std::string MergeDisabledFeatures(std::string_view existing);
++
++}  // namespace lengsuo
++
++#endif  // LENGSUO_INTEGRATION_OFFICIAL_DEFAULTS_H_
+diff --git a/lengsuo/integration/official_defaults_unittest.cc b/lengsuo/integration/official_defaults_unittest.cc
+new file mode 100644
+index 0000000..43b5a60
+--- /dev/null
++++ b/lengsuo/integration/official_defaults_unittest.cc
+@@ -0,0 +1,95 @@
++// Unit tests for the feature-default alignment helper.
++//
++// The merge must be idempotent and must never discard an operator's own
++// --disable-features value: this runs on every startup, and clobbering a
++// debugging flag would be a silent regression in the field.
++#include "lengsuo/integration/official_defaults.h"
++
++#include <cstdio>
++#include <string>
++
++#include "base/command_line.h"
++
++namespace {
++int g_passes = 0;
++int g_failures = 0;
++
++void Check(bool ok, const char* expr, int line) {
++  if (ok) {
++    ++g_passes;
++  } else {
++    std::printf("FAIL line %d: %s\n", line, expr);
++    ++g_failures;
++  }
++}
++
++bool Has(std::string_view haystack, std::string_view needle) {
++  return haystack.find(needle) != std::string_view::npos;
++}
++}  // namespace
++
++#define CHECK(cond) Check((cond), #cond, __LINE__)
++
++int main() {
++  using lengsuo::MergeDisabledFeatures;
++
++  // 1. Empty input still gets the required feature.
++  const std::string from_empty = MergeDisabledFeatures("");
++  CHECK(Has(from_empty, "ReduceAcceptLanguage"));
++
++  // 2. An operator value is preserved, not replaced.
++  const std::string merged = MergeDisabledFeatures("MyFeature,OtherThing");
++  CHECK(Has(merged, "MyFeature"));
++  CHECK(Has(merged, "OtherThing"));
++  CHECK(Has(merged, "ReduceAcceptLanguage"));
++
++  // 3. Idempotent: merging the result again changes nothing.
++  CHECK(MergeDisabledFeatures(merged) == merged);
++
++  // 4. No duplicates when the feature is already present.
++  const std::string twice = MergeDisabledFeatures("ReduceAcceptLanguage");
++  std::size_t occurrences = 0;
++  for (std::size_t pos = twice.find("ReduceAcceptLanguage"); pos != std::string::npos;
++       pos = twice.find("ReduceAcceptLanguage", pos + 1)) {
++    ++occurrences;
++  }
++  CHECK(occurrences == 1);
++
++  // 5. Whitespace and empty segments do not produce stray commas.
++  const std::string messy = MergeDisabledFeatures(" A , , B ");
++  CHECK(Has(messy, "A"));
++  CHECK(Has(messy, "B"));
++  CHECK(messy.find(",,") == std::string::npos);
++  CHECK(!messy.empty() && messy.front() != ',' && messy.back() != ',');
++
++  // 6. Applying onto a command line that has no switch sets it.
++  base::CommandLine cmd(base::CommandLine::NO_PROGRAM);
++  lengsuo::ApplyOfficialFeatureDefaults(&cmd);
++  CHECK(cmd.HasSwitch("disable-features"));
++  CHECK(Has(cmd.GetSwitchValueASCII("disable-features"),
++            "ReduceAcceptLanguage"));
++  // The renderer-side switch is separate and also required: the renderer never
++  // rebuilds its feature list from the browser's --disable-features.
++  CHECK(cmd.HasSwitch("disable-reduce-accept-language"));
++
++  // 7. Applying twice is stable (startup may call it more than once).
++  const std::string once = cmd.GetSwitchValueASCII("disable-features");
++  lengsuo::ApplyOfficialFeatureDefaults(&cmd);
++  CHECK(cmd.GetSwitchValueASCII("disable-features") == once);
++  CHECK(cmd.HasSwitch("disable-reduce-accept-language"));
++
++  // 8. A pre-existing switch keeps its own entries.
++  base::CommandLine existing(base::CommandLine::NO_PROGRAM);
++  existing.AppendSwitchASCII("disable-features", "KeepMe");
++  lengsuo::ApplyOfficialFeatureDefaults(&existing);
++  const std::string value = existing.GetSwitchValueASCII("disable-features");
++  CHECK(Has(value, "KeepMe"));
++  CHECK(Has(value, "ReduceAcceptLanguage"));
++
++  // 9. Null-safe: callers may pass nothing in tests.
++  lengsuo::ApplyOfficialFeatureDefaults(nullptr);
++
++  std::printf("official_defaults_unittest: %d passes, %d failures\n", g_passes,
++              g_failures);
++  return g_failures == 0 ? 0 : 1;
++}
 diff --git a/lengsuo/integration/profile_bootstrap_state.cc b/lengsuo/integration/profile_bootstrap_state.cc
 new file mode 100644
 index 0000000..a144dcb
@@ -743,10 +1184,10 @@ index 0000000..3bd62d6
 +#endif
 diff --git a/lengsuo/native/BUILD.gn b/lengsuo/native/BUILD.gn
 new file mode 100644
-index 0000000..a383a3e
+index 0000000..0a556f4
 --- /dev/null
 +++ b/lengsuo/native/BUILD.gn
-@@ -0,0 +1,32 @@
+@@ -0,0 +1,89 @@
 +# Decoder source sets. Chromium integration evidence lives in VERIFICATION.md.
 +source_set("profile_wire") {
 +  sources = [
@@ -779,6 +1220,729 @@ index 0000000..a383a3e
 +    "product_brand.h",
 +  ]
 +}
++
++# L3 storage layer. Split into four source sets so each can be pulled in
++# independently by the integration patches; see docs/cc-task-brief-l3.md.
++source_set("storage_pin") {
++  sources = [
++    "storage_pin.cc",
++    "storage_pin.h",
++  ]
++}
++
++source_set("storage_consistency") {
++  sources = [
++    "storage_consistency.cc",
++    "storage_consistency.h",
++  ]
++}
++
++source_set("cache_record") {
++  sources = [
++    "cache_record.cc",
++    "cache_record.h",
++  ]
++}
++
++source_set("extension_pin") {
++  sources = [
++    "extension_pin.cc",
++    "extension_pin.h",
++  ]
++}
++
++# L3W1 document decoder: the single configuration entry point for the storage
++# layer. It pulls the four primitives above into one target because the
++# decoder's public header exposes all of them in L3Config; consumers only need
++# this label.
++source_set("l3_wire") {
++  sources = [
++    "l3_wire.cc",
++    "l3_wire.h",
++  ]
++  public_deps = [
++    ":cache_record",
++    ":extension_pin",
++    ":storage_consistency",
++    ":storage_pin",
++  ]
++}
++
++# Renderer-side query surface over a frozen snapshot. Blink calls this instead
++# of parsing documents itself.
++source_set("l3_runtime") {
++  sources = [
++    "l3_runtime.cc",
++    "l3_runtime.h",
++  ]
++  public_deps = [ ":l3_wire" ]
++}
+diff --git a/lengsuo/native/cache_record.cc b/lengsuo/native/cache_record.cc
+new file mode 100644
+index 0000000..c022a7f
+--- /dev/null
++++ b/lengsuo/native/cache_record.cc
+@@ -0,0 +1,587 @@
++#include "cache_record.h"
++
++#include <algorithm>
++#include <array>
++#include <cstddef>
++#include <cstdint>
++#include <cstring>
++#include <string>
++#include <vector>
++
++namespace lengsuo::fp {
++namespace {
++
++// ---------------------------------------------------------------------------
++// MD5 (RFC 1321), little-endian, used for the sign digest segment.
++// ---------------------------------------------------------------------------
++
++constexpr std::uint32_t kMd5K[64] = {
++    0xd76aa478, 0xe8c7b756, 0x242070db, 0xc1bdceee, 0xf57c0faf, 0x4787c62a,
++    0xa8304613, 0xfd469501, 0x698098d8, 0x8b44f7af, 0xffff5bb1, 0x895cd7be,
++    0x6b901122, 0xfd987193, 0xa679438e, 0x49b40821, 0xf61e2562, 0xc040b340,
++    0x265e5a51, 0xe9b6c7aa, 0xd62f105d, 0x02441453, 0xd8a1e681, 0xe7d3fbc8,
++    0x21e1cde6, 0xc33707d6, 0xf4d50d87, 0x455a14ed, 0xa9e3e905, 0xfcefa3f8,
++    0x676f02d9, 0x8d2a4c8a, 0xfffa3942, 0x8771f681, 0x6d9d6122, 0xfde5380c,
++    0xa4beea44, 0x4bdecfa9, 0xf6bb4b60, 0xbebfbc70, 0x289b7ec6, 0xeaa127fa,
++    0xd4ef3085, 0x04881d05, 0xd9d4d039, 0xe6db99e5, 0x1fa27cf8, 0xc4ac5665,
++    0xf4292244, 0x432aff97, 0xab9423a7, 0xfc93a039, 0x655b59c3, 0x8f0ccc92,
++    0xffeff47d, 0x85845dd1, 0x6fa87e4f, 0xfe2ce6e0, 0xa3014314, 0x4e0811a1,
++    0xf7537e82, 0xbd3af235, 0x2ad7d2bb, 0xeb86d391};
++
++constexpr std::uint32_t kMd5S[64] = {
++    7, 12, 17, 22, 7, 12, 17, 22, 7, 12, 17, 22, 7, 12, 17, 22,
++    5, 9,  14, 20, 5, 9,  14, 20, 5, 9,  14, 20, 5, 9,  14, 20,
++    4, 11, 16, 23, 4, 11, 16, 23, 4, 11, 16, 23, 4, 11, 16, 23,
++    6, 10, 15, 21, 6, 10, 15, 21, 6, 10, 15, 21, 6, 10, 15, 21};
++
++std::uint32_t Rotl32(std::uint32_t x, std::uint32_t c) {
++  return (x << c) | (x >> (32 - c));
++}
++
++class Md5 {
++ public:
++  void Update(const std::uint8_t* data, std::size_t len) {
++    total_ += len;
++    while (len > 0) {
++      const std::size_t take = std::min(len, sizeof(buf_) - used_);
++      std::memcpy(buf_ + used_, data, take);
++      used_ += take;
++      data += take;
++      len -= take;
++      if (used_ == sizeof(buf_)) {
++        Transform(buf_);
++        used_ = 0;
++      }
++    }
++  }
++
++  std::array<std::uint8_t, 16> Final() {
++    const std::uint64_t bits = total_ * 8;
++    std::uint8_t pad[72] = {};
++    pad[0] = 0x80;
++    const std::size_t pad_len = used_ < 56 ? 56 - used_ : 120 - used_;
++    Update(pad, pad_len);
++    std::uint8_t length[8];
++    for (int i = 0; i < 8; ++i) {
++      length[i] = static_cast<std::uint8_t>(bits >> (8 * i));
++    }
++    Update(length, sizeof(length));
++    std::array<std::uint8_t, 16> out{};
++    for (int i = 0; i < 4; ++i) {
++      for (int j = 0; j < 4; ++j) {
++        out[static_cast<std::size_t>(i) * 4 + static_cast<std::size_t>(j)] =
++            static_cast<std::uint8_t>(state_[i] >> (8 * j));
++      }
++    }
++    return out;
++  }
++
++ private:
++  void Transform(const std::uint8_t block[64]) {
++    std::uint32_t m[16];
++    for (int i = 0; i < 16; ++i) {
++      m[i] = static_cast<std::uint32_t>(block[4 * i]) |
++             static_cast<std::uint32_t>(block[4 * i + 1]) << 8 |
++             static_cast<std::uint32_t>(block[4 * i + 2]) << 16 |
++             static_cast<std::uint32_t>(block[4 * i + 3]) << 24;
++    }
++    std::uint32_t a = state_[0], b = state_[1], c = state_[2], d = state_[3];
++    for (int i = 0; i < 64; ++i) {
++      std::uint32_t f;
++      std::uint32_t g;
++      if (i < 16) {
++        f = (b & c) | (~b & d);
++        g = static_cast<std::uint32_t>(i);
++      } else if (i < 32) {
++        f = (d & b) | (~d & c);
++        g = (5 * i + 1) % 16;
++      } else if (i < 48) {
++        f = b ^ c ^ d;
++        g = (3 * i + 5) % 16;
++      } else {
++        f = c ^ (b | ~d);
++        g = (7 * i) % 16;
++      }
++      const std::uint32_t tmp = d;
++      d = c;
++      c = b;
++      b = b + Rotl32(a + f + kMd5K[i] + m[g], kMd5S[i]);
++      a = tmp;
++    }
++    state_[0] += a;
++    state_[1] += b;
++    state_[2] += c;
++    state_[3] += d;
++  }
++
++  std::uint32_t state_[4] = {0x67452301, 0xefcdab89, 0x98badcfe, 0x10325476};
++  std::uint64_t total_ = 0;
++  std::uint8_t buf_[64] = {};
++  std::size_t used_ = 0;
++};
++
++std::string HexLower(const std::uint8_t* bytes, std::size_t count) {
++  static const char kHex[] = "0123456789abcdef";
++  std::string out;
++  out.reserve(count * 2);
++  for (std::size_t i = 0; i < count; ++i) {
++    out.push_back(kHex[bytes[i] >> 4]);
++    out.push_back(kHex[bytes[i] & 0x0f]);
++  }
++  return out;
++}
++
++std::string Md5Hex(const std::string& input) {
++  Md5 md5;
++  md5.Update(reinterpret_cast<const std::uint8_t*>(input.data()),
++             input.size());
++  const auto digest = md5.Final();
++  return HexLower(digest.data(), digest.size());
++}
++
++// ---------------------------------------------------------------------------
++// Minimal JSON scanning. Only what ParseRecord needs: one top-level object
++// whose "name"/"sign" values are strings and whose "data" value is kept as raw
++// text. Never builds a DOM; composite values are only bracket-balanced, their
++// interior is not validated (the record format does not parse them either).
++// ---------------------------------------------------------------------------
++
++bool IsWs(char c) {
++  return c == ' ' || c == '\t' || c == '\n' || c == '\r';
++}
++
++void SkipWs(const std::string& s, std::size_t& pos) {
++  while (pos < s.size() && IsWs(s[pos])) {
++    ++pos;
++  }
++}
++
++bool HexValue(char c, std::uint32_t& out) {
++  if (c >= '0' && c <= '9') {
++    out = static_cast<std::uint32_t>(c - '0');
++  } else if (c >= 'a' && c <= 'f') {
++    out = static_cast<std::uint32_t>(c - 'a' + 10);
++  } else if (c >= 'A' && c <= 'F') {
++    out = static_cast<std::uint32_t>(c - 'A' + 10);
++  } else {
++    return false;
++  }
++  return true;
++}
++
++void AppendUtf8(std::uint32_t cp, std::string& out) {
++  if (cp <= 0x7f) {
++    out.push_back(static_cast<char>(cp));
++  } else if (cp <= 0x7ff) {
++    out.push_back(static_cast<char>(0xc0 | (cp >> 6)));
++    out.push_back(static_cast<char>(0x80 | (cp & 0x3f)));
++  } else if (cp <= 0xffff) {
++    out.push_back(static_cast<char>(0xe0 | (cp >> 12)));
++    out.push_back(static_cast<char>(0x80 | ((cp >> 6) & 0x3f)));
++    out.push_back(static_cast<char>(0x80 | (cp & 0x3f)));
++  } else {
++    out.push_back(static_cast<char>(0xf0 | (cp >> 18)));
++    out.push_back(static_cast<char>(0x80 | ((cp >> 12) & 0x3f)));
++    out.push_back(static_cast<char>(0x80 | ((cp >> 6) & 0x3f)));
++    out.push_back(static_cast<char>(0x80 | (cp & 0x3f)));
++  }
++}
++
++// Parses a JSON string starting at an opening quote; `pos` ends just past the
++// closing quote. Unescaped control characters and lone surrogates fail.
++bool ScanJsonString(const std::string& s, std::size_t& pos, std::string& out) {
++  if (pos >= s.size() || s[pos] != '"') {
++    return false;
++  }
++  ++pos;
++  out.clear();
++  while (pos < s.size()) {
++    const unsigned char c = static_cast<unsigned char>(s[pos]);
++    if (c == '"') {
++      ++pos;
++      return true;
++    }
++    if (c < 0x20) {
++      return false;
++    }
++    if (c != '\\') {
++      out.push_back(static_cast<char>(c));
++      ++pos;
++      continue;
++    }
++    ++pos;
++    if (pos >= s.size()) {
++      return false;
++    }
++    const char esc = s[pos++];
++    switch (esc) {
++      case '"': out.push_back('"'); break;
++      case '\\': out.push_back('\\'); break;
++      case '/': out.push_back('/'); break;
++      case 'b': out.push_back('\b'); break;
++      case 'f': out.push_back('\f'); break;
++      case 'n': out.push_back('\n'); break;
++      case 'r': out.push_back('\r'); break;
++      case 't': out.push_back('\t'); break;
++      case 'u': {
++        if (pos + 4 > s.size()) {
++          return false;
++        }
++        std::uint32_t cp = 0;
++        for (int i = 0; i < 4; ++i) {
++          std::uint32_t digit;
++          if (!HexValue(s[pos++], digit)) {
++            return false;
++          }
++          cp = (cp << 4) | digit;
++        }
++        if (cp >= 0xd800 && cp <= 0xdbff) {
++          // High surrogate: must pair with an immediately following low one.
++          if (pos + 6 > s.size() || s[pos] != '\\' || s[pos + 1] != 'u') {
++            return false;
++          }
++          pos += 2;
++          std::uint32_t low = 0;
++          for (int i = 0; i < 4; ++i) {
++            std::uint32_t digit;
++            if (!HexValue(s[pos++], digit)) {
++              return false;
++            }
++            low = (low << 4) | digit;
++          }
++          if (low < 0xdc00 || low > 0xdfff) {
++            return false;
++          }
++          cp = 0x10000 + ((cp - 0xd800) << 10) + (low - 0xdc00);
++        } else if (cp >= 0xdc00 && cp <= 0xdfff) {
++          return false;
++        }
++        AppendUtf8(cp, out);
++        break;
++      }
++      default:
++        return false;
++    }
++  }
++  return false;
++}
++
++bool IsJsonNumber(const std::string& tok) {
++  std::size_t i = 0;
++  if (i < tok.size() && tok[i] == '-') {
++    ++i;
++  }
++  if (i >= tok.size()) {
++    return false;
++  }
++  if (tok[i] == '0') {
++    ++i;
++  } else if (tok[i] >= '1' && tok[i] <= '9') {
++    while (i < tok.size() && tok[i] >= '0' && tok[i] <= '9') {
++      ++i;
++    }
++  } else {
++    return false;
++  }
++  if (i < tok.size() && tok[i] == '.') {
++    ++i;
++    if (i >= tok.size() || tok[i] < '0' || tok[i] > '9') {
++      return false;
++    }
++    while (i < tok.size() && tok[i] >= '0' && tok[i] <= '9') {
++      ++i;
++    }
++  }
++  if (i < tok.size() && (tok[i] == 'e' || tok[i] == 'E')) {
++    ++i;
++    if (i < tok.size() && (tok[i] == '+' || tok[i] == '-')) {
++      ++i;
++    }
++    if (i >= tok.size() || tok[i] < '0' || tok[i] > '9') {
++      return false;
++    }
++    while (i < tok.size() && tok[i] >= '0' && tok[i] <= '9') {
++      ++i;
++    }
++  }
++  return i == tok.size();
++}
++
++// Advances past one JSON value without decoding it. Returns the end position
++// semantics via `pos`; strings are fully validated, composites are balanced.
++bool SkipJsonValue(const std::string& s, std::size_t& pos);
++
++bool SkipComposite(const std::string& s, std::size_t& pos) {
++  std::vector<char> stack;
++  std::size_t i = pos;
++  while (i < s.size()) {
++    const char c = s[i];
++    if (c == '"') {
++      std::string tmp;
++      if (!ScanJsonString(s, i, tmp)) {
++        return false;
++      }
++      continue;
++    }
++    if (c == '{') {
++      stack.push_back('}');
++      ++i;
++      continue;
++    }
++    if (c == '[') {
++      stack.push_back(']');
++      ++i;
++      continue;
++    }
++    if (c == '}' || c == ']') {
++      if (stack.empty() || stack.back() != c) {
++        return false;
++      }
++      stack.pop_back();
++      ++i;
++      if (stack.empty()) {
++        pos = i;
++        return true;
++      }
++      continue;
++    }
++    ++i;
++  }
++  return false;
++}
++
++bool SkipPrimitive(const std::string& s, std::size_t& pos) {
++  std::size_t i = pos;
++  while (i < s.size() && !IsWs(s[i]) && s[i] != ',' && s[i] != '}' &&
++         s[i] != ']') {
++    ++i;
++  }
++  if (i == pos) {
++    return false;
++  }
++  const std::string tok = s.substr(pos, i - pos);
++  if (tok != "true" && tok != "false" && tok != "null" &&
++      !IsJsonNumber(tok)) {
++    return false;
++  }
++  pos = i;
++  return true;
++}
++
++bool SkipJsonValue(const std::string& s, std::size_t& pos) {
++  if (pos >= s.size()) {
++    return false;
++  }
++  const char c = s[pos];
++  if (c == '"') {
++    std::string tmp;
++    return ScanJsonString(s, pos, tmp);
++  }
++  if (c == '{' || c == '[') {
++    return SkipComposite(s, pos);
++  }
++  return SkipPrimitive(s, pos);
++}
++
++std::string EscapeJsonString(const std::string& in) {
++  static const char kHex[] = "0123456789abcdef";
++  std::string out;
++  out.reserve(in.size() + 2);
++  for (const unsigned char c : in) {
++    switch (c) {
++      case '"': out += "\\\""; break;
++      case '\\': out += "\\\\"; break;
++      case '\b': out += "\\b"; break;
++      case '\f': out += "\\f"; break;
++      case '\n': out += "\\n"; break;
++      case '\r': out += "\\r"; break;
++      case '\t': out += "\\t"; break;
++      default:
++        if (c < 0x20) {
++          out += "\\u00";
++          out.push_back(kHex[c >> 4]);
++          out.push_back(kHex[c & 0x0f]);
++        } else {
++          out.push_back(static_cast<char>(c));
++        }
++    }
++  }
++  return out;
++}
++
++// "<32hex>_v1_t<digits>" — shared by ParseSignFields and VerifySign.
++bool SplitSign(const std::string& sign, std::string& digest_lower,
++               int64_t& unix_seconds) {
++  if (sign.size() < 33 || sign.compare(32, 5, "_v1_t") != 0) {
++    return false;
++  }
++  digest_lower.clear();
++  digest_lower.reserve(32);
++  for (std::size_t i = 0; i < 32; ++i) {
++    std::uint32_t digit;
++    if (!HexValue(sign[i], digit)) {
++      return false;
++    }
++    digest_lower.push_back(sign[i] >= 'A' && sign[i] <= 'F'
++                               ? static_cast<char>(sign[i] - 'A' + 'a')
++                               : sign[i]);
++  }
++  std::uint64_t ts = 0;
++  const std::size_t digits_start = 37;
++  if (digits_start >= sign.size()) {
++    return false;
++  }
++  for (std::size_t i = digits_start; i < sign.size(); ++i) {
++    const char c = sign[i];
++    if (c < '0' || c > '9') {
++      return false;
++    }
++    const std::uint64_t digit = static_cast<std::uint64_t>(c - '0');
++    if (ts > (0xffffffffffffffffULL - digit) / 10) {
++      return false;
++    }
++    ts = ts * 10 + digit;
++  }
++  if (ts > static_cast<std::uint64_t>(INT64_MAX)) {
++    return false;
++  }
++  unix_seconds = static_cast<int64_t>(ts);
++  return true;
++}
++
++}  // namespace
++
++bool ParseRecord(const std::string& json, CacheRecord* out) {
++  if (out == nullptr) {
++    return false;
++  }
++  CacheRecord tmp;
++  bool has_name = false;
++  bool has_sign = false;
++  bool has_data = false;
++  std::size_t pos = 0;
++  SkipWs(json, pos);
++  if (pos >= json.size() || json[pos] != '{') {
++    return false;
++  }
++  ++pos;
++  SkipWs(json, pos);
++  if (pos < json.size() && json[pos] == '}') {
++    ++pos;
++  } else {
++    while (true) {
++      SkipWs(json, pos);
++      if (pos >= json.size() || json[pos] != '"') {
++        return false;
++      }
++      std::string key;
++      if (!ScanJsonString(json, pos, key)) {
++        return false;
++      }
++      SkipWs(json, pos);
++      if (pos >= json.size() || json[pos] != ':') {
++        return false;
++      }
++      ++pos;
++      SkipWs(json, pos);
++      const std::size_t value_start = pos;
++      if (key == "name" || key == "sign") {
++        std::string value;
++        if (!ScanJsonString(json, pos, value)) {
++          return false;
++        }
++        if (key == "name") {
++          tmp.name = std::move(value);
++          has_name = true;
++        } else {
++          tmp.sign = std::move(value);
++          has_sign = true;
++        }
++      } else {
++        if (!SkipJsonValue(json, pos)) {
++          return false;
++        }
++        if (key == "data") {
++          tmp.data_json = json.substr(value_start, pos - value_start);
++          has_data = true;
++        }
++      }
++      SkipWs(json, pos);
++      if (pos < json.size() && json[pos] == ',') {
++        ++pos;
++        continue;
++      }
++      if (pos < json.size() && json[pos] == '}') {
++        ++pos;
++        break;
++      }
++      return false;
++    }
++  }
++  SkipWs(json, pos);
++  if (pos != json.size()) {
++    return false;
++  }
++  if (!has_name || !has_sign || !has_data) {
++    return false;
++  }
++  *out = std::move(tmp);
++  return true;
++}
++
++std::string SerializeRecord(const CacheRecord& rec) {
++  std::string out;
++  out.reserve(rec.name.size() + rec.sign.size() + rec.data_json.size() + 32);
++  out += "{\"name\":\"";
++  out += EscapeJsonString(rec.name);
++  out += "\",\"sign\":\"";
++  out += EscapeJsonString(rec.sign);
++  out += "\",\"data\":";
++  out += rec.data_json;
++  out += "}";
++  return out;
++}
++
++std::string MakeSign(const std::string& sign_input, int64_t unix_seconds) {
++  return Md5Hex(sign_input) + "_v1_t" + std::to_string(unix_seconds);
++}
++
++bool ParseSignFields(const std::string& sign, std::string* md5_hex,
++                     int64_t* unix_seconds) {
++  std::string digest;
++  int64_t ts = 0;
++  if (!SplitSign(sign, digest, ts)) {
++    return false;
++  }
++  if (md5_hex != nullptr) {
++    *md5_hex = std::move(digest);
++  }
++  if (unix_seconds != nullptr) {
++    *unix_seconds = ts;
++  }
++  return true;
++}
++
++SignVerdict VerifySign(const std::string& sign,
++                       const std::string& sign_input,
++                       int64_t now_unix,
++                       int64_t max_age_seconds) {
++  std::string digest;
++  int64_t ts = 0;
++  if (!SplitSign(sign, digest, ts)) {
++    return SignVerdict::kMalformed;
++  }
++  if (digest != Md5Hex(sign_input)) {
++    return SignVerdict::kBadDigest;
++  }
++  if (ts > now_unix) {
++    return SignVerdict::kTooNew;
++  }
++  // `ts` parsed from decimal digits is non-negative, so this cannot underflow.
++  if (now_unix - ts > max_age_seconds) {
++    return SignVerdict::kTooOld;
++  }
++  return SignVerdict::kOk;
++}
++
++}  // namespace lengsuo::fp
+diff --git a/lengsuo/native/cache_record.h b/lengsuo/native/cache_record.h
+new file mode 100644
+index 0000000..9998f88
+--- /dev/null
++++ b/lengsuo/native/cache_record.h
+@@ -0,0 +1,67 @@
++// cache_record — the 对标端 cloud-cache record shape {name, sign, data}.
++//
++// Wire shape (docs/cc-task-brief-l3.md, task G):
++//   {
++//     "name": "COOKIE_v1",
++//     "sign": "<32hex>_v1_t<unix seconds>",
++//     "data": { ... }        <- kept as raw JSON text, never re-encoded
++//   }
++//
++// `data_json` holds the exact bytes of the `data` value as it appeared in the
++// input, including the surrounding quotes when that value is a JSON string.
++// ParseRecord never re-serializes, reorders or reformats the payload.
++//
++// The sign is "<md5-hex>_v1_t<unix>". The digest covers sign_input only; the
++// timestamp carries the anti-rollback check. VerifySign checks integrity
++// (kBadDigest) before freshness (kTooNew/kTooOld).
++
++#ifndef LENGSUO_NATIVE_CACHE_RECORD_H_
++#define LENGSUO_NATIVE_CACHE_RECORD_H_
++
++#include <cstdint>
++#include <string>
++
++namespace lengsuo::fp {
++
++struct CacheRecord {
++  std::string name;       // "COOKIE_v1"
++  std::string sign;       // "<32hex>_v1_t<unix>"
++  std::string data_json;  // raw JSON value text, preserved verbatim
++};
++
++// Parses a top-level JSON object carrying "name" (string), "sign" (string) and
++// "data" (any JSON value). A missing key, a wrong value type, malformed JSON or
++// trailing bytes yields false and leaves *out untouched (fail-closed).
++bool ParseRecord(const std::string& json, CacheRecord* out);
++
++// Emits {"name":...,"sign":...,"data":<data_json>}. `data_json` must be a
++// valid JSON value; it is inserted verbatim.
++std::string SerializeRecord(const CacheRecord& rec);
++
++// Returns "<md5hex>_v1_t<unix_seconds>", with md5hex = MD5(sign_input).
++std::string MakeSign(const std::string& sign_input, int64_t unix_seconds);
++
++// Splits a sign without verifying it; `md5_hex` is lowercased. Returns false on
++// any format violation: not 32 hex chars, no "_v1_t", or an empty/non-decimal/
++// overflowing timestamp.
++bool ParseSignFields(const std::string& sign, std::string* md5_hex,
++                     int64_t* unix_seconds);
++
++enum class SignVerdict {
++  kOk,
++  kBadDigest,
++  kTooNew,
++  kTooOld,
++  kMalformed,
++};
++
++// Integrity before freshness: malformed -> bad digest -> too new -> too old.
++// "Fresh" means now - max_age <= ts <= now.
++SignVerdict VerifySign(const std::string& sign,
++                       const std::string& sign_input,
++                       int64_t now_unix,
++                       int64_t max_age_seconds);
++
++}  // namespace lengsuo::fp
++
++#endif  // LENGSUO_NATIVE_CACHE_RECORD_H_
 diff --git a/lengsuo/native/canvas_apply.cc b/lengsuo/native/canvas_apply.cc
 new file mode 100644
 index 0000000..3eb837c
@@ -1111,6 +2275,261 @@ index 0000000..b6cced4
 +}  // namespace lengsuo::canvas
 +
 +#endif  // LENGSUO_NATIVE_CANVAS_NOISE_H_
+diff --git a/lengsuo/native/extension_pin.cc b/lengsuo/native/extension_pin.cc
+new file mode 100644
+index 0000000..92ce928
+--- /dev/null
++++ b/lengsuo/native/extension_pin.cc
+@@ -0,0 +1,192 @@
++#include "extension_pin.h"
++
++#include <cstddef>
++#include <cstdint>
++#include <string>
++#include <utility>
++
++namespace lengsuo::fp {
++namespace {
++
++// Minimal JSON reader for the one shape PinedFile uses: an array of strings.
++// It rejects everything else rather than skipping unknowns, so a malformed or
++// hostile document cannot silently narrow the whitelist.
++class JsonIdArrayReader {
++ public:
++  // The text is held by value. Chromium's chromium-rawref and
++  // chromium-rawptr checks reject both native references and native pointers
++  // as members; raw_ref<> would fix that but drags in a //base dependency,
++  // and this directory is deliberately buildable with a plain C++20
++  // toolchain. The document is a short array of 32-character ids, so one
++  // copy costs nothing.
++  explicit JsonIdArrayReader(const std::string& text) : text_(text) {}
++
++  // Returns true only when the entire input is `[ "id", ... ]` with every
++  // element a valid extension ID. On false, `ids` may be partially filled;
++  // Parse() discards it.
++  bool Read(std::set<std::string>* ids) {
++    SkipWhitespace();
++    if (!Consume('[')) return false;
++    SkipWhitespace();
++    if (Consume(']')) return AtEnd();
++    while (true) {
++      std::string id;
++      if (!ReadString(&id)) return false;
++      if (!ExtensionPin::IsValidId(id)) return false;
++      ids->insert(std::move(id));
++      SkipWhitespace();
++      if (Consume(']')) return AtEnd();
++      if (!Consume(',')) return false;
++      SkipWhitespace();
++      // A trailing comma leaves ']' where a string must begin, so the next
++      // ReadString() rejects it.
++    }
++  }
++
++ private:
++  bool AtEnd() {
++    SkipWhitespace();
++    return pos_ == text_.size();
++  }
++
++  bool Consume(char expected) {
++    if (pos_ >= text_.size() || text_[pos_] != expected) return false;
++    ++pos_;
++    return true;
++  }
++
++  void SkipWhitespace() {
++    while (pos_ < text_.size()) {
++      const char c = text_[pos_];
++      if (c != ' ' && c != '\t' && c != '\n' && c != '\r') return;
++      ++pos_;
++    }
++  }
++
++  bool ReadString(std::string* out) {
++    if (!Consume('"')) return false;
++    while (pos_ < text_.size()) {
++      const unsigned char c = static_cast<unsigned char>(text_[pos_++]);
++      if (c == '"') return true;
++      if (c < 0x20) return false;  // JSON forbids raw control characters.
++      if (c != '\\') {
++        out->push_back(static_cast<char>(c));
++        continue;
++      }
++      if (pos_ >= text_.size()) return false;
++      const char escape = text_[pos_++];
++      switch (escape) {
++        case '"': out->push_back('"'); break;
++        case '\\': out->push_back('\\'); break;
++        case '/': out->push_back('/'); break;
++        case 'b': out->push_back('\b'); break;
++        case 'f': out->push_back('\f'); break;
++        case 'n': out->push_back('\n'); break;
++        case 'r': out->push_back('\r'); break;
++        case 't': out->push_back('\t'); break;
++        case 'u': {
++          std::uint32_t code_point = 0;
++          if (!ReadHex4(&code_point)) return false;
++          if (code_point >= 0xD800 && code_point <= 0xDBFF) {
++            std::uint32_t low = 0;
++            if (!Consume('\\') || !Consume('u') || !ReadHex4(&low)) {
++              return false;
++            }
++            if (low < 0xDC00 || low > 0xDFFF) return false;
++            code_point =
++                0x10000 + ((code_point - 0xD800) << 10) + (low - 0xDC00);
++          } else if (code_point >= 0xDC00 && code_point <= 0xDFFF) {
++            return false;  // Lone low surrogate.
++          }
++          AppendUtf8(code_point, out);
++          break;
++        }
++        default: return false;
++      }
++    }
++    return false;  // Unterminated string.
++  }
++
++  bool ReadHex4(std::uint32_t* out) {
++    if (text_.size() - pos_ < 4) return false;
++    std::uint32_t value = 0;
++    for (int i = 0; i < 4; ++i) {
++      const char c = text_[pos_++];
++      value <<= 4;
++      if (c >= '0' && c <= '9') {
++        value |= static_cast<std::uint32_t>(c - '0');
++      } else if (c >= 'a' && c <= 'f') {
++        value |= static_cast<std::uint32_t>(c - 'a' + 10);
++      } else if (c >= 'A' && c <= 'F') {
++        value |= static_cast<std::uint32_t>(c - 'A' + 10);
++      } else {
++        return false;
++      }
++    }
++    *out = value;
++    return true;
++  }
++
++  static void AppendUtf8(std::uint32_t code_point, std::string* out) {
++    if (code_point <= 0x7F) {
++      out->push_back(static_cast<char>(code_point));
++    } else if (code_point <= 0x7FF) {
++      out->push_back(static_cast<char>(0xC0 | (code_point >> 6)));
++      out->push_back(static_cast<char>(0x80 | (code_point & 0x3F)));
++    } else if (code_point <= 0xFFFF) {
++      out->push_back(static_cast<char>(0xE0 | (code_point >> 12)));
++      out->push_back(static_cast<char>(0x80 | ((code_point >> 6) & 0x3F)));
++      out->push_back(static_cast<char>(0x80 | (code_point & 0x3F)));
++    } else {
++      out->push_back(static_cast<char>(0xF0 | (code_point >> 18)));
++      out->push_back(static_cast<char>(0x80 | ((code_point >> 12) & 0x3F)));
++      out->push_back(static_cast<char>(0x80 | ((code_point >> 6) & 0x3F)));
++      out->push_back(static_cast<char>(0x80 | (code_point & 0x3F)));
++    }
++  }
++
++  std::string text_;
++  std::size_t pos_ = 0;
++};
++
++}  // namespace
++
++bool ExtensionPin::Parse(const std::string& json) {
++  std::set<std::string> parsed;
++  JsonIdArrayReader reader(json);
++  if (!reader.Read(&parsed)) return false;
++  ids_ = std::move(parsed);
++  return true;
++}
++
++std::string ExtensionPin::Serialize() const {
++  std::string out = "[";
++  for (auto it = ids_.begin(); it != ids_.end(); ++it) {
++    if (it != ids_.begin()) out.push_back(',');
++    out.push_back('"');
++    out += *it;  // Valid IDs are [a-p]{32}: no JSON escaping needed.
++    out.push_back('"');
++  }
++  out.push_back(']');
++  return out;
++}
++
++bool ExtensionPin::Contains(const std::string& id) const {
++  return ids_.find(id) != ids_.end();
++}
++
++bool ExtensionPin::Add(const std::string& id) {
++  if (!IsValidId(id)) return false;
++  return ids_.insert(id).second;
++}
++
++// static
++bool ExtensionPin::IsValidId(const std::string& id) {
++  if (id.size() != 32) return false;
++  for (const char c : id) {
++    if (c < 'a' || c > 'p') return false;
++  }
++  return true;
++}
++
++}  // namespace lengsuo::fp
+diff --git a/lengsuo/native/extension_pin.h b/lengsuo/native/extension_pin.h
+new file mode 100644
+index 0000000..0078faa
+--- /dev/null
++++ b/lengsuo/native/extension_pin.h
+@@ -0,0 +1,51 @@
++// extension_pin - the PinedFile extension whitelist (L3 任务书 任务 H).
++//
++// 对标端 uses PinedFile to fix "which extensions must travel with the
++// environment": a JSON array of Chromium extension IDs, e.g.
++//   ["fjchbfkopknlodpfoaeogfbclcpppiog",
++//    "fgbbdcdpliimpdmgcnahkcdfhdjegmin",
++//    "hncdafoadpldclaaigooamfbebmaakjj"]
++//
++// Parsing is fail-closed: any invalid ID, non-array document or non-string
++// element rejects the whole document and leaves prior state untouched. IDs
++// use Chromium's alphabet: exactly 32 characters of [a-p].
++#ifndef LENGSUO_NATIVE_EXTENSION_PIN_H_
++#define LENGSUO_NATIVE_EXTENSION_PIN_H_
++
++#include <cstddef>
++#include <set>
++#include <string>
++
++namespace lengsuo::fp {
++
++class ExtensionPin {
++ public:
++  // Parses a PinedFile document. On failure the pin keeps its previous
++  // contents; nothing is half-applied.
++  bool Parse(const std::string& json);
++
++  // Serializes as a JSON string array in stable (sorted) order, so two pins
++  // with the same membership serialize byte-identically.
++  std::string Serialize() const;
++
++  bool Contains(const std::string& id) const;
++
++  // Returns false (and changes nothing) when `id` is already present or is
++  // not a valid Chromium extension ID.
++  bool Add(const std::string& id);
++
++  size_t size() const { return ids_.size(); }
++
++  // Sorted view; used by the L3 document encoder.
++  const std::set<std::string>& Ids() const { return ids_; }
++
++  // 32 characters of [a-p] (Chromium extension ID alphabet).
++  static bool IsValidId(const std::string& id);
++
++ private:
++  std::set<std::string> ids_;
++};
++
++}  // namespace lengsuo::fp
++
++#endif  // LENGSUO_NATIVE_EXTENSION_PIN_H_
 diff --git a/lengsuo/native/font_family_traits.cc b/lengsuo/native/font_family_traits.cc
 new file mode 100644
 index 0000000..6002a61
@@ -1839,10 +3258,10 @@ index 0000000..29fe2f3
 +}  // namespace lengsuo::fp
 diff --git a/lengsuo/native/fp_overrides.h b/lengsuo/native/fp_overrides.h
 new file mode 100644
-index 0000000..29fecb3
+index 0000000..40b59d2
 --- /dev/null
 +++ b/lengsuo/native/fp_overrides.h
-@@ -0,0 +1,49 @@
+@@ -0,0 +1,56 @@
 +// fp_overrides - renderer-side fingerprint override state.
 +// One switch carries everything: --lengsuo-managed-fp=<seed-hex>:<a>:<c>:<r>:<f>:<g>:<u>:<w>
 +// (slots: audio, canvas, rects, fonts, gpu, ua, webgl). Absent => all disabled,
@@ -1877,6 +3296,13 @@ index 0000000..29fecb3
 +double RectsJitterPx();               // 0 = disabled
 +std::uint64_t AudioSeed();
 +
++// Slot 7: deterministic seed for WebGL MAX_* parameter perturbation.
++// Returns 0 when the webgl slot is off.
++std::uint64_t WebGLParamsSeed();
++// Deterministic bias for GLenum-typed int parameters (MAX_*, *_BITS...);
++// returns 0 when the webgl slot is off. Applied inside GetIntParameter.
++std::int32_t WebGLParamBias(std::uint32_t pname, std::int32_t original);
++
 +// Font dimension: the parsed traits, or a default (not-installed) value until a
 +// valid payload arrives. Callers must treat !installed as "this profile says
 +// nothing about fonts" and keep the native measurement. The seed used for the
@@ -1899,6 +3325,611 @@ index 0000000..42c2deb
 +++ b/lengsuo/native/golden.inc
 @@ -0,0 +1 @@
 +constexpr unsigned char kGolden[] = {76,66,80,70,49,0,0,0,1,0,0,0,1,0,5,101,110,118,45,49,0,2,112,49,0,1,2,3,4,5,6,7,0,0,0,7,128,0,0,4,56,24,0,0,3,232,0,8,0,0,32,0,0,0,5,101,110,45,85,83,0,3,85,84,67,0,7,0,5,97,117,100,105,111,0,0,0,3,0,6,99,97,110,118,97,115,0,0,0,1,0,12,99,108,105,101,110,116,95,114,101,99,116,115,0,0,0,5,0,5,102,111,110,116,115,0,0,0,4,0,3,103,112,117,0,0,0,6,0,2,117,97,0,0,0,7,0,5,119,101,98,103,108,0,0,0,2};
+diff --git a/lengsuo/native/l3_runtime.cc b/lengsuo/native/l3_runtime.cc
+new file mode 100644
+index 0000000..d6e40f7
+--- /dev/null
++++ b/lengsuo/native/l3_runtime.cc
+@@ -0,0 +1,105 @@
++#include "l3_runtime.h"
++
++#include <algorithm>
++
++#include "l3_wire.h"
++
++namespace lengsuo::fp {
++namespace {
++
++// ExtensionPin keeps a std::set, but L3Config is move-only through Parse();
++// copying the ids out keeps L3Runtime trivially queryable afterwards.
++std::vector<std::string> IdsOf(const ExtensionPin& extensions) {
++  return std::vector<std::string>(extensions.Ids().begin(),
++                                  extensions.Ids().end());
++}
++
++const PinnedEntry* FindIn(const std::vector<PinnedEntry>& entries,
++                          const std::string& key) {
++  const auto found = std::find_if(
++      entries.begin(), entries.end(),
++      [&key](const PinnedEntry& entry) { return entry.key == key; });
++  return found == entries.end() ? nullptr : &*found;
++}
++
++}  // namespace
++
++bool L3Runtime::Init(std::string_view wire, int64_t now_unix,
++                     int64_t max_age_seconds) {
++  // Single-shot: a renderer keeps the snapshot it started with so that a
++  // later document can never silently change what the page already read.
++  if (ready_) {
++    return false;
++  }
++  L3Config config;
++  // now_unix <= 0 means "the caller judged freshness elsewhere"; the decoder
++  // still verifies the digest and the launch consistency gate.
++  if (!DecodeL3Wire(wire, now_unix, max_age_seconds, &config, nullptr)) {
++    return false;
++  }
++  pins_ = std::move(config.pins);
++  extensions_ = IdsOf(config.extensions);
++  ready_ = true;
++  return true;
++}
++
++const std::vector<PinnedEntry>* L3Runtime::LocalPins(
++    const std::string& origin) const {
++  if (!ready_) {
++    return nullptr;
++  }
++  const DomainPin* domain = pins_.Find(origin);
++  if (domain == nullptr || domain->local_storage.empty()) {
++    return nullptr;
++  }
++  return &domain->local_storage;
++}
++
++const std::vector<PinnedEntry>* L3Runtime::SessionPins(
++    const std::string& origin) const {
++  if (!ready_) {
++    return nullptr;
++  }
++  const DomainPin* domain = pins_.Find(origin);
++  if (domain == nullptr || domain->session_storage.empty()) {
++    return nullptr;
++  }
++  return &domain->session_storage;
++}
++
++bool L3Runtime::IsLocked(const std::string& origin,
++                         const std::string& key) const {
++  return ready_ && pins_.IsLocked(origin, key);
++}
++
++const std::string* L3Runtime::PinnedValue(const std::string& origin,
++                                          const std::string& key) const {
++  if (!ready_) {
++    return nullptr;
++  }
++  const DomainPin* domain = pins_.Find(origin);
++  if (domain == nullptr) {
++    return nullptr;
++  }
++  // Local scope wins when a key is pinned in both: local storage is the scope
++  // platforms read first, and the browser writes both from the same document.
++  if (const PinnedEntry* entry = FindIn(domain->local_storage, key)) {
++    return &entry->value;
++  }
++  if (const PinnedEntry* entry = FindIn(domain->session_storage, key)) {
++    return &entry->value;
++  }
++  return nullptr;
++}
++
++bool L3Runtime::ExtensionAllowed(const std::string& id) const {
++  return ready_ && std::find(extensions_.begin(), extensions_.end(), id) !=
++                       extensions_.end();
++}
++
++L3Runtime& GetL3Runtime() {
++  static L3Runtime runtime;
++  return runtime;
++}
++
++}  // namespace lengsuo::fp
+diff --git a/lengsuo/native/l3_runtime.h b/lengsuo/native/l3_runtime.h
+new file mode 100644
+index 0000000..3c2f38c
+--- /dev/null
++++ b/lengsuo/native/l3_runtime.h
+@@ -0,0 +1,82 @@
++// l3_runtime - renderer-side L3 snapshot singleton (wiring task I).
++//
++// The renderer never parses profile files itself; the browser hands it one
++// frozen L3W1 document and this object answers every later query:
++//
++//   * which key/value pairs are pinned for an origin (localStorage and
++//     sessionStorage separately),
++//   * whether a key is locked (pinned in either scope),
++//   * the pinned value for a key (nullptr when absent - empty string is a
++//     valid value, so nullptr must stay distinguishable),
++//   * whether an extension id is on the environment whitelist.
++//
++// Init() is transactional and single-shot: the first call wins, later calls
++// are rejected. A renderer therefore cannot be re-armed with a different
++// snapshot mid-life, matching the browser's freeze-at-startup design.
++#ifndef LENGSUO_NATIVE_L3_RUNTIME_H_
++#define LENGSUO_NATIVE_L3_RUNTIME_H_
++
++#include <cstdint>
++#include <string>
++#include <string_view>
++#include <vector>
++
++#include "storage_pin.h"
++
++namespace lengsuo::fp {
++
++class L3Runtime {
++ public:
++  L3Runtime() = default;
++  ~L3Runtime() = default;
++  L3Runtime(const L3Runtime&) = delete;
++  L3Runtime& operator=(const L3Runtime&) = delete;
++
++  // Accepts a full L3W1 document. Returns false (leaving the previous state
++  // untouched) when the document is malformed, fails its signature gate or
++  // violates the launch consistency gate, or when the runtime was already
++  // initialized.
++  //
++  // now_unix <= 0 skips the freshness window (the digest and the consistency
++  // gate still apply). A renderer passes 0 because the browser already judged
++  // freshness against its own clock before forwarding the document.
++  bool Init(std::string_view wire, int64_t now_unix, int64_t max_age_seconds);
++
++  bool ready() const { return ready_; }
++
++  // Pinned localStorage entries for the origin, in parse order; nullptr when
++  // the origin has none.
++  const std::vector<PinnedEntry>* LocalPins(
++      const std::string& origin) const;
++
++  // Pinned sessionStorage entries; nullptr when none.
++  const std::vector<PinnedEntry>* SessionPins(
++      const std::string& origin) const;
++
++  // True when the key is pinned for the origin in either scope.
++  bool IsLocked(const std::string& origin, const std::string& key) const;
++
++  // The pinned value; nullptr when the key is not pinned. An empty string is
++  // a valid pinned value and returns a non-null pointer.
++  const std::string* PinnedValue(const std::string& origin,
++                                 const std::string& key) const;
++
++  // Extension whitelist membership; always false before Init().
++  bool ExtensionAllowed(const std::string& id) const;
++
++ private:
++  bool ready_ = false;
++  StoragePin pins_;
++  // Kept as parallel simple containers: ExtensionPin is not copy-visible and
++  // the whitelist is tiny; ids_ mirrors config.extensions for lookups.
++  std::vector<std::string> extensions_;
++};
++
++// Process-wide access point. The renderer is single-threaded for Blink; Mojo
++// replies land on the same sequence, so no lock is taken (matches how
++// canvas_apply stores its noise seed).
++L3Runtime& GetL3Runtime();
++
++}  // namespace lengsuo::fp
++
++#endif  // LENGSUO_NATIVE_L3_RUNTIME_H_
+diff --git a/lengsuo/native/l3_wire.cc b/lengsuo/native/l3_wire.cc
+new file mode 100644
+index 0000000..865c664
+--- /dev/null
++++ b/lengsuo/native/l3_wire.cc
+@@ -0,0 +1,298 @@
++#include "l3_wire.h"
++
++#include <string>
++#include <utility>
++
++namespace lengsuo::fp {
++namespace {
++
++// Sequential '\n' reader over the signed body. Every accessor returns false
++// once the body is exhausted, so a short document can never read stale data.
++class BodyReader {
++ public:
++  explicit BodyReader(std::string_view body) : body_(body) {}
++
++  bool Next(std::string_view* line) {
++    if (pos_ >= body_.size()) return false;
++    const std::size_t newline = body_.find('\n', pos_);
++    if (newline == std::string_view::npos) return false;
++    std::string_view text = body_.substr(pos_, newline - pos_);
++    pos_ = newline + 1;
++    if (!text.empty() && text.back() == '\r') text.remove_suffix(1);
++    *line = text;
++    return true;
++  }
++
++  bool AtEnd() const { return pos_ == body_.size(); }
++
++ private:
++  std::string_view body_;
++  std::size_t pos_ = 0;
++};
++
++// "<keyword> <decimal>" with no other content. Zero is accepted: a document
++// may legitimately declare no cookies/extensions/rules, and the encoder emits
++// "cookies 0" / "rules 0" for exactly that case. The pins section is the one
++// exception and is checked by the caller.
++bool ParseCountLine(std::string_view line, std::string_view keyword,
++                    std::size_t* value) {
++  if (line.size() <= keyword.size() + 1 ||
++      line.substr(0, keyword.size()) != keyword ||
++      line[keyword.size()] != ' ') {
++    return false;
++  }
++  std::size_t total = 0;
++  for (const char c : line.substr(keyword.size() + 1)) {
++    if (c < '0' || c > '9') return false;
++    total = total * 10 + static_cast<std::size_t>(c - '0');
++    if (total > 4096) return false;
++  }
++  *value = total;
++  return true;
++}
++
++// Splits on '|' into exactly `count` fields.
++bool SplitFields(std::string_view line, std::size_t count,
++                 std::string* fields) {
++  std::size_t start = 0;
++  for (std::size_t i = 0; i < count; ++i) {
++    const std::size_t bar = line.find('|', start);
++    if (i + 1 == count) {
++      if (bar != std::string_view::npos) return false;
++      fields[i] = std::string(line.substr(start));
++      return true;
++    }
++    if (bar == std::string_view::npos) return false;
++    fields[i] = std::string(line.substr(start, bar - start));
++    start = bar + 1;
++  }
++  return false;
++}
++
++bool SplitSign(std::string_view sign, std::string_view* md5, int64_t* unix) {
++  const std::size_t sep = sign.find("_v1_t");
++  if (sep != 32) return false;
++  const std::string_view digits = sign.substr(37);
++  if (digits.empty()) return false;
++  int64_t value = 0;
++  for (const char c : digits) {
++    if (c < '0' || c > '9') return false;
++    value = value * 10 + (c - '0');
++    if (value > 9007199254740992LL) return false;
++  }
++  *md5 = sign.substr(0, sep);
++  *unix = value;
++  return true;
++}
++
++}  // namespace
++
++bool DecodeL3Wire(std::string_view wire, int64_t now_unix,
++                  int64_t max_age_seconds, L3Config* out, std::string* error) {
++  const auto fail = [error](const char* message) {
++    if (error) *error = message;
++    return false;
++  };
++  if (out == nullptr) return fail("l3: null output");
++  if (wire.empty() || wire.size() > kMaxL3WireBytes) {
++    return fail("l3: empty or oversized document");
++  }
++
++  // The sign line closes the document, so its position also delimits the
++  // signed bytes. A document with no sign line is rejected: integrity is not
++  // optional.
++  const std::size_t sign_start = wire.rfind("\nsign ");
++  if (sign_start == std::string_view::npos) {
++    return fail("l3: missing sign line");
++  }
++  const std::string body(wire.substr(0, sign_start + 1));
++  std::string_view sign_line = wire.substr(sign_start + 1);
++  if (sign_line.size() < 6 || sign_line.back() != '\n') {
++    return fail("l3: sign line must end with a newline");
++  }
++  sign_line.remove_suffix(1);
++  if (!sign_line.empty() && sign_line.back() == '\r') sign_line.remove_suffix(1);
++  const std::string sign_text(sign_line.substr(5));
++
++  BodyReader reader(body);
++  std::string_view line;
++  if (!reader.Next(&line) || line != "L3W1") {
++    return fail("l3: bad magic");
++  }
++
++  L3Config config;
++
++  std::size_t count = 0;
++  if (!reader.Next(&line) || !ParseCountLine(line, "pins", &count) ||
++      count == 0) {
++    // A snapshot with no pins carries no L3 statement at all; treat it as
++    // malformed rather than as a no-op so a truncated document cannot pass.
++    return fail("l3: bad pins header");
++  }
++  std::string pin_wire;
++  for (std::size_t i = 0; i < count; ++i) {
++    if (!reader.Next(&line) || line.empty()) {
++      return fail("l3: truncated pins section");
++    }
++    pin_wire.append(line);
++    pin_wire.push_back('\n');
++  }
++  if (!config.pins.Parse(pin_wire)) {
++    return fail("l3: invalid pin entry");
++  }
++
++  if (!reader.Next(&line) || !ParseCountLine(line, "cookies", &count)) {
++    return fail("l3: bad cookies header");
++  }
++  for (std::size_t i = 0; i < count; ++i) {
++    if (!reader.Next(&line)) return fail("l3: truncated cookies section");
++    std::string fields[3];
++    if (!SplitFields(line, 3, fields) || fields[1].empty()) {
++      return fail("l3: invalid cookie entry");
++    }
++    config.cookies.push_back(
++        CookieFact{fields[0], fields[1], fields[2]});
++  }
++
++  if (!reader.Next(&line) || !ParseCountLine(line, "ext", &count)) {
++    return fail("l3: bad ext header");
++  }
++  for (std::size_t i = 0; i < count; ++i) {
++    if (!reader.Next(&line)) return fail("l3: truncated ext section");
++    if (!config.extensions.Add(std::string(line))) {
++      return fail("l3: invalid extension id");
++    }
++  }
++
++  if (!reader.Next(&line) || !ParseCountLine(line, "rules", &count)) {
++    return fail("l3: bad rules header");
++  }
++  for (std::size_t i = 0; i < count; ++i) {
++    if (!reader.Next(&line)) return fail("l3: truncated rules section");
++    std::string fields[4];
++    if (!SplitFields(line, 4, fields) || fields[1].empty() ||
++        fields[3].empty()) {
++      return fail("l3: invalid rule entry");
++    }
++    config.rules.push_back(ConsistencyRule{fields[0], fields[1], fields[2],
++                                           fields[3]});
++  }
++
++  if (!reader.AtEnd()) {
++    return fail("l3: unexpected content before sign");
++  }
++
++  // Integrity before freshness (cache_record order). now_unix <= 0 means the
++  // caller has already judged freshness elsewhere (the renderer path): the
++  // digest is still verified, only the age window is skipped.
++  const bool check_freshness = now_unix > 0;
++  if (check_freshness) {
++    if (VerifySign(sign_text, body, now_unix, max_age_seconds) !=
++        SignVerdict::kOk) {
++      return fail("l3: sign verification failed");
++    }
++  } else {
++    // Digest-only check. Verifying against the timestamp the document itself
++    // carries makes the age window vacuous (max_age covers the gap to now)
++    // while the MD5 still has to match the body byte for byte.
++    std::string digest;
++    int64_t timestamp = 0;
++    if (!ParseSignFields(sign_text, &digest, &timestamp)) {
++      return fail("l3: bad sign fields");
++    }
++    if (VerifySign(sign_text, body, timestamp,
++                   /*max_age_seconds=*/0) != SignVerdict::kOk) {
++      return fail("l3: sign verification failed");
++    }
++  }
++  std::string_view md5;
++  if (!SplitSign(sign_text, &md5, &config.signed_unix)) {
++    return fail("l3: bad sign fields");
++  }
++  config.sign = sign_text;
++
++  // Launch gate: a snapshot that would fail the platform's own cross-check
++  // must never be applied, otherwise the first navigation disagrees with
++  // itself.
++  if (!L3SnapshotConsistent(config)) {
++    return fail("l3: pinned snapshot is internally inconsistent");
++  }
++
++  *out = std::move(config);
++  if (error) error->clear();
++  return true;
++}
++
++bool L3SnapshotConsistent(const L3Config& config) {
++  return CheckConsistency(config.cookies, CollectStorageFacts(config.pins),
++                          config.rules)
++      .empty();
++}
++
++std::vector<StorageFact> CollectStorageFacts(const StoragePin& pins) {
++  std::vector<StorageFact> facts;
++  for (const DomainPin& domain : pins.Domains()) {
++    for (const PinnedEntry& entry : domain.local_storage) {
++      facts.push_back(StorageFact{domain.origin, entry.key, entry.value});
++    }
++    for (const PinnedEntry& entry : domain.session_storage) {
++      facts.push_back(StorageFact{domain.origin, entry.key, entry.value});
++    }
++  }
++  return facts;
++}
++
++std::string EncodePinWire(const StoragePin& pins) {
++  std::string wire;
++  for (const DomainPin& domain : pins.Domains()) {
++    for (const std::vector<PinnedEntry>* area :
++         {&domain.local_storage, &domain.session_storage}) {
++      const char* scope = area == &domain.local_storage ? "local" : "session";
++      for (const PinnedEntry& entry : *area) {
++        wire += domain.origin;
++        wire += '|';
++        wire += scope;
++        wire += '|';
++        wire += entry.key;
++        wire += '|';
++        wire += entry.value;
++        wire += '\n';
++      }
++    }
++  }
++  return wire;
++}
++
++std::string EncodeL3Wire(const L3Config& config, int64_t unix_seconds) {
++  const std::string pin_wire = EncodePinWire(config.pins);
++  std::size_t pin_count = 0;
++  if (!pin_wire.empty()) {
++    pin_count = 1;
++    for (const char c : pin_wire) {
++      if (c == '\n') ++pin_count;
++    }
++    --pin_count;
++  }
++
++  std::string body = "L3W1\n";
++  body += "pins " + std::to_string(pin_count) + "\n";
++  body += pin_wire;
++  body += "cookies " + std::to_string(config.cookies.size()) + "\n";
++  for (const CookieFact& fact : config.cookies) {
++    body += fact.domain + '|' + fact.name + '|' + fact.value + '\n';
++  }
++  body += "ext " + std::to_string(config.extensions.size()) + "\n";
++  // Parse() keeps a std::set, so iteration is already sorted.
++  for (const std::string& id : config.extensions.Ids()) {
++    body += id + '\n';
++  }
++  body += "rules " + std::to_string(config.rules.size()) + "\n";
++  for (const ConsistencyRule& rule : config.rules) {
++    body += rule.cookie_domain + '|' + rule.cookie_name + '|' +
++            rule.storage_origin + '|' + rule.storage_key + '\n';
++  }
++  const std::string sign = MakeSign(body, unix_seconds);
++  return body + "sign " + sign + "\n";
++}
++
++}  // namespace lengsuo::fp
+diff --git a/lengsuo/native/l3_wire.h b/lengsuo/native/l3_wire.h
+new file mode 100644
+index 0000000..9ef1197
+--- /dev/null
++++ b/lengsuo/native/l3_wire.h
+@@ -0,0 +1,96 @@
++// l3_wire - the managed L3 configuration document (L3W1).
++//
++// This is the single input that drives the whole storage layer: which
++// key/value pairs are pinned per origin, which extensions must travel with the
++// environment, and which cookie/localStorage pairs are declared to be mirrors
++// of each other. It is decoded in the browser process and never in a renderer
++// that could also read arbitrary profile files.
++//
++// Grammar (ASCII, '\n' separated, bounded to kMaxWireBytes):
++//
++//   L3W1
++//   pins <n>
++//   <origin>|<scope>|<key>|<value>          exactly n lines
++//   cookies <n>
++//   <domain>|<name>|<value>                 exactly n lines
++//   ext <n>
++//   <32 x [a-p]>                            exactly n lines
++//   rules <n>
++//   <cookie_domain>|<cookie_name>|<storage_origin>|<storage_key>
++//                                           exactly n lines
++//   sign <md5hex>_v1_t<unix>
++//
++// A final "\r\n" or "\n" is accepted; nothing may follow the sign line.
++//
++// The sign covers the exact bytes of the document *before* the "sign " line,
++// so field content can never be re-ordered or re-encoded without detection.
++// Freshness uses cache_record::VerifySign semantics: integrity before age.
++//
++// Decoding is fail-closed and transactional: on any error `*out` is untouched.
++// In addition the decoded snapshot must be internally consistent - every
++// declared rule linking a cookie to a pinned storage key has to agree with the
++// pinned value or the whole document is rejected. This is what stops a
++// half-updated environment from being launched.
++#ifndef LENGSUO_NATIVE_L3_WIRE_H_
++#define LENGSUO_NATIVE_L3_WIRE_H_
++
++#include <cstdint>
++#include <string>
++#include <string_view>
++#include <vector>
++
++#include "cache_record.h"
++#include "extension_pin.h"
++#include "storage_consistency.h"
++#include "storage_pin.h"
++
++namespace lengsuo::fp {
++
++inline constexpr std::size_t kMaxL3WireBytes = 64 * 1024;
++
++struct L3Config {
++  StoragePin pins;
++  ExtensionPin extensions;
++  std::vector<ConsistencyRule> rules;
++  // Cookie facts declared by the document; they are consistency *inputs*
++  // (what the environment's cookie jar is expected to contain), not live
++  // cookie-jar state.
++  std::vector<CookieFact> cookies;
++  std::string sign;
++  int64_t signed_unix = 0;
++};
++
++// True when every rule agrees with the pinned values and declared cookies.
++bool L3SnapshotConsistent(const L3Config& config);
++
++// Flattens the pin table into storage facts (consistency check input).
++std::vector<StorageFact> CollectStorageFacts(const StoragePin& pins);
++
++// Serializes the document back to the canonical wire form. Field order is
++// pins, cookies, ext, rules; counts are re-derived, and the sign is
++// recomputed over the produced body. Round-trips: decoding the output yields
++// an equal L3Config (extensions sorted, pin/rule order preserved).
++std::string EncodeL3Wire(const L3Config& config, int64_t unix_seconds);
++
++// `now_unix` / `max_age_seconds` drive the anti-rollback check on the sign.
++// Returns false and sets `*error` (when non-null) on any failure.
++//
++// Passing now_unix <= 0 skips the freshness window: the signature digest and
++// the launch consistency gate still apply, but the timestamp is accepted
++// whatever it is. A renderer uses that, because the browser already judged
++// freshness against its own clock before forwarding the document and a
++// renderer must not re-judge it against a clock it does not control.
++bool DecodeL3Wire(std::string_view wire,
++                  int64_t now_unix,
++                  int64_t max_age_seconds,
++                  L3Config* out,
++                  std::string* error);
++
++// Normalizes a decoded pin table back to the renderer-facing
++// "<origin>|<scope>|<key>|<value>\n" wire. Entries are emitted in parse order,
++// so EncodePinWire followed by StoragePin::Parse round-trips byte for byte.
++std::string EncodePinWire(const StoragePin& pins);
++
++}  // namespace lengsuo::fp
++
++#endif  // LENGSUO_NATIVE_L3_WIRE_H_
 diff --git a/lengsuo/native/product_brand.h b/lengsuo/native/product_brand.h
 new file mode 100644
 index 0000000..0bd9cc8
@@ -2358,6 +4389,429 @@ index 0000000..f02b333
 +std::optional<ParsedProfile> DecodeProfile(std::span<const std::uint8_t> bytes);
 +}  // namespace lengsuo
 +#endif
+diff --git a/lengsuo/native/storage_consistency.cc b/lengsuo/native/storage_consistency.cc
+new file mode 100644
+index 0000000..e1057c9
+--- /dev/null
++++ b/lengsuo/native/storage_consistency.cc
+@@ -0,0 +1,99 @@
++#include "storage_consistency.h"
++
++#include <cstddef>
++#include <string_view>
++
++namespace lengsuo::fp {
++namespace {
++
++char AsciiLower(char c) {
++  return c >= 'A' && c <= 'Z' ? static_cast<char>(c - 'A' + 'a') : c;
++}
++
++bool EqualsIgnoreCase(std::string_view a, std::string_view b) {
++  if (a.size() != b.size()) {
++    return false;
++  }
++  for (std::size_t i = 0; i < a.size(); ++i) {
++    if (AsciiLower(a[i]) != AsciiLower(b[i])) {
++      return false;
++    }
++  }
++  return true;
++}
++
++std::string_view StripLeadingDot(std::string_view value) {
++  if (!value.empty() && value.front() == '.') {
++    value.remove_prefix(1);
++  }
++  return value;
++}
++
++// RFC 6265 5.1.3: empty domain matches nothing; otherwise the host is either
++// equal to the rule domain or ends with "." + rule domain.
++bool CookieDomainMatches(std::string_view host, std::string_view rule_domain) {
++  host = StripLeadingDot(host);
++  rule_domain = StripLeadingDot(rule_domain);
++  if (rule_domain.empty()) {
++    return false;
++  }
++  if (EqualsIgnoreCase(host, rule_domain)) {
++    return true;
++  }
++  return host.size() > rule_domain.size() &&
++         host[host.size() - rule_domain.size() - 1] == '.' &&
++         EqualsIgnoreCase(host.substr(host.size() - rule_domain.size()),
++                          rule_domain);
++}
++
++// Duplicate facts are outside the contract. First match wins; the choice is
++// flagged in the task-F report rather than settled here.
++const CookieFact* FindCookie(const std::vector<CookieFact>& cookies,
++                             const ConsistencyRule& rule) {
++  for (const CookieFact& cookie : cookies) {
++    if (cookie.name == rule.cookie_name &&
++        CookieDomainMatches(cookie.domain, rule.cookie_domain)) {
++      return &cookie;
++    }
++  }
++  return nullptr;
++}
++
++const StorageFact* FindStorage(const std::vector<StorageFact>& storage,
++                               const ConsistencyRule& rule) {
++  for (const StorageFact& fact : storage) {
++    if (fact.origin == rule.storage_origin && fact.key == rule.storage_key) {
++      return &fact;
++    }
++  }
++  return nullptr;
++}
++
++}  // namespace
++
++std::vector<Mismatch> CheckConsistency(
++    const std::vector<CookieFact>& cookies,
++    const std::vector<StorageFact>& storage,
++    const std::vector<ConsistencyRule>& rules) {
++  std::vector<Mismatch> mismatches;
++  for (const ConsistencyRule& rule : rules) {
++    const CookieFact* cookie = FindCookie(cookies, rule);
++    const StorageFact* fact = FindStorage(storage, rule);
++    // Both absent: the rule describes another environment, not a conflict.
++    if (cookie == nullptr && fact == nullptr) {
++      continue;
++    }
++    const std::string_view cookie_value =
++        cookie != nullptr ? std::string_view(cookie->value) : std::string_view();
++    const std::string_view storage_value =
++        fact != nullptr ? std::string_view(fact->value) : std::string_view();
++    if (cookie != nullptr && fact != nullptr && cookie_value == storage_value) {
++      continue;
++    }
++    mismatches.push_back(
++        Mismatch{rule, std::string(cookie_value), std::string(storage_value)});
++  }
++  return mismatches;
++}
++
++}  // namespace lengsuo::fp
+diff --git a/lengsuo/native/storage_consistency.h b/lengsuo/native/storage_consistency.h
+new file mode 100644
+index 0000000..c3a77f5
+--- /dev/null
++++ b/lengsuo/native/storage_consistency.h
+@@ -0,0 +1,67 @@
++// storage_consistency v1 - cookie <-> localStorage cross-check (task F).
++//
++// 对标端 pins the device fields a platform generated by keeping the Cookie copy
++// and the localStorage copy byte-identical (docs/cc-task-brief-l3.md, task F):
++//
++//   .pinduoduo.com  _bee = 7FcROX...  <->  mms.pinduoduo.com  finger-key_0.1.5
++//
++// This is a pure decision function: no IO, no browser state, no clock. The
++// browser side calls it before persisting a profile and refuses the write when
++// any rule reports a mismatch.
++//
++// Missing-side semantics (contract, task F items 3-5):
++//   * One side missing => a Mismatch, with the missing side's value empty.
++//   * Both sides missing => the rule does not apply to this environment and is
++//     NOT a mismatch.
++// An empty string is therefore the "absent" sentinel in Mismatch; a fact that
++// exists with an empty value is indistinguishable from a missing fact in the
++// output (the struct has no presence flag).
++//
++// Cookie domain matching follows RFC 6265 5.1.3: a leading dot on the rule
++// domain is ignored, matching is case-insensitive, and a rule domain matches
++// the host itself or any dot-suffixed subdomain (".pinduoduo.com" covers
++// "mms.pinduoduo.com"). Origins and keys are compared byte-exactly; the brief
++// only asks for subdomain semantics on the cookie side.
++#ifndef LENGSUO_NATIVE_STORAGE_CONSISTENCY_H_
++#define LENGSUO_NATIVE_STORAGE_CONSISTENCY_H_
++
++#include <string>
++#include <vector>
++
++namespace lengsuo::fp {
++
++struct CookieFact {
++  std::string domain;  // ".pinduoduo.com"
++  std::string name;    // "_bee"
++  std::string value;
++};
++
++struct StorageFact {
++  std::string origin;  // "https://mms.pinduoduo.com"
++  std::string key;     // "finger-key_0.1.5"
++  std::string value;
++};
++
++struct ConsistencyRule {
++  std::string cookie_domain;
++  std::string cookie_name;
++  std::string storage_origin;
++  std::string storage_key;
++};
++
++struct Mismatch {
++  ConsistencyRule rule;
++  std::string cookie_value;   // empty when the cookie side is missing
++  std::string storage_value;  // empty when the storage side is missing
++};
++
++// Rules are evaluated in order; at most one Mismatch is emitted per rule.
++// Returns all mismatches (empty = every applicable rule agrees).
++std::vector<Mismatch> CheckConsistency(
++    const std::vector<CookieFact>& cookies,
++    const std::vector<StorageFact>& storage,
++    const std::vector<ConsistencyRule>& rules);
++
++}  // namespace lengsuo::fp
++
++#endif  // LENGSUO_NATIVE_STORAGE_CONSISTENCY_H_
+diff --git a/lengsuo/native/storage_pin.cc b/lengsuo/native/storage_pin.cc
+new file mode 100644
+index 0000000..dd549e3
+--- /dev/null
++++ b/lengsuo/native/storage_pin.cc
+@@ -0,0 +1,161 @@
++#include "storage_pin.h"
++
++#include <algorithm>
++#include <iterator>
++#include <string_view>
++#include <utility>
++
++namespace lengsuo::fp {
++namespace {
++
++constexpr char kDelimiter = '|';
++
++bool IsControl(unsigned char character) {
++  return character < 0x20 || character == 0x7f;
++}
++
++// "http://" or "https://" (lowercase, per the task brief) followed by a
++// non-empty host part with no whitespace/control bytes or delimiters.
++bool ValidOrigin(const std::string& origin) {
++  std::string_view rest;
++  if (origin.rfind("https://", 0) == 0) {
++    rest = std::string_view(origin).substr(8);
++  } else if (origin.rfind("http://", 0) == 0) {
++    rest = std::string_view(origin).substr(7);
++  } else {
++    return false;
++  }
++  if (rest.empty()) {
++    return false;
++  }
++  for (const unsigned char character : rest) {
++    if (IsControl(character) || character == ' ' || character == kDelimiter) {
++      return false;
++    }
++  }
++  return true;
++}
++
++bool ValidKey(const std::string& key) {
++  if (key.empty()) {
++    return false;
++  }
++  for (const unsigned char character : key) {
++    if (IsControl(character)) {
++      return false;
++    }
++  }
++  return true;
++}
++
++}  // namespace
++
++bool StoragePin::Parse(const std::string& wire) {
++  if (wire.empty()) {
++    return false;
++  }
++
++  // Build into a scratch object so any failure leaves `*this` untouched.
++  StoragePin parsed;
++  std::size_t start = 0;
++  while (start < wire.size()) {
++    const std::size_t newline = wire.find('\n', start);
++    const std::size_t end =
++        newline == std::string::npos ? wire.size() : newline;
++    std::string line = wire.substr(start, end - start);
++    start = newline == std::string::npos ? wire.size() : newline + 1;
++
++    if (!line.empty() && line.back() == '\r') {
++      line.pop_back();
++    }
++    if (line.empty() || !parsed.ParseLine(line)) {
++      return false;
++    }
++  }
++
++  domains_ = std::move(parsed.domains_);
++  return true;
++}
++
++bool StoragePin::ParseLine(const std::string& line) {
++  std::vector<std::string> fields;
++  std::size_t start = 0;
++  while (true) {
++    const std::size_t delimiter = line.find(kDelimiter, start);
++    if (delimiter == std::string::npos) {
++      fields.push_back(line.substr(start));
++      break;
++    }
++    fields.push_back(line.substr(start, delimiter - start));
++    start = delimiter + 1;
++  }
++  if (fields.size() != 4) {
++    return false;
++  }
++
++  const std::string& origin = fields[0];
++  const std::string& scope = fields[1];
++  const std::string& key = fields[2];
++  const std::string& value = fields[3];
++
++  if (!ValidOrigin(origin) || !ValidKey(key)) {
++    return false;
++  }
++  if (scope != "local" && scope != "session") {
++    return false;
++  }
++
++  auto domain = std::find_if(
++      domains_.begin(), domains_.end(),
++      [&origin](const DomainPin& entry) { return entry.origin == origin; });
++  if (domain == domains_.end()) {
++    domains_.push_back(DomainPin{origin, {}, {}});
++    domain = std::prev(domains_.end());
++  }
++
++  std::vector<PinnedEntry>& entries =
++      scope == "local" ? domain->local_storage : domain->session_storage;
++  auto entry = std::find_if(
++      entries.begin(), entries.end(),
++      [&key](const PinnedEntry& pinned) { return pinned.key == key; });
++  if (entry != entries.end()) {
++    entry->value = value;
++  } else {
++    entries.push_back(PinnedEntry{key, value});
++  }
++  return true;
++}
++
++const DomainPin* StoragePin::Find(const std::string& origin) const {
++  for (const DomainPin& domain : domains_) {
++    if (domain.origin == origin) {
++      return &domain;
++    }
++  }
++  return nullptr;
++}
++
++bool StoragePin::IsLocked(const std::string& origin,
++                          const std::string& key) const {
++  const DomainPin* domain = Find(origin);
++  if (domain == nullptr) {
++    return false;
++  }
++  const auto pinned = [&key](const PinnedEntry& entry) {
++    return entry.key == key;
++  };
++  return std::any_of(domain->local_storage.begin(), domain->local_storage.end(),
++                     pinned) ||
++         std::any_of(domain->session_storage.begin(),
++                     domain->session_storage.end(), pinned);
++}
++
++std::size_t StoragePin::size() const {
++  std::size_t total = 0;
++  for (const DomainPin& domain : domains_) {
++    total += domain.local_storage.size() + domain.session_storage.size();
++  }
++  return total;
++}
++
++}  // namespace lengsuo::fp
+diff --git a/lengsuo/native/storage_pin.h b/lengsuo/native/storage_pin.h
+new file mode 100644
+index 0000000..17a811e
+--- /dev/null
++++ b/lengsuo/native/storage_pin.h
+@@ -0,0 +1,72 @@
++#ifndef LENGSUO_NATIVE_STORAGE_PIN_H_
++#define LENGSUO_NATIVE_STORAGE_PIN_H_
++
++#include <cstddef>
++#include <string>
++#include <vector>
++
++namespace lengsuo::fp {
++
++struct PinnedEntry {
++  std::string key;
++  std::string value;
++};
++
++// A single origin's pin table. origin looks like "https://mms.pinduoduo.com".
++struct DomainPin {
++  std::string origin;
++  std::vector<PinnedEntry> local_storage;
++  std::vector<PinnedEntry> session_storage;
++};
++
++// Per-origin DOM storage pins: values written before page script runs and
++// treated as read-only thereafter (Reference semantics: pinned means locked).
++//
++// Wire format: one pin per line, four '|'-separated segments:
++//
++//   <origin>|<scope>|<key>|<value>
++//
++//   origin  "http://..." or "https://..." (lowercase scheme, non-empty rest)
++//   scope   "local" (localStorage) or "session" (sessionStorage)
++//   key     non-empty, no control characters
++//   value   may be empty; '|' and newlines are not representable
++//
++// A single trailing "\n" or "\r\n" on the last line is accepted. Empty input,
++// blank lines, unknown scopes, malformed origins and any segment count other
++// than four are rejected. Values containing '|' therefore fail closed instead
++// of being silently truncated.
++//
++// Duplicates: a repeated (origin, scope, key) keeps one entry whose value is
++// the last one parsed; position is that of the first occurrence.
++//
++// The wire encoding is not fixed by the L3 task brief; this grammar is the
++// contract recorded in the header so callers and tests share one definition.
++class StoragePin {
++ public:
++  // Replaces the current table only after the whole input validates. On
++  // failure returns false and leaves the previous table unchanged.
++  bool Parse(const std::string& wire);
++
++  // Exact origin match. Returns nullptr when the origin has no pinned entries.
++  const DomainPin* Find(const std::string& origin) const;
++
++  // True when `key` is pinned for `origin` in either storage area. The
++  // contract has no scope argument, so either area locks the key.
++  bool IsLocked(const std::string& origin, const std::string& key) const;
++
++  // Total number of pinned key/value pairs across both storage areas and all
++  // origins (duplicates count once).
++  std::size_t size() const;
++
++  // Read-only view in parse order; callers must not mutate through it.
++  const std::vector<DomainPin>& Domains() const { return domains_; }
++
++ private:
++  bool ParseLine(const std::string& line);
++
++  std::vector<DomainPin> domains_;
++};
++
++}  // namespace lengsuo::fp
++
++#endif  // LENGSUO_NATIVE_STORAGE_PIN_H_
 diff --git a/lengsuo/native/wire_reader.h b/lengsuo/native/wire_reader.h
 new file mode 100644
 index 0000000..158007a

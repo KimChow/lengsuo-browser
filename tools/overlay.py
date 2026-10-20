@@ -40,6 +40,8 @@ MAPPING = (
      "lengsuo/integration/profile_bootstrap_state.h"),
     ("integration/browser_bootstrap_unittest.cc",
      "lengsuo/integration/browser_bootstrap_unittest.cc"),
+    ("integration/official_defaults_unittest.cc",
+     "lengsuo/integration/official_defaults_unittest.cc"),
     ("native/l3_wire.h", "lengsuo/native/l3_wire.h"),
     ("native/l3_wire.cc", "lengsuo/native/l3_wire.cc"),
     ("native/l3_runtime.h", "lengsuo/native/l3_runtime.h"),

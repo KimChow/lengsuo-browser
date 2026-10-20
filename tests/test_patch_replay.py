@@ -83,6 +83,24 @@ class PatchLockTests(unittest.TestCase):
             "lengsuo/integration/browser_bootstrap.h",
             "lengsuo/integration/profile_bootstrap_state.cc",
             "lengsuo/integration/profile_bootstrap_state.h",
+            # The L3 storage layer. These were missing from the shipped set
+            # once: 0011 predated them, so the sources reached the tree
+            # through the overlay while BUILD.gn never learned about them,
+            # and the link failed with an undefined L3BootstrapState.
+            "lengsuo/native/cache_record.cc",
+            "lengsuo/native/cache_record.h",
+            "lengsuo/native/extension_pin.cc",
+            "lengsuo/native/extension_pin.h",
+            "lengsuo/native/l3_runtime.cc",
+            "lengsuo/native/l3_runtime.h",
+            "lengsuo/native/l3_wire.cc",
+            "lengsuo/native/l3_wire.h",
+            "lengsuo/native/storage_consistency.cc",
+            "lengsuo/native/storage_consistency.h",
+            "lengsuo/native/storage_pin.cc",
+            "lengsuo/native/storage_pin.h",
+            "lengsuo/integration/l3_bootstrap.cc",
+            "lengsuo/integration/l3_bootstrap.h",
         }
         missing = sorted(required - shipped)
         self.assertEqual(missing, [], "sources never shipped by any patch")
@@ -168,6 +186,33 @@ class PatchContentTests(unittest.TestCase):
                             f"{line.strip()!r}")
                     if not line.startswith(("+", "-", " ", "\\")) and line:
                         target = None
+
+    def test_gn_sources_lists_match_the_shipped_files(self):
+        """Every source in lengsuo/**/BUILD.gn must be shipped by a patch.
+
+        A file that reaches the tree but is not listed in its BUILD.gn is
+        invisible to the build: the sources compile nowhere and the link
+        reports an undefined symbol. That is exactly what happened with
+        lengsuo/integration/l3_bootstrap.cc - the file was present, the
+        source_set did not mention it, and the browser binary failed to link
+        with "undefined symbol: lengsuo::L3BootstrapState::Initialize".
+        """
+        shipped = set()
+        for patch in _patch_files():
+            for path in _added_or_modified_paths(
+                    patch.read_text(encoding="utf-8", errors="replace")):
+                if path.startswith("lengsuo/"):
+                    shipped.add(path)
+
+        for build_gn in sorted(ROOT.glob("*/BUILD.gn")):
+            directory = f"lengsuo/{build_gn.parent.name}"
+            text = build_gn.read_text(encoding="utf-8", errors="replace")
+            listed = set(re.findall(r'"([A-Za-z0-9_.]+\.(?:cc|h|inc))"', text))
+            for name in sorted(listed):
+                relative = f"{directory}/{name}"
+                self.assertIn(
+                    relative, shipped,
+                    f"{relative} is listed in {build_gn} but no patch ships it")
 
 
 if __name__ == "__main__":
