@@ -15,7 +15,9 @@ GATEWAY="${LENGSUO_GATEWAY:-http://192.168.1.151:18080}"
 MODEL="${LENGSUO_CC_MODEL:-auto}"
 ROOT="${LENGSUO_L3B_ROOT:-/home/ubuntu/l3b-tasks}"
 REPO_SRC="${LENGSUO_REPO_SRC:-/home/ubuntu/lengsuo-browser-dev/recipe}"
-BRIEF="$REPO_SRC/docs/cc-task-brief-l3b.md"
+# The brief is selected by the task name: the third round (M/N) has its own
+# brief, the second round (I/J/K/L) keeps the original one.
+BRIEF="${LENGSUO_L3B_BRIEF:-}"
 
 case "${1:-}" in
 --status)
@@ -45,6 +47,18 @@ fi
 for task in $TASKS; do
     work="$ROOT/$task"
     mkdir -p "$work"
+    # Pick the brief for this task unless one was forced from the outside.
+    task_brief="$BRIEF"
+    if [ -z "$task_brief" ]; then
+        case "$task" in
+            M|N) task_brief="$REPO_SRC/docs/cc-task-brief-l3d.md" ;;
+            *)   task_brief="$REPO_SRC/docs/cc-task-brief-l3b.md" ;;
+        esac
+    fi
+    if [ ! -f "$task_brief" ]; then
+        echo "brief not found: $task_brief" >&2
+        exit 1
+    fi
     if [ ! -d "$work/repo/.git" ]; then
         git clone -q "$REPO_SRC" "$work/repo" || {
             echo "clone failed for $task" >&2
@@ -63,7 +77,7 @@ for task in $TASKS; do
     # Short prompt: point at the brief, name the task, state the hard rules.
     # Keeping this under ~400 chars is the whole point.
     printf '读 %s 的任务 %s，在 %s 里实现。只改该任务列出的文件。写 gtest，用 -Wall -Wextra -Werror -pedantic 编译零告警并跑通。语义冲突写 report.md 不要自己选。' \
-        "$BRIEF" "$task" "$work/repo" > "$work/prompt.txt"
+        "$task_brief" "$task" "$work/repo" > "$work/prompt.txt"
 
     cat > "$work/run.sh" <<RUNNER
 #!/bin/bash
