@@ -38,13 +38,3 @@
    return ComputeAcceptLanguageFromPref(
        content::ReduceAcceptLanguageUtils::GetLanguagesWithMaxCount(
            profile_->IsOffTheRecord() ? language::GetIncognitoLanguageList(
---- a/chrome/browser/BUILD.gn
-+++ b/chrome/browser/BUILD.gn
-@@ -166,6 +166,7 @@
-   ]
- 
-   deps = [
-+    "//lengsuo/integration:bootstrap",
-     ":key_pinning_proto",
-     "//base:build_time",
-     "//chrome/browser:browser_features",
