@@ -34,20 +34,20 @@
       "sha256": "b489ab552a3816cdc176121452fbbab9a8a9c5bfa8dafaa7a46b597df98b2ad6"
     },
     {
-      "path": "patches/0007-profile-language.patch",
-      "sha256": "c542abf1cced06caf6ebd891b0e57af9d3783420747cfa224da976a6bbd95ed3"
-    },
-    {
-      "path": "patches/0008-profile-timezone.patch",
-      "sha256": "08ee04d795242205e183245fb82fa0643f0977c8feed21376301b5def4a05df8"
-    },
-    {
       "path": "patches/0007-canvas-readback.patch",
       "sha256": "7618ff7b6354d73c705a4c950e8c6d295363be995defcc4e23dadaeb05769f80"
     },
     {
+      "path": "patches/0007-profile-language.patch",
+      "sha256": "c542abf1cced06caf6ebd891b0e57af9d3783420747cfa224da976a6bbd95ed3"
+    },
+    {
       "path": "patches/0008-fp-overrides.patch",
       "sha256": "285d52ce78d4350b8fb00b6c2ecd66de77ac2193819262952e87b13bc6dc9716"
+    },
+    {
+      "path": "patches/0008-profile-timezone.patch",
+      "sha256": "08ee04d795242205e183245fb82fa0643f0977c8feed21376301b5def4a05df8"
     },
     {
       "path": "patches/0009-rects-audio.patch",
@@ -72,6 +72,10 @@
     {
       "path": "patches/0014-font-metrics.patch",
       "sha256": "4196cd1512f7f34af856be367bbfc482de1ef9a3fbd1784a37be7c5f32f4ffda"
+    },
+    {
+      "path": "patches/0015-l3-storage.patch",
+      "sha256": "7eda50c3a809cf3dffe991cac8f553bf8757d8fd93ee27f8b429f0eea33a15bf"
     }
   ]
 }

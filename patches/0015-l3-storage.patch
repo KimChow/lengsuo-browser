@@ -1,0 +1,186 @@
+diff --git a/content/renderer/renderer_main.cc b/content/renderer/renderer_main.cc
+index 2fd21f7ee5..fe3203998f 100644
+--- a/content/renderer/renderer_main.cc
++++ b/content/renderer/renderer_main.cc
+@@ -89,6 +89,8 @@
+ #include "mojo/public/cpp/bindings/lib/test_random_mojo_delays.h"
+ #endif
+ 
++#include "lengsuo/native/l3_runtime.h"
++
+ namespace content {
+ namespace {
+ 
+@@ -155,6 +157,23 @@ int RendererMain(MainFunctionParams parameters) {
+ 
+   const base::CommandLine& command_line = *parameters.command_line;
+ 
++  // Storage-layer pins (L3). Transitional transport: the document rides the
++  // command line for now; the target design is a managed file read by the
++  // browser and forwarded over Mojo (Reference never puts fingerprint state on
++  // the command line). A present-but-invalid document aborts the renderer: a
++  // platform that already observed a pinned value must not see it vanish.
++  // Freshness was enforced browser-side before forwarding, so the renderer
++  // does not re-check age with its own clock.
++  if (command_line.HasSwitch("lengsuo-managed-l3")) {
++    const std::string l3_wire =
++        command_line.GetSwitchValueASCII("lengsuo-managed-l3");
++    if (l3_wire.empty()) return 1;
++    if (!lengsuo::fp::GetL3Runtime().Init(l3_wire, /*now_unix=*/1,
++                                          /*max_age_seconds=*/1)) {
++      return 1;
++    }
++  }
++
+ #if BUILDFLAG(IS_MAC)
+   base::apple::ScopedNSAutoreleasePool* pool = parameters.autorelease_pool;
+ #endif  // BUILDFLAG(IS_MAC)
+diff --git a/third_party/blink/renderer/modules/storage/BUILD.gn b/third_party/blink/renderer/modules/storage/BUILD.gn
+index def668aa11..b0d9e6086b 100644
+--- a/third_party/blink/renderer/modules/storage/BUILD.gn
++++ b/third_party/blink/renderer/modules/storage/BUILD.gn
+@@ -5,6 +5,10 @@
+ import("//third_party/blink/renderer/modules/modules.gni")
+ 
+ blink_modules_sources("storage") {
++  # Storage-layer pins (L3): Blink queries the frozen snapshot through this
++  # target instead of parsing the managed document itself.
++  deps = [ "//lengsuo/native:l3_runtime" ]
++
+   sources = [
+     "cached_storage_area.cc",
+     "cached_storage_area.h",
+diff --git a/third_party/blink/renderer/modules/storage/dom_window_storage.cc b/third_party/blink/renderer/modules/storage/dom_window_storage.cc
+index 23e1819080..5e20c017a9 100644
+--- a/third_party/blink/renderer/modules/storage/dom_window_storage.cc
++++ b/third_party/blink/renderer/modules/storage/dom_window_storage.cc
+@@ -183,6 +183,9 @@ StorageArea* DOMWindowStorage::GetOrCreateLocalStorage(
+       window, std::move(storage_area_for_init));
+   local_storage_ = StorageArea::Create(window, std::move(storage_area),
+                                        StorageArea::StorageType::kLocalStorage);
++  // Storage-layer pins (L3): seed before the area reaches any script, so the
++  // very first getItem already observes the frozen values.
++  local_storage_->SeedStoragePins();
+   return local_storage_.Get();
+ }
+ 
+diff --git a/third_party/blink/renderer/modules/storage/storage_area.cc b/third_party/blink/renderer/modules/storage/storage_area.cc
+index 131a62a60d..d0f7040fe5 100644
+--- a/third_party/blink/renderer/modules/storage/storage_area.cc
++++ b/third_party/blink/renderer/modules/storage/storage_area.cc
+@@ -44,6 +44,7 @@
+ #include "third_party/blink/renderer/platform/weborigin/security_origin.h"
+ #include "third_party/blink/renderer/platform/wtf/functional.h"
+ #include "third_party/blink/renderer/platform/wtf/text/wtf_string.h"
++#include "lengsuo/native/l3_runtime.h"
+ 
+ namespace blink {
+ 
+@@ -116,6 +117,15 @@ String StorageArea::getItem(const String& key,
+     exception_state.ThrowSecurityError(StorageArea::kAccessDeniedMessage);
+     return String();
+   }
++  // Storage-layer pins (L3): the frozen snapshot is authoritative for
++  // pinned keys, so the answer never depends on what the store holds now.
++  if (storage_type_ == StorageType::kLocalStorage) {
++    const std::string* pinned = lengsuo::fp::GetL3Runtime().PinnedValue(
++        GetDOMWindow()->GetSecurityOrigin()->ToString().Utf8(), key.Utf8());
++    if (pinned) {
++      return String::FromUTF8(*pinned);
++    }
++  }
+   return cached_area_->GetItem(key);
+ }
+ 
+@@ -127,6 +137,14 @@ NamedPropertySetterResult StorageArea::setItem(
+     exception_state.ThrowSecurityError(StorageArea::kAccessDeniedMessage);
+     return NamedPropertySetterResult::kIntercepted;
+   }
++  // Pinned keys are read-only: the environment froze platform-issued device
++  // fields, so page writes are dropped silently, matching a pinned store.
++  if (storage_type_ == StorageType::kLocalStorage &&
++      lengsuo::fp::GetL3Runtime().IsLocked(
++          GetDOMWindow()->GetSecurityOrigin()->ToString().Utf8(),
++          key.Utf8())) {
++    return NamedPropertySetterResult::kIntercepted;
++  }
+   if (!cached_area_->SetItem(key, value, this)) {
+     QuotaExceededError::Throw(
+         exception_state,
+@@ -143,6 +161,13 @@ NamedPropertyDeleterResult StorageArea::removeItem(
+     exception_state.ThrowSecurityError(StorageArea::kAccessDeniedMessage);
+     return NamedPropertyDeleterResult::kDidNotDelete;
+   }
++  // Pinned keys cannot be removed for the same reason they cannot be set.
++  if (storage_type_ == StorageType::kLocalStorage &&
++      lengsuo::fp::GetL3Runtime().IsLocked(
++          GetDOMWindow()->GetSecurityOrigin()->ToString().Utf8(),
++          key.Utf8())) {
++    return NamedPropertyDeleterResult::kDidNotDelete;
++  }
+   cached_area_->RemoveItem(key, this);
+   return NamedPropertyDeleterResult::kDeleted;
+ }
+@@ -152,7 +177,45 @@ void StorageArea::clear(ExceptionState& exception_state) {
+     exception_state.ThrowSecurityError(StorageArea::kAccessDeniedMessage);
+     return;
+   }
++  // clear() must still wipe everything non-pinned, so the pins are
++  // snapshotted and re-written after the wipe. Refusing clear() outright
++  // would break legitimate cleanup and leak the pin set via bisection.
++  Vector<std::pair<String, String>> restore;
++  if (storage_type_ == StorageType::kLocalStorage) {
++    if (const auto* pins = lengsuo::fp::GetL3Runtime().LocalPins(
++            GetDOMWindow()->GetSecurityOrigin()->ToString().Utf8())) {
++      for (const lengsuo::fp::PinnedEntry& pinned : *pins) {
++        restore.emplace_back(String::FromUTF8(pinned.key),
++                             String::FromUTF8(pinned.value));
++      }
++    }
++  }
+   cached_area_->Clear(this);
++  for (const auto& entry : restore) {
++    cached_area_->SetItem(entry.first, entry.second, this);
++  }
++}
++
++void StorageArea::SeedStoragePins() {
++  if (storage_type_ != StorageType::kLocalStorage) {
++    return;
++  }
++  const auto& runtime = lengsuo::fp::GetL3Runtime();
++  if (!runtime.ready()) {
++    return;
++  }
++  const String origin = GetDOMWindow()->GetSecurityOrigin()->ToString();
++  const auto* pins = runtime.LocalPins(origin.Utf8());
++  if (!pins) {
++    return;
++  }
++  for (const lengsuo::fp::PinnedEntry& pinned : *pins) {
++    // The pinned value wins over whatever the store already holds; a missing
++    // entry and a differing entry are seeded identically. Neither key nor
++    // value is logged: pinned values are device identity, not diagnostics.
++    cached_area_->SetItem(String::FromUTF8(pinned.key),
++                          String::FromUTF8(pinned.value), this);
++  }
+ }
+ 
+ bool StorageArea::Contains(const String& key,
+diff --git a/third_party/blink/renderer/modules/storage/storage_area.h b/third_party/blink/renderer/modules/storage/storage_area.h
+index 1c1a642705..35fe2059c9 100644
+--- a/third_party/blink/renderer/modules/storage/storage_area.h
++++ b/third_party/blink/renderer/modules/storage/storage_area.h
+@@ -95,6 +95,12 @@ class StorageArea final : public ScriptWrappable,
+ 
+   LocalDOMWindow* GetDOMWindow() override;
+ 
++  // Storage-layer pins (L3). Seeds the frozen pinned key/value pairs for the
++  // window's origin into this area's memory map and backing store. Called
++  // right after creation so the first script observes them. No-op when the
++  // runtime has no snapshot or the origin has no pins.
++  void SeedStoragePins();
++
+  private:
+   void RecordModificationInMetrics();
+ 
