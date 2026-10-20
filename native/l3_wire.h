@@ -74,6 +74,12 @@ std::string EncodeL3Wire(const L3Config& config, int64_t unix_seconds);
 
 // `now_unix` / `max_age_seconds` drive the anti-rollback check on the sign.
 // Returns false and sets `*error` (when non-null) on any failure.
+//
+// Passing now_unix <= 0 skips the freshness window: the signature digest and
+// the launch consistency gate still apply, but the timestamp is accepted
+// whatever it is. A renderer uses that, because the browser already judged
+// freshness against its own clock before forwarding the document and a
+// renderer must not re-judge it against a clock it does not control.
 bool DecodeL3Wire(std::string_view wire,
                   int64_t now_unix,
                   int64_t max_age_seconds,

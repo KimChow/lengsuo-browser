@@ -182,10 +182,28 @@ bool DecodeL3Wire(std::string_view wire, int64_t now_unix,
     return fail("l3: unexpected content before sign");
   }
 
-  // Integrity before freshness (cache_record order).
-  if (VerifySign(sign_text, body, now_unix, max_age_seconds) !=
-      SignVerdict::kOk) {
-    return fail("l3: sign verification failed");
+  // Integrity before freshness (cache_record order). now_unix <= 0 means the
+  // caller has already judged freshness elsewhere (the renderer path): the
+  // digest is still verified, only the age window is skipped.
+  const bool check_freshness = now_unix > 0;
+  if (check_freshness) {
+    if (VerifySign(sign_text, body, now_unix, max_age_seconds) !=
+        SignVerdict::kOk) {
+      return fail("l3: sign verification failed");
+    }
+  } else {
+    // Digest-only check. Verifying against the timestamp the document itself
+    // carries makes the age window vacuous (max_age covers the gap to now)
+    // while the MD5 still has to match the body byte for byte.
+    std::string digest;
+    int64_t timestamp = 0;
+    if (!ParseSignFields(sign_text, &digest, &timestamp)) {
+      return fail("l3: bad sign fields");
+    }
+    if (VerifySign(sign_text, body, timestamp,
+                   /*max_age_seconds=*/0) != SignVerdict::kOk) {
+      return fail("l3: sign verification failed");
+    }
   }
   std::string_view md5;
   if (!SplitSign(sign_text, &md5, &config.signed_unix)) {

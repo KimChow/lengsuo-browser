@@ -231,8 +231,13 @@ RENDERER_MAIN_CC = [
     const std::string l3_wire =
         command_line.GetSwitchValueASCII("lengsuo-managed-l3");
     if (l3_wire.empty()) return 1;
-    if (!lengsuo::fp::GetL3Runtime().Init(l3_wire, /*now_unix=*/1,
-                                          /*max_age_seconds=*/1)) {
+    // now_unix = 0: the browser already judged freshness against its own
+    // clock before forwarding, so the renderer verifies the digest and the
+    // launch consistency gate only. A real timestamp here would reject every
+    // document as "too new", because the renderer has no clock to compare it
+    // against.
+    if (!lengsuo::fp::GetL3Runtime().Init(l3_wire, /*now_unix=*/0,
+                                          /*max_age_seconds=*/0)) {
       return 1;
     }
   }

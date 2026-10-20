@@ -32,6 +32,8 @@ bool L3Runtime::Init(std::string_view wire, int64_t now_unix,
     return false;
   }
   L3Config config;
+  // now_unix <= 0 means "the caller judged freshness elsewhere"; the decoder
+  // still verifies the digest and the launch consistency gate.
   if (!DecodeL3Wire(wire, now_unix, max_age_seconds, &config, nullptr)) {
     return false;
   }

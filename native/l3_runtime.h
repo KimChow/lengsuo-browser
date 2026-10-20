@@ -36,6 +36,10 @@ class L3Runtime {
   // untouched) when the document is malformed, fails its signature gate or
   // violates the launch consistency gate, or when the runtime was already
   // initialized.
+  //
+  // now_unix <= 0 skips the freshness window (the digest and the consistency
+  // gate still apply). A renderer passes 0 because the browser already judged
+  // freshness against its own clock before forwarding the document.
   bool Init(std::string_view wire, int64_t now_unix, int64_t max_age_seconds);
 
   bool ready() const { return ready_; }
