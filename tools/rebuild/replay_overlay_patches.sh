@@ -52,9 +52,17 @@ for name in names:
     # renderer_main.cc), so exact-context git apply rejects the later ones.
     # --fuzz=3 matches on the surrounding lines that still exist. --dry-run
     # first so a partial failure cannot leave the tree half-patched.
+    # The newest patches are applied last, after every earlier patch has
+    # shifted the surrounding lines. Their context is unique at that point, so
+    # they are applied with fuzz=0: with fuzz the hunk can match an earlier
+    # occurrence of a shorter context and land the code before the line it was
+    # meant to follow (observed: the L3 block landed above the
+    # "const base::CommandLine& command_line" declaration).
+    fuzz = "0" if name.startswith("0015") else "3"
+
     def run(args):
         return subprocess.run(
-            ["patch", "-p1", "-N", "--forward", "--fuzz=3", "-s", "-d",
+            ["patch", "-p1", "-N", "--forward", f"--fuzz={fuzz}", "-s", "-d",
              str(source)] + args,
             input=data, capture_output=True, timeout=45)
 

@@ -32,6 +32,13 @@ std::uint32_t DeviceMemoryGB();       // 0 = disabled
 double RectsJitterPx();               // 0 = disabled
 std::uint64_t AudioSeed();
 
+// Slot 7: deterministic seed for WebGL MAX_* parameter perturbation.
+// Returns 0 when the webgl slot is off.
+std::uint64_t WebGLParamsSeed();
+// Deterministic bias for GLenum-typed int parameters (MAX_*, *_BITS...);
+// returns 0 when the webgl slot is off. Applied inside GetIntParameter.
+std::int32_t WebGLParamBias(std::uint32_t pname, std::int32_t original);
+
 // Font dimension: the parsed traits, or a default (not-installed) value until a
 // valid payload arrives. Callers must treat !installed as "this profile says
 // nothing about fonts" and keep the native measurement. The seed used for the

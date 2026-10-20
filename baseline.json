@@ -75,7 +75,7 @@
     },
     {
       "path": "patches/0015-l3-storage.patch",
-      "sha256": "0bac23586704fc727d8bb80a0c7d6e75d47e8b61edd37754319ee40660ebe027"
+      "sha256": "605665807835d15e3868345d48b13874e5c8311c719b9b70d3258c4ea6be8bc4"
     }
   ]
 }

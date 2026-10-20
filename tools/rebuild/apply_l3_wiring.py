@@ -203,22 +203,27 @@ STORAGE_BUILD_GN = [
 
 RENDERER_MAIN_CC = [
     (
-        """#if BUILDFLAG(MOJO_RANDOM_DELAYS_ENABLED)
-#include "mojo/public/cpp/bindings/lib/test_random_mojo_delays.h"
+        """#include "content/child/sandboxed_process_thread_type_handler.h"
 #endif
 """,
-        """#if BUILDFLAG(MOJO_RANDOM_DELAYS_ENABLED)
-#include "mojo/public/cpp/bindings/lib/test_random_mojo_delays.h"
+        """#include "content/child/sandboxed_process_thread_type_handler.h"
 #endif
 
-#include "lengsuo/native/l3_runtime.h"
+// Storage-layer pins (L3). The include sits here on purpose: the lengsuo
+// includes added by patch 0008 sit at the top of this file, and a later patch
+// anchored at the same place is reported by GNU patch as "reversed or
+// previously applied" and then silently skipped. This anchor is untouched by
+// the earlier patches.
 #include "base/base64.h"
+#include "lengsuo/native/l3_runtime.h"
 """,
     ),
     (
-        """  const base::CommandLine& command_line = *parameters.command_line;
+        """  base::CurrentProcess::GetInstance().SetProcessType(
+      base::CurrentProcessType::PROCESS_RENDERER);
 """,
-        """  const base::CommandLine& command_line = *parameters.command_line;
+        """  base::CurrentProcess::GetInstance().SetProcessType(
+      base::CurrentProcessType::PROCESS_RENDERER);
 
   // Storage-layer pins (L3). Transitional transport: the document rides the
   // command line for now; the target design is a managed file read by the
@@ -227,10 +232,22 @@ RENDERER_MAIN_CC = [
   // platform that already observed a pinned value must not see it vanish.
   // Freshness was enforced browser-side before forwarding, so the renderer
   // does not re-check age with its own clock.
-  if (command_line.HasSwitch("lengsuo-managed-l3")) {
-    const std::string l3_wire =
-        command_line.GetSwitchValueASCII("lengsuo-managed-l3");
-    if (l3_wire.empty()) return 1;
+  //
+  // This block sits before the local "command_line" alias on purpose: patches
+  // 0007 and 0008 both insert their own blocks right after that alias, and a
+  // later patch anchored at the same place is reported by GNU patch as
+  // "reversed or previously applied" and skipped. parameters.command_line is
+  // the same object, so nothing is lost.
+  if (parameters.command_line->HasSwitch("lengsuo-managed-l3")) {
+    const std::string l3_b64 =
+        parameters.command_line->GetSwitchValueASCII("lengsuo-managed-l3");
+    if (l3_b64.empty()) return 1;
+    // The document travels base64-encoded: it is multi-line text and must not
+    // appear verbatim on the command line.
+    const std::optional<std::vector<uint8_t>> decoded =
+        base::Base64Decode(l3_b64);
+    if (!decoded) return 1;
+    const std::string l3_wire(decoded->begin(), decoded->end());
     // now_unix = 0: the browser already judged freshness against its own
     // clock before forwarding, so the renderer verifies the digest and the
     // launch consistency gate only. A real timestamp here would reject every
