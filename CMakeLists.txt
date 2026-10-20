@@ -60,6 +60,26 @@ target_compile_features(extension_pin PUBLIC cxx_std_20)
 add_executable(extension_pin_test native/extension_pin_test.cc)
 target_link_libraries(extension_pin_test PRIVATE extension_pin)
 
+# L3W1 document decoder plus the renderer-side runtime. The test executables
+# link the whole primitive set because l3_wire's header exposes it all.
+add_library(l3_wire native/l3_wire.cc native/storage_pin.cc
+            native/storage_consistency.cc native/cache_record.cc
+            native/extension_pin.cc)
+target_compile_features(l3_wire PUBLIC cxx_std_20)
+add_executable(l3_wire_test native/l3_wire_test.cc)
+target_link_libraries(l3_wire_test PRIVATE l3_wire)
+
+add_library(l3_runtime native/l3_runtime.cc)
+target_compile_features(l3_runtime PUBLIC cxx_std_20)
+target_link_libraries(l3_runtime PUBLIC l3_wire)
+add_executable(l3_runtime_test native/l3_runtime_test.cc)
+target_link_libraries(l3_runtime_test PRIVATE l3_runtime)
+
+add_executable(l3_bootstrap_test integration/l3_bootstrap_test.cc)
+target_compile_features(l3_bootstrap_test PUBLIC cxx_std_20)
+target_link_libraries(l3_bootstrap_test PRIVATE l3_wire)
+target_include_directories(l3_bootstrap_test PRIVATE ${CMAKE_CURRENT_SOURCE_DIR})
+
 foreach(native_target profile_wire profile_wire_test golden_v2_decoder_test
                       profile_catalog profile_catalog_test canvas_noise
                       canvas_noise_test storage_pin storage_pin_test
@@ -67,7 +87,8 @@ foreach(native_target profile_wire profile_wire_test golden_v2_decoder_test
                       cache_record cache_record_test extension_pin
                       extension_pin_test font_family_traits
                       font_family_traits_test font_metrics font_metrics_test
-                      font_switch_test)
+                      font_switch_test l3_wire l3_wire_test l3_runtime
+                      l3_runtime_test l3_bootstrap_test)
   if(MSVC)
     target_compile_options(${native_target} PRIVATE /W4 /WX)
   else()
@@ -99,7 +120,8 @@ else()
 endif()
 
 foreach(l3_test storage_pin_test storage_consistency_test cache_record_test
-               extension_pin_test)
+               extension_pin_test l3_wire_test l3_runtime_test
+               l3_bootstrap_test)
   target_link_libraries(${l3_test} PRIVATE ${L3_GTEST_TARGET})
 endforeach()
 
@@ -112,6 +134,9 @@ add_test(NAME storage_pin COMMAND storage_pin_test)
 add_test(NAME storage_consistency COMMAND storage_consistency_test)
 add_test(NAME cache_record COMMAND cache_record_test)
 add_test(NAME extension_pin COMMAND extension_pin_test)
+add_test(NAME l3_wire COMMAND l3_wire_test)
+add_test(NAME l3_runtime COMMAND l3_runtime_test)
+add_test(NAME l3_bootstrap COMMAND l3_bootstrap_test)
 add_test(NAME font_family_traits COMMAND font_family_traits_test)
 add_test(NAME font_metrics COMMAND font_metrics_test)
 add_test(NAME font_switch COMMAND font_switch_test)

@@ -60,3 +60,30 @@ source_set("extension_pin") {
     "extension_pin.h",
   ]
 }
+
+# L3W1 document decoder: the single configuration entry point for the storage
+# layer. It pulls the four primitives above into one target because the
+# decoder's public header exposes all of them in L3Config; consumers only need
+# this label.
+source_set("l3_wire") {
+  sources = [
+    "l3_wire.cc",
+    "l3_wire.h",
+  ]
+  public_deps = [
+    ":cache_record",
+    ":extension_pin",
+    ":storage_consistency",
+    ":storage_pin",
+  ]
+}
+
+# Renderer-side query surface over a frozen snapshot. Blink calls this instead
+# of parsing documents itself.
+source_set("l3_runtime") {
+  sources = [
+    "l3_runtime.cc",
+    "l3_runtime.h",
+  ]
+  public_deps = [ ":l3_wire" ]
+}
