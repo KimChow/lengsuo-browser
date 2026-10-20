@@ -157,7 +157,7 @@ index 19045777b3..a48f5cad19 100644
        Profile::FromBrowserContext(browser_context)
            ->GetPrefs()
 diff --git a/content/renderer/renderer_main.cc b/content/renderer/renderer_main.cc
-index 2fd21f7ee5..85ade3471a 100644
+index 2fd21f7ee5..8df1a19268 100644
 --- a/content/renderer/renderer_main.cc
 +++ b/content/renderer/renderer_main.cc
 @@ -89,6 +89,12 @@
@@ -173,7 +173,7 @@ index 2fd21f7ee5..85ade3471a 100644
  namespace content {
  namespace {
  
-@@ -155,6 +161,56 @@ int RendererMain(MainFunctionParams parameters) {
+@@ -155,6 +161,61 @@ int RendererMain(MainFunctionParams parameters) {
  
    const base::CommandLine& command_line = *parameters.command_line;
  
@@ -188,8 +188,13 @@ index 2fd21f7ee5..85ade3471a 100644
 +    const std::string l3_wire =
 +        command_line.GetSwitchValueASCII("lengsuo-managed-l3");
 +    if (l3_wire.empty()) return 1;
-+    if (!lengsuo::fp::GetL3Runtime().Init(l3_wire, /*now_unix=*/1,
-+                                          /*max_age_seconds=*/1)) {
++    // now_unix = 0: the browser already judged freshness against its own
++    // clock before forwarding, so the renderer verifies the digest and the
++    // launch consistency gate only. A real timestamp here would reject every
++    // document as "too new", because the renderer has no clock to compare it
++    // against.
++    if (!lengsuo::fp::GetL3Runtime().Init(l3_wire, /*now_unix=*/0,
++                                          /*max_age_seconds=*/0)) {
 +      return 1;
 +    }
 +  }
