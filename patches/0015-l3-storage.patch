@@ -1,12 +1,171 @@
+diff --git a/chrome/browser/chrome_browser_main.cc b/chrome/browser/chrome_browser_main.cc
+index cbf3b6c563..43eed29d27 100644
+--- a/chrome/browser/chrome_browser_main.cc
++++ b/chrome/browser/chrome_browser_main.cc
+@@ -4,6 +4,11 @@
+ 
+ #include "chrome/browser/chrome_browser_main.h"
+ 
++#include "lengsuo/integration/browser_bootstrap.h"
++
++#include "lengsuo/integration/browser_bootstrap.h"
++#include "lengsuo/integration/official_defaults.h"
++
+ #include <memory>
+ #include <string>
+ #include <tuple>
+@@ -1004,6 +1009,28 @@ void ChromeBrowserMainParts::RecordBrowserStartupTime() {
+ 
+ int ChromeBrowserMainParts::PreEarlyInitialization() {
+   TRACE_EVENT0("startup", "ChromeBrowserMainParts::PreEarlyInitialization");
++  // Align feature defaults with shipped Chrome. Must happen before field
++  // trials are loaded below, or the appended switch is ignored.
++  lengsuo::ApplyOfficialFeatureDefaults(base::CommandLine::ForCurrentProcess());
++
++  if (!lengsuo::InitializeBrowserProfile(*base::CommandLine::ForCurrentProcess())) {
++    LOG(ERROR) << "Lengsuo profile bootstrap rejected";
++    return CHROME_RESULT_CODE_INVALID_CMDLINE_URL;
++  }
++
++  // Storage-layer pins (L3). A requested but unreadable or unverifiable
++  // document aborts startup: continuing would unpin values a platform may
++  // already have observed, which reads as "the device changed".
++  if (!lengsuo::InitializeBrowserL3(*base::CommandLine::ForCurrentProcess())) {
++    LOG(ERROR) << "Lengsuo L3 bootstrap rejected";
++    return CHROME_RESULT_CODE_INVALID_CMDLINE_URL;
++  }
++
++  if (!lengsuo::InitializeBrowserProfile(*base::CommandLine::ForCurrentProcess())) {
++    LOG(ERROR) << "Lengsuo profile bootstrap rejected";
++    return CHROME_RESULT_CODE_INVALID_CMDLINE_URL;
++  }
++
+   for (auto& chrome_extra_part : chrome_extra_parts_) {
+     chrome_extra_part->PreEarlyInitialization();
+   }
+diff --git a/chrome/browser/chrome_content_browser_client.cc b/chrome/browser/chrome_content_browser_client.cc
+index 19045777b3..a48f5cad19 100644
+--- a/chrome/browser/chrome_content_browser_client.cc
++++ b/chrome/browser/chrome_content_browser_client.cc
+@@ -4,6 +4,8 @@
+ 
+ #include "chrome/browser/chrome_content_browser_client.h"
+ 
++#include "lengsuo/integration/browser_bootstrap.h"
++
+ #include <algorithm>
+ #include <iterator>
+ #include <map>
+@@ -2893,12 +2895,37 @@ void MaybeAppendBlinkSettingsSwitchForFieldTrial(
+ void ChromeContentBrowserClient::AppendExtraCommandLineSwitches(
+     base::CommandLine* command_line,
+     int child_process_id) {
++  if (command_line->GetSwitchValueASCII(switches::kProcessType) ==
++      switches::kRendererProcess) {
++    if (const auto* browser_profile = lengsuo::BrowserProfile())
++      command_line->AppendSwitchASCII("lengsuo-managed-language",
++                                      browser_profile->language);
++    // Storage-layer pins (L3). The document is re-serialized from the frozen
++    // snapshot and base64-encoded, so the renderer receives exactly what the
++    // browser verified. Transitional transport; see docs/fp-switch-contract.md
++    // for the move to a managed file plus Mojo.
++    if (const std::string l3_b64 = lengsuo::BrowserL3Base64();
++        !l3_b64.empty() && !command_line->HasSwitch("lengsuo-managed-l3")) {
++      command_line->AppendSwitchASCII("lengsuo-managed-l3", l3_b64);
++    }
++  }
+   crash_keys::AppendStringAnnotationsCommandLineSwitch(command_line);
+ #if BUILDFLAG(IS_MAC)
+   std::unique_ptr<metrics::ClientInfo> client_info =
+       GoogleUpdateSettings::LoadMetricsClientInfo();
+   if (client_info) {
+     command_line->AppendSwitchASCII(switches::kMetricsClientID,
++    // Same direct-passthrough for the font dimension. It is a {switcher,
++    // value, mask} triple whose value can be ~4 KB, so it travels in its own
++    // switch rather than a colon field of --lengsuo-managed-fp
++    // (docs/fp-switch-contract.md). Appended verbatim from the browser's own
++    // command line; profile-wire delivery waits on the schema-2 gate.
++    if (browser_cmd.HasSwitch("lengsuo-managed-fonts") &&
++        !command_line->HasSwitch("lengsuo-managed-fonts")) {
++      command_line->AppendSwitchASCII(
++          "lengsuo-managed-fonts",
++          browser_cmd.GetSwitchValueASCII("lengsuo-managed-fonts"));
++    }
+                                     client_info->client_id);
+   }
+ #elif BUILDFLAG(IS_POSIX)
+@@ -3285,6 +3312,8 @@ ChromeContentBrowserClient::GetQuarantineConnectionCallback() {
+ }
+ 
+ std::string ChromeContentBrowserClient::GetApplicationLocale() {
++  if (const auto* browser_profile = lengsuo::BrowserProfile())
++    return browser_profile->language;
+   if (BrowserThread::CurrentlyOn(BrowserThread::IO)) {
+     return GetIOThreadApplicationLocale();
+   }
+@@ -3293,6 +3322,8 @@ std::string ChromeContentBrowserClient::GetApplicationLocale() {
+ 
+ std::string ChromeContentBrowserClient::GetAcceptLangs(
+     content::BrowserContext* context) {
++  if (const auto* browser_profile = lengsuo::BrowserProfile())
++    return browser_profile->language;
+   Profile* profile = Profile::FromBrowserContext(context);
+   return profile->GetPrefs()->GetString(language::prefs::kAcceptLanguages);
+ }
+@@ -4885,6 +4916,7 @@ void ChromeContentBrowserClient::OverrideWebPreferences(
+   for (auto& parts : extra_parts_) {
+     parts->OverrideWebPreferences(web_contents, main_frame_site, web_prefs);
+   }
++  lengsuo::ApplyProfileTouchPreferences(web_prefs);
+ 
+   web_prefs->prefers_default_scrollbar_styles =
+       prefs->GetBoolean(prefs::kPrefersDefaultScrollbarStyles);
+@@ -4966,6 +4998,7 @@ bool ChromeContentBrowserClient::OverrideWebPreferencesAfterNavigation(
+     prefs_changed |= parts->OverrideWebPreferencesAfterNavigation(
+         web_contents, main_frame_site, web_prefs);
+   }
++  prefs_changed |= lengsuo::ApplyProfileTouchPreferences(web_prefs);
+ 
+   const auto old_in_forced_colors = web_prefs->in_forced_colors;
+   const auto old_is_forced_colors_disabled =
+@@ -7727,12 +7760,17 @@ std::string ChromeContentBrowserClient::GetProduct() {
+ }
+ 
+ std::string ChromeContentBrowserClient::GetUserAgent() {
++  if (const auto* ua = lengsuo::BrowserUa())
++    return ua->ua_string;
+   return embedder_support::GetUserAgent();
+ }
+ 
+ blink::UserAgentMetadata ChromeContentBrowserClient::GetUserAgentMetadata() {
+   DCHECK_CURRENTLY_ON(BrowserThread::UI);
+-  return embedder_support::GetUserAgentMetadata();
++  auto metadata = embedder_support::GetUserAgentMetadata();
++  if (const auto* ua = lengsuo::BrowserUa())
++    lengsuo::ApplyUaMetadata(*ua, &metadata);
++  return metadata;
+ }
+ 
+ std::optional<gfx::ImageSkia> ChromeContentBrowserClient::GetProductLogo() {
+@@ -9093,6 +9131,8 @@ bool ChromeContentBrowserClient::IsBlobUrlPartitioningEnabled(
+ bool ChromeContentBrowserClient::ShouldReduceAcceptLanguage(
+     content::BrowserContext* browser_context) {
+   DCHECK_CURRENTLY_ON(BrowserThread::UI);
++  // Managed profiles freeze one explicit language; do not negotiate from host prefs.
++  if (lengsuo::BrowserProfile()) return false;
+   const PrefService::Preference* pref =
+       Profile::FromBrowserContext(browser_context)
+           ->GetPrefs()
 diff --git a/content/renderer/renderer_main.cc b/content/renderer/renderer_main.cc
-index 2fd21f7ee5..4731d25127 100644
+index 2fd21f7ee5..85ade3471a 100644
 --- a/content/renderer/renderer_main.cc
 +++ b/content/renderer/renderer_main.cc
-@@ -89,6 +89,11 @@
+@@ -89,6 +89,12 @@
  #include "mojo/public/cpp/bindings/lib/test_random_mojo_delays.h"
  #endif
  
 +#include "lengsuo/native/l3_runtime.h"
++#include "base/base64.h"
 +
 +#include "lengsuo/native/canvas_apply.h"
 +#include "lengsuo/native/fp_overrides.h"
@@ -14,7 +173,7 @@ index 2fd21f7ee5..4731d25127 100644
  namespace content {
  namespace {
  
-@@ -155,6 +160,56 @@ int RendererMain(MainFunctionParams parameters) {
+@@ -155,6 +161,56 @@ int RendererMain(MainFunctionParams parameters) {
  
    const base::CommandLine& command_line = *parameters.command_line;
  
