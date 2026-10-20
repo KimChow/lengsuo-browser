@@ -26,6 +26,7 @@
 #define LENGSUO_NATIVE_STORAGE_CONSISTENCY_H_
 
 #include <string>
+#include <string_view>
 #include <vector>
 
 namespace lengsuo::fp {
@@ -61,6 +62,17 @@ std::vector<Mismatch> CheckConsistency(
     const std::vector<CookieFact>& cookies,
     const std::vector<StorageFact>& storage,
     const std::vector<ConsistencyRule>& rules);
+
+// RFC 6265 5.1.3 domain matching, exported so the cookie side of the
+// cross-store lock (native/cookie_mirror.h) matches domains exactly the way
+// the consistency checker does - one implementation, one answer.
+//
+// `host` is the concrete page host, `domain` is the domain a rule or a
+// pinned cookie declared. A leading dot on either side is ignored, matching
+// is ASCII case-insensitive, and `domain` covers `host` itself plus every
+// dot-suffixed subdomain of it (".pinduoduo.com" covers
+// "mms.pinduoduo.com"). An empty `domain` matches nothing.
+bool CookieDomainMatches(std::string_view host, std::string_view domain);
 
 }  // namespace lengsuo::fp
 

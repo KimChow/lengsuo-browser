@@ -29,23 +29,6 @@ std::string_view StripLeadingDot(std::string_view value) {
   return value;
 }
 
-// RFC 6265 5.1.3: empty domain matches nothing; otherwise the host is either
-// equal to the rule domain or ends with "." + rule domain.
-bool CookieDomainMatches(std::string_view host, std::string_view rule_domain) {
-  host = StripLeadingDot(host);
-  rule_domain = StripLeadingDot(rule_domain);
-  if (rule_domain.empty()) {
-    return false;
-  }
-  if (EqualsIgnoreCase(host, rule_domain)) {
-    return true;
-  }
-  return host.size() > rule_domain.size() &&
-         host[host.size() - rule_domain.size() - 1] == '.' &&
-         EqualsIgnoreCase(host.substr(host.size() - rule_domain.size()),
-                          rule_domain);
-}
-
 // Duplicate facts are outside the contract. First match wins; the choice is
 // flagged in the task-F report rather than settled here.
 const CookieFact* FindCookie(const std::vector<CookieFact>& cookies,
@@ -94,6 +77,20 @@ std::vector<Mismatch> CheckConsistency(
         Mismatch{rule, std::string(cookie_value), std::string(storage_value)});
   }
   return mismatches;
+}
+
+bool CookieDomainMatches(std::string_view host, std::string_view domain) {
+  host = StripLeadingDot(host);
+  domain = StripLeadingDot(domain);
+  if (domain.empty()) {
+    return false;
+  }
+  if (EqualsIgnoreCase(host, domain)) {
+    return true;
+  }
+  return host.size() > domain.size() &&
+         host[host.size() - domain.size() - 1] == '.' &&
+         EqualsIgnoreCase(host.substr(host.size() - domain.size()), domain);
 }
 
 }  // namespace lengsuo::fp

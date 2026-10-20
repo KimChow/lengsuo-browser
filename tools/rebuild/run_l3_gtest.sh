@@ -50,6 +50,7 @@ TARGETS=(
   "l3_wire|native/l3_wire.cc native/storage_pin.cc native/storage_consistency.cc native/cache_record.cc native/extension_pin.cc"
   "l3_runtime|native/l3_runtime.cc native/l3_wire.cc native/storage_pin.cc native/storage_consistency.cc native/cache_record.cc native/extension_pin.cc"
   "l3_bootstrap|integration/l3_bootstrap.cc native/l3_wire.cc native/storage_pin.cc native/storage_consistency.cc native/cache_record.cc native/extension_pin.cc"
+  "cookie_mirror|native/cookie_mirror.cc native/storage_consistency.cc native/storage_pin.cc native/l3_wire.cc native/cache_record.cc native/extension_pin.cc"
 )
 
 FAILED=()

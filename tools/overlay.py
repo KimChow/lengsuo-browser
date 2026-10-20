@@ -54,6 +54,8 @@ MAPPING = (
     ("native/cache_record.cc", "lengsuo/native/cache_record.cc"),
     ("native/extension_pin.h", "lengsuo/native/extension_pin.h"),
     ("native/extension_pin.cc", "lengsuo/native/extension_pin.cc"),
+    ("native/cookie_mirror.h", "lengsuo/native/cookie_mirror.h"),
+    ("native/cookie_mirror.cc", "lengsuo/native/cookie_mirror.cc"),
     ("integration/l3_bootstrap.h", "lengsuo/integration/l3_bootstrap.h"),
     ("integration/l3_bootstrap.cc", "lengsuo/integration/l3_bootstrap.cc"),
     ("integration/BUILD.gn", "lengsuo/integration/BUILD.gn"),

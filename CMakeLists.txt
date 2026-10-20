@@ -80,6 +80,15 @@ target_compile_features(l3_bootstrap_test PUBLIC cxx_std_20)
 target_link_libraries(l3_bootstrap_test PRIVATE l3_wire)
 target_include_directories(l3_bootstrap_test PRIVATE ${CMAKE_CURRENT_SOURCE_DIR})
 
+# Cookie side of the cross-store lock: the policy that decides which cookies a
+# frozen snapshot owns, and how a browser cookie line is merged with it. The
+# Blink wiring is a separate patch; this is the decision logic on its own.
+add_library(cookie_mirror native/cookie_mirror.cc native/storage_consistency.cc
+            native/storage_pin.cc)
+target_compile_features(cookie_mirror PUBLIC cxx_std_20)
+add_executable(cookie_mirror_test native/cookie_mirror_test.cc)
+target_link_libraries(cookie_mirror_test PRIVATE cookie_mirror)
+
 foreach(native_target profile_wire profile_wire_test golden_v2_decoder_test
                       profile_catalog profile_catalog_test canvas_noise
                       canvas_noise_test storage_pin storage_pin_test
@@ -88,7 +97,8 @@ foreach(native_target profile_wire profile_wire_test golden_v2_decoder_test
                       extension_pin_test font_family_traits
                       font_family_traits_test font_metrics font_metrics_test
                       font_switch_test l3_wire l3_wire_test l3_runtime
-                      l3_runtime_test l3_bootstrap_test)
+                      l3_runtime_test l3_bootstrap_test cookie_mirror
+                      cookie_mirror_test)
   if(MSVC)
     target_compile_options(${native_target} PRIVATE /W4 /WX)
   else()

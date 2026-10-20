@@ -61,6 +61,18 @@ source_set("extension_pin") {
   ]
 }
 
+# Cookie side of the cross-store lock. It answers three questions from a
+# frozen snapshot: what value a page reads, whether a write must be refused,
+# and how a browser cookie line merges with the snapshot. The Blink wiring
+# is a separate patch; this target is the decision logic on its own.
+source_set("cookie_mirror") {
+  sources = [
+    "cookie_mirror.cc",
+    "cookie_mirror.h",
+  ]
+  public_deps = [ ":storage_consistency" ]
+}
+
 # L3W1 document decoder: the single configuration entry point for the storage
 # layer. It pulls the four primitives above into one target because the
 # decoder's public header exposes all of them in L3Config; consumers only need

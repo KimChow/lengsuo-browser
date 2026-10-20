@@ -1221,10 +1221,10 @@ index 0000000..3bd62d6
 +#endif
 diff --git a/lengsuo/native/BUILD.gn b/lengsuo/native/BUILD.gn
 new file mode 100644
-index 0000000..0a556f4
+index 0000000..d52f89e
 --- /dev/null
 +++ b/lengsuo/native/BUILD.gn
-@@ -0,0 +1,89 @@
+@@ -0,0 +1,101 @@
 +# Decoder source sets. Chromium integration evidence lives in VERIFICATION.md.
 +source_set("profile_wire") {
 +  sources = [
@@ -1286,6 +1286,18 @@ index 0000000..0a556f4
 +    "extension_pin.cc",
 +    "extension_pin.h",
 +  ]
++}
++
++# Cookie side of the cross-store lock. It answers three questions from a
++# frozen snapshot: what value a page reads, whether a write must be refused,
++# and how a browser cookie line merges with the snapshot. The Blink wiring
++# is a separate patch; this target is the decision logic on its own.
++source_set("cookie_mirror") {
++  sources = [
++    "cookie_mirror.cc",
++    "cookie_mirror.h",
++  ]
++  public_deps = [ ":storage_consistency" ]
 +}
 +
 +# L3W1 document decoder: the single configuration entry point for the storage
@@ -2312,6 +2324,320 @@ index 0000000..b6cced4
 +}  // namespace lengsuo::canvas
 +
 +#endif  // LENGSUO_NATIVE_CANVAS_NOISE_H_
+diff --git a/lengsuo/native/cookie_mirror.cc b/lengsuo/native/cookie_mirror.cc
+new file mode 100644
+index 0000000..042ebf1
+--- /dev/null
++++ b/lengsuo/native/cookie_mirror.cc
+@@ -0,0 +1,198 @@
++#include "cookie_mirror.h"
++
++#include <algorithm>
++#include <string_view>
++#include <utility>
++
++namespace lengsuo::fp {
++namespace {
++
++// Two declared domains describe the same cookie when each one covers the
++// other: after the leading dot is dropped and case is folded, that is only
++// true for equal hosts (".example.com" and "example.com" are one domain in
++// RFC 6265 5.3, while "a.example.com" stays distinct from "example.com").
++bool SameDomain(const std::string& left, const std::string& right) {
++  return CookieDomainMatches(left, right) &&
++         CookieDomainMatches(right, left);
++}
++
++// The number of characters of a declared domain, used to rank a match: the
++// most specific domain wins, the way the browser resolves two cookies that
++// share a name. The leading dot is not counted - it is RFC 6265 5.3 syntax
++// for the same domain, not a different one.
++std::size_t EffectiveDomainLength(const std::string& domain) {
++  return !domain.empty() && domain.front() == '.' ? domain.size() - 1
++                                                  : domain.size();
++}
++
++// Splits a Chromium cookie line ("name=value; name2=value2") into its
++// entries. The browser never emits a name containing '=' or ';', but a
++// defensive parse keeps one malformed entry from taking the whole answer
++// down.
++std::vector<std::string_view> SplitCookieLine(std::string_view line) {
++  std::vector<std::string_view> entries;
++  std::size_t start = 0;
++  while (start <= line.size()) {
++    const std::size_t separator = line.find(';', start);
++    const std::size_t end =
++        separator == std::string_view::npos ? line.size() : separator;
++    std::string_view entry = line.substr(start, end - start);
++    // Chromium writes "; " between entries.
++    while (!entry.empty() && (entry.front() == ' ' || entry.front() == '\t')) {
++      entry.remove_prefix(1);
++    }
++    while (!entry.empty() && (entry.back() == ' ' || entry.back() == '\t')) {
++      entry.remove_suffix(1);
++    }
++    if (!entry.empty()) {
++      entries.push_back(entry);
++    }
++    if (separator == std::string_view::npos) {
++      break;
++    }
++    start = separator + 1;
++  }
++  return entries;
++}
++
++// The name part of a "name=value" entry.
++std::string_view EntryName(std::string_view entry) {
++  const std::size_t equals = entry.find('=');
++  return equals == std::string_view::npos ? entry : entry.substr(0, equals);
++}
++
++}  // namespace
++
++void CookieMirror::Init(std::vector<CookieFact> cookies,
++                        std::vector<ConsistencyRule> rules) {
++  // Collapse repeated (domain, name) pairs the way StoragePin collapses
++  // repeated (origin, scope, key): the last value wins, the first position
++  // is kept. Without this the most specific domain could be shadowed by
++  // whichever entry happened to be declared last.
++  std::vector<CookieFact> collapsed;
++  for (CookieFact& fact : cookies) {
++    const auto existing = std::find_if(
++        collapsed.begin(), collapsed.end(),
++        [&fact](const CookieFact& other) {
++          return other.name == fact.name && SameDomain(other.domain, fact.domain);
++        });
++    if (existing == collapsed.end()) {
++      collapsed.push_back(std::move(fact));
++    } else {
++      existing->value = std::move(fact.value);
++    }
++  }
++  cookies_ = std::move(collapsed);
++  rules_ = std::move(rules);
++}
++
++std::optional<std::string> CookieMirror::Lookup(const std::string& host,
++                                                const std::string& name) const {
++  const CookieFact* best = nullptr;
++  for (const CookieFact& fact : cookies_) {
++    if (fact.name != name || !CookieDomainMatches(host, fact.domain)) {
++      continue;
++    }
++    // Most specific domain wins; a tie keeps the earlier declaration.
++    if (best == nullptr ||
++        EffectiveDomainLength(fact.domain) > EffectiveDomainLength(best->domain)) {
++      best = &fact;
++    }
++  }
++  if (best == nullptr) {
++    return std::nullopt;
++  }
++  return best->value;
++}
++
++bool CookieMirror::IsLocked(const std::string& host,
++                            const std::string& name) const {
++  // A pinned cookie is read-only, exactly like a pinned localStorage key.
++  //
++  // A rule on its own does not lock anything: the localStorage side locks a
++  // key only when that key is pinned, so locking a cookie that only a rule
++  // names would make the two halves disagree. The launch consistency gate
++  // (l3_wire) already guarantees that a rule whose storage side is pinned has
++  // its cookie side declared, so a valid snapshot never needs the extra rule.
++  for (const CookieFact& fact : cookies_) {
++    if (fact.name == name && CookieDomainMatches(host, fact.domain)) {
++      return true;
++    }
++  }
++  return false;
++}
++
++std::optional<ConsistencyRule> CookieMirror::PairFor(
++    const std::string& host, const std::string& name) const {
++  for (const ConsistencyRule& rule : rules_) {
++    if (rule.cookie_name == name &&
++        CookieDomainMatches(host, rule.cookie_domain)) {
++      return rule;
++    }
++  }
++  return std::nullopt;
++}
++
++std::string CookieMirror::MergeCookieLine(const std::string& host,
++                                          std::string_view browser_line) const {
++  // The pinned cookies of this host, grouped by name. The representative of a
++  // name is the most specific domain, the same one Lookup returns, so the
++  // merged line and the single-value query never disagree.
++  std::vector<const CookieFact*> pinned;
++  for (const CookieFact& fact : cookies_) {
++    if (!CookieDomainMatches(host, fact.domain)) {
++      continue;
++    }
++    const auto same_name = std::find_if(
++        pinned.begin(), pinned.end(),
++        [&fact](const CookieFact* other) { return other->name == fact.name; });
++    if (same_name == pinned.end()) {
++      pinned.push_back(&fact);
++    } else if (EffectiveDomainLength(fact.domain) > EffectiveDomainLength((*same_name)->domain)) {
++      *same_name = &fact;
++    }
++  }
++  if (pinned.empty()) {
++    return std::string(browser_line);
++  }
++
++  // The browser line carries no domain and no path, so a pinned cookie can
++  // only be matched by name. A matching entry keeps its place in the line but
++  // takes the pinned value: the snapshot is authoritative, and a stale value
++  // sitting next to the pinned one is exactly the drift the platform sees.
++  std::vector<std::string> entries;
++  std::vector<bool> pinned_used(pinned.size(), false);
++  for (const std::string_view entry : SplitCookieLine(browser_line)) {
++    const std::string_view entry_name = EntryName(entry);
++    bool replaced = false;
++    for (std::size_t i = 0; i < pinned.size(); ++i) {
++      if (pinned[i]->name == entry_name) {
++        entries.emplace_back(pinned[i]->name + "=" + pinned[i]->value);
++        pinned_used[i] = true;
++        replaced = true;
++      }
++    }
++    if (!replaced) {
++      entries.emplace_back(entry);
++    }
++  }
++
++  // A pinned cookie the browser does not carry is appended, so the page still
++  // sees the value the environment declared.
++  for (std::size_t i = 0; i < pinned.size(); ++i) {
++    if (!pinned_used[i]) {
++      entries.emplace_back(pinned[i]->name + "=" + pinned[i]->value);
++    }
++  }
++
++  std::string merged;
++  for (const std::string& entry : entries) {
++    if (!merged.empty()) {
++      merged += "; ";
++    }
++    merged += entry;
++  }
++  return merged;
++}
++
++}  // namespace lengsuo::fp
+diff --git a/lengsuo/native/cookie_mirror.h b/lengsuo/native/cookie_mirror.h
+new file mode 100644
+index 0000000..0b0dd10
+--- /dev/null
++++ b/lengsuo/native/cookie_mirror.h
+@@ -0,0 +1,104 @@
++// cookie_mirror - the cookie half of the L3 cross-store lock (task M).
++//
++// The L3 document declares two things that have to stay in lockstep:
++//   * the "cookies" section: the cookie values this environment is pinned to,
++//   * the "rules" section: which cookie mirrors which localStorage key.
++//
++// The localStorage half is already enforced (Blink's StorageArea reads and
++// writes through the frozen snapshot, see patches/0015-l3-storage.patch).
++// This class is the cookie half: it answers "what value does this page see
++// for this cookie" and "may this page write this cookie", always from the
++// snapshot, never from the live cookie jar.
++//
++// The renderer cannot see the live jar: Blink's CookieJar talks to the
++// network service over Mojo, so the jar lives in the browser process. The
++// snapshot is the only cookie state a renderer can hold, and it is the very
++// document the browser already hands down (--lengsuo-managed-l3). The Blink
++// interception points that would consume this class are outside this task's
++// file scope; they are described in docs/l3-reports/task-M.md. This task
++// delivers the policy, not the patch.
++//
++// Contract:
++//   * Domain matching reuses storage_consistency::CookieDomainMatches
++//     (RFC 6265 5.1.3): ASCII case-insensitive, a leading dot is ignored, and
++//     a declared domain covers the host itself and its dot-suffixed
++//     subdomains. `host` is the concrete page host, `domain` is what the
++//     document declared.
++//   * Cookie *names* are compared byte-exactly. RFC 6265 5.4 makes names
++//     case-sensitive, and a case-insensitive match would let a page write
++//     "_BEE" over a pinned "_bee" and drift the environment.
++//   * A pinned cookie is read-only. A cookie that only appears as the cookie
++//     half of a mirror rule is read-only as well, so that a page cannot
++//     create one half of a pair the environment does not carry.
++//   * Nothing here logs, hashes or serializes a value: pinned values are
++//     device identity, not diagnostics (docs/fp-switch-contract.md).
++#ifndef LENGSUO_NATIVE_COOKIE_MIRROR_H_
++#define LENGSUO_NATIVE_COOKIE_MIRROR_H_
++
++#include <cstddef>
++#include <optional>
++#include <string>
++#include <string_view>
++#include <vector>
++
++#include "storage_consistency.h"
++
++namespace lengsuo::fp {
++
++// The cookie-side view of a frozen L3 snapshot. No IO, no clock, no browser
++// state: the snapshot is the whole world.
++class CookieMirror {
++ public:
++  CookieMirror() = default;
++
++  // Installs the snapshot. The document was already validated by the L3
++  // decoder (l3_wire), so this only copies - there is no second error path.
++  //
++  // Repeated (domain, name) entries collapse to one: the last value wins and
++  // the first position is kept, the same rule StoragePin uses.
++  void Init(std::vector<CookieFact> cookies,
++            std::vector<ConsistencyRule> rules);
++
++  // The value a page on `host` sees for `name`, or no value when the snapshot
++  // declares no such cookie. An empty string is a valid value and comes back
++  // as a value, not as "absent".
++  //
++  // When several declared cookies match the host and the name, the one with
++  // the longest domain wins - the same precedence the browser applies to
++  // cookies of the same name (RFC 6265 5.1.3).
++  std::optional<std::string> Lookup(const std::string& host,
++                                    const std::string& name) const;
++
++  // True when a write to (host, name) has to be dropped.
++  bool IsLocked(const std::string& host, const std::string& name) const;
++
++  // The mirror rule that names this cookie, when there is one. The first
++  // matching rule wins; a cookie named by several rules is a document
++  // authoring error and is flagged in the task-M report.
++  std::optional<ConsistencyRule> PairFor(const std::string& host,
++                                          const std::string& name) const;
++
++  // The browser's cookie line with the pinned cookies of `host` applied: a
++  // pinned cookie replaces the browser's value in place, a pinned cookie the
++  // browser does not carry is appended. Every other cookie and the browser's
++  // own ordering are preserved.
++  //
++  // The browser line is Chromium's "name=value; name2=value2" form
++  // (net/cookies/canonical_cookie.cc, AppendCookieLineEntry).
++  std::string MergeCookieLine(const std::string& host,
++                              std::string_view browser_line) const;
++
++  // The pinned cookies a page on `host` can see, in declaration order.
++  std::vector<CookieFact> VisibleCookies(const std::string& host) const;
++
++  // Number of distinct pinned cookies.
++  std::size_t size() const { return cookies_.size(); }
++
++ private:
++  std::vector<CookieFact> cookies_;
++  std::vector<ConsistencyRule> rules_;
++};
++
++}  // namespace lengsuo::fp
++
++#endif  // LENGSUO_NATIVE_COOKIE_MIRROR_H_
 diff --git a/lengsuo/native/extension_pin.cc b/lengsuo/native/extension_pin.cc
 new file mode 100644
 index 0000000..92ce928
@@ -4428,10 +4754,10 @@ index 0000000..505f2d3
 +#endif
 diff --git a/lengsuo/native/storage_consistency.cc b/lengsuo/native/storage_consistency.cc
 new file mode 100644
-index 0000000..e1057c9
+index 0000000..997baab
 --- /dev/null
 +++ b/lengsuo/native/storage_consistency.cc
-@@ -0,0 +1,99 @@
+@@ -0,0 +1,96 @@
 +#include "storage_consistency.h"
 +
 +#include <cstddef>
@@ -4461,23 +4787,6 @@ index 0000000..e1057c9
 +    value.remove_prefix(1);
 +  }
 +  return value;
-+}
-+
-+// RFC 6265 5.1.3: empty domain matches nothing; otherwise the host is either
-+// equal to the rule domain or ends with "." + rule domain.
-+bool CookieDomainMatches(std::string_view host, std::string_view rule_domain) {
-+  host = StripLeadingDot(host);
-+  rule_domain = StripLeadingDot(rule_domain);
-+  if (rule_domain.empty()) {
-+    return false;
-+  }
-+  if (EqualsIgnoreCase(host, rule_domain)) {
-+    return true;
-+  }
-+  return host.size() > rule_domain.size() &&
-+         host[host.size() - rule_domain.size() - 1] == '.' &&
-+         EqualsIgnoreCase(host.substr(host.size() - rule_domain.size()),
-+                          rule_domain);
 +}
 +
 +// Duplicate facts are outside the contract. First match wins; the choice is
@@ -4530,13 +4839,27 @@ index 0000000..e1057c9
 +  return mismatches;
 +}
 +
++bool CookieDomainMatches(std::string_view host, std::string_view domain) {
++  host = StripLeadingDot(host);
++  domain = StripLeadingDot(domain);
++  if (domain.empty()) {
++    return false;
++  }
++  if (EqualsIgnoreCase(host, domain)) {
++    return true;
++  }
++  return host.size() > domain.size() &&
++         host[host.size() - domain.size() - 1] == '.' &&
++         EqualsIgnoreCase(host.substr(host.size() - domain.size()), domain);
++}
++
 +}  // namespace lengsuo::fp
 diff --git a/lengsuo/native/storage_consistency.h b/lengsuo/native/storage_consistency.h
 new file mode 100644
-index 0000000..86cef5a
+index 0000000..1132777
 --- /dev/null
 +++ b/lengsuo/native/storage_consistency.h
-@@ -0,0 +1,67 @@
+@@ -0,0 +1,79 @@
 +// storage_consistency v1 - cookie <-> localStorage cross-check (task F).
 +//
 +// 对标端 pins the device fields a platform generated by keeping the Cookie copy
@@ -4565,6 +4888,7 @@ index 0000000..86cef5a
 +#define LENGSUO_NATIVE_STORAGE_CONSISTENCY_H_
 +
 +#include <string>
++#include <string_view>
 +#include <vector>
 +
 +namespace lengsuo::fp {
@@ -4600,6 +4924,17 @@ index 0000000..86cef5a
 +    const std::vector<CookieFact>& cookies,
 +    const std::vector<StorageFact>& storage,
 +    const std::vector<ConsistencyRule>& rules);
++
++// RFC 6265 5.1.3 domain matching, exported so the cookie side of the
++// cross-store lock (native/cookie_mirror.h) matches domains exactly the way
++// the consistency checker does - one implementation, one answer.
++//
++// `host` is the concrete page host, `domain` is the domain a rule or a
++// pinned cookie declared. A leading dot on either side is ignored, matching
++// is ASCII case-insensitive, and `domain` covers `host` itself plus every
++// dot-suffixed subdomain of it (".pinduoduo.com" covers
++// "mms.pinduoduo.com"). An empty `domain` matches nothing.
++bool CookieDomainMatches(std::string_view host, std::string_view domain);
 +
 +}  // namespace lengsuo::fp
 +
