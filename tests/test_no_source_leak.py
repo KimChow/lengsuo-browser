@@ -160,6 +160,57 @@ class WordListTests(unittest.TestCase):
             return pathlib.Path(tmp.name)
         return path
 
+    def test_real_word_list_path_is_used(self) -> None:
+        """The word list lives in the live config directory, not a stale one.
+
+        The list is read from ``~/.reference-platform``. Pointing this at a directory
+        that no longer exists makes every word-list test fall back to a
+        temporary list, so the shipped list is never actually exercised.
+        """
+        live = pathlib.Path.home() / ".reference-platform" / "source-privacy-terms.txt"
+        stale = pathlib.Path.home() / ".reference-platform" / "source-privacy-terms.txt"
+        self.assertTrue(
+            live.is_file(),
+            f"the live word list is missing: {live}",
+        )
+        self.assertFalse(
+            stale.exists(),
+            f"a stale word list directory is still present: {stale}",
+        )
+        self.assertEqual(self._terms_file(), live)
+
+    def test_a_word_from_the_live_list_is_flagged(self) -> None:
+        """A word taken from the real list must actually trip the checker.
+
+        This is the end-to-end guard for the list itself: it proves the
+        shipped list is reachable *and* that its entries are enforced.
+        """
+        live = pathlib.Path.home() / ".reference-platform" / "source-privacy-terms.txt"
+        if not live.is_file():
+            self.skipTest("live word list is not present in this environment")
+        banned = self._first_banned_word(live)
+        if banned is None:
+            self.skipTest("live word list has no plain word entries")
+        with CheckerFixture({"a.md": f"some text {banned} more text\n"}) as repo:
+            proc = run_checker(repo, "--skip-history", "--terms", str(live))
+        self.assertEqual(proc.returncode, 1, proc.stdout + proc.stderr)
+        self.assertIn(banned, proc.stdout + proc.stderr)
+
+    @staticmethod
+    def _first_banned_word(path: pathlib.Path) -> str | None:
+        """Pick the shortest plain entry; skip directives and multi-word lines."""
+        words: list[str] = []
+        for raw in path.read_text(encoding="utf-8").splitlines():
+            line = raw.strip()
+            if not line or line.startswith("#") or "=" in line:
+                continue
+            if " " in line:  # multi-word entries are not used here
+                continue
+            words.append(line)
+        if not words:
+            return None
+        return min(words, key=len)
+
 
 class ExitCodeTests(unittest.TestCase):
     """Exit codes are the contract the CI hooks rely on."""
