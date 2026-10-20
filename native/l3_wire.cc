@@ -30,7 +30,10 @@ class BodyReader {
   std::size_t pos_ = 0;
 };
 
-// "<keyword> <decimal>" with no other content.
+// "<keyword> <decimal>" with no other content. Zero is accepted: a document
+// may legitimately declare no cookies/extensions/rules, and the encoder emits
+// "cookies 0" / "rules 0" for exactly that case. The pins section is the one
+// exception and is checked by the caller.
 bool ParseCountLine(std::string_view line, std::string_view keyword,
                     std::size_t* value) {
   if (line.size() <= keyword.size() + 1 ||
@@ -44,7 +47,6 @@ bool ParseCountLine(std::string_view line, std::string_view keyword,
     total = total * 10 + static_cast<std::size_t>(c - '0');
     if (total > 4096) return false;
   }
-  if (total == 0) return false;
   *value = total;
   return true;
 }
@@ -121,7 +123,10 @@ bool DecodeL3Wire(std::string_view wire, int64_t now_unix,
   L3Config config;
 
   std::size_t count = 0;
-  if (!reader.Next(&line) || !ParseCountLine(line, "pins", &count)) {
+  if (!reader.Next(&line) || !ParseCountLine(line, "pins", &count) ||
+      count == 0) {
+    // A snapshot with no pins carries no L3 statement at all; treat it as
+    // malformed rather than as a no-op so a truncated document cannot pass.
     return fail("l3: bad pins header");
   }
   std::string pin_wire;
