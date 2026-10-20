@@ -29,11 +29,10 @@
 
 namespace lengsuo {
 
-// Command-line switch naming the managed L3 document. Transitional: Reference
-// carries fingerprint state in a managed file read over IPC, never on the
-// command line (see docs/fp-switch-contract.md). The value is treated as a
-// secret-bearing path and must not be logged.
-inline constexpr char kL3WireSwitch[] = "lengsuo-l3-wire";
+// The command-line switch naming the managed L3 document lives in
+// browser_bootstrap.h (kL3WireSwitch) so that there is exactly one definition
+// of the switch name; a second one would be a redefinition error in any
+// translation unit that includes both headers.
 
 // Default anti-rollback window for the document signature.
 inline constexpr int64_t kL3MaxAgeSeconds = 7 * 24 * 60 * 60;

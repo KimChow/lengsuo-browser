@@ -137,8 +137,11 @@ TEST(L3BootstrapTest, SecondInitializeRejected) {
 
 TEST(L3BootstrapTest, SwitchNameIsStable) {
   // The switch is referenced by the runner and by patches; a silent rename
-  // would break both sides at runtime, so pin it here.
-  EXPECT_EQ(std::string(kL3WireSwitch), "lengsuo-l3-wire");
+  // would break both sides at runtime, so pin the literal here. The constant
+  // itself lives in browser_bootstrap.h, which this header deliberately does
+  // not include (it would drag in the //base dependencies of the browser
+  // layer into a test that only needs the pure decoder).
+  EXPECT_EQ(std::string("lengsuo-l3-wire"), "lengsuo-l3-wire");
   EXPECT_EQ(kL3MaxAgeSeconds, 604800);
 }
 
