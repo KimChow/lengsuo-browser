@@ -28,12 +28,43 @@ Usage
 
 from __future__ import annotations
 
+import importlib.util
 import os
 import pathlib
 import subprocess
 import sys
 import tempfile
 import unittest
+
+ROOT = pathlib.Path(__file__).resolve().parents[1]
+CHECKER = ROOT / "scripts" / "check_no_source_leak.py"
+
+
+def _live_config_dirname() -> str:
+    """The config directory name, read from the checker itself.
+
+    Hard-coding it here is what broke before: a history rewrite replaced the
+    real directory name with one that does not exist, the tests silently fell
+    back to a temporary word list, and the shipped list stopped being
+    exercised while everything still looked green. Reading the constant from
+    the implementation means the two can never disagree.
+    """
+    spec = importlib.util.spec_from_file_location("_leak_checker", CHECKER)
+    if spec is None or spec.loader is None:  # pragma: no cover - defensive
+        raise AssertionError("cannot load %s" % CHECKER)
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    name = getattr(module, "_LOCAL_CONFIG_DIRNAME", None)
+    if not name:
+        raise AssertionError(
+            "check_no_source_leak.py lost _LOCAL_CONFIG_DIRNAME; the word "
+            "list location must stay a single definition")
+    return name
+
+
+def _terms_path() -> pathlib.Path:
+    return (pathlib.Path.home() / _live_config_dirname()
+            / "source-privacy-terms.txt")
 
 REPO = pathlib.Path(__file__).resolve().parents[1]
 CHECKER = REPO / "scripts" / "check_no_source_leak.py"
@@ -148,7 +179,7 @@ class WordListTests(unittest.TestCase):
 
     @staticmethod
     def _terms_file() -> pathlib.Path:
-        path = pathlib.Path.home() / ".reference-platform" / "source-privacy-terms.txt"
+        path = _terms_path()
         if not path.is_file():
             # Fall back to a temporary list so the test still exercises the
             # word-list code path.
@@ -161,22 +192,22 @@ class WordListTests(unittest.TestCase):
         return path
 
     def test_real_word_list_path_is_used(self) -> None:
-        """The word list lives in the live config directory, not a stale one.
+        """The word list is resolved from the checker's own config dirname.
 
-        The list is read from ``~/.reference-platform``. Pointing this at a directory
-        that no longer exists makes every word-list test fall back to a
-        temporary list, so the shipped list is never actually exercised.
+        This is the guard against the regression that actually happened: the
+        test carried its own hard-coded directory name, a history rewrite
+        changed it to a directory that does not exist, and every word-list
+        test then fell back to a temporary list while still passing. The
+        shipped list was never exercised.
         """
-        live = pathlib.Path.home() / ".reference-platform" / "source-privacy-terms.txt"
-        stale = pathlib.Path.home() / ".reference-platform" / "source-privacy-terms.txt"
+        live = _terms_path()
         self.assertTrue(
             live.is_file(),
             f"the live word list is missing: {live}",
         )
-        self.assertFalse(
-            stale.exists(),
-            f"a stale word list directory is still present: {stale}",
-        )
+        # The name must come from the implementation, not from this file.
+        self.assertEqual(live, pathlib.Path.home()
+                         / _live_config_dirname() / "source-privacy-terms.txt")
         self.assertEqual(self._terms_file(), live)
 
     def test_a_word_from_the_live_list_is_flagged(self) -> None:
@@ -185,7 +216,7 @@ class WordListTests(unittest.TestCase):
         This is the end-to-end guard for the list itself: it proves the
         shipped list is reachable *and* that its entries are enforced.
         """
-        live = pathlib.Path.home() / ".reference-platform" / "source-privacy-terms.txt"
+        live = _terms_path()
         if not live.is_file():
             self.skipTest("live word list is not present in this environment")
         banned = self._first_banned_word(live)
