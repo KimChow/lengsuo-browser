@@ -1,6 +1,3 @@
-diff --git a/chrome/browser/chrome_browser_main.cc b/chrome/browser/chrome_browser_main.cc
-index cbf3b6c563..2ce92a68e8 100644
---- a/chrome/browser/chrome_browser_main.cc
 diff --git a/content/browser/renderer_host/render_process_host_impl.cc b/content/browser/renderer_host/render_process_host_impl.cc
 index b8d41ae535..3097c94817 100644
 --- a/content/browser/renderer_host/render_process_host_impl.cc

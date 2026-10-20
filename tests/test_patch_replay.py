@@ -168,6 +168,10 @@ class PatchContentTests(unittest.TestCase):
         `+++ b/chrome/browser/net/BUILD.gn`, which put a GN dependency line
         into the middle of a C++ include list and broke the build with
         "expected unqualified-id".
+
+        A section that has a --- but no +++ (a leftover from when another
+        patch took the file over) is rejected too: `patch` reads it as a
+        malformed section and refuses the whole file.
         """
         for patch in _patch_files():
             text = patch.read_text(encoding="utf-8", errors="replace")
@@ -190,6 +194,10 @@ class PatchContentTests(unittest.TestCase):
                             f"{patch.name}: hunk header disagrees on target file "
                             f"({old_path} vs {new_path})")
                     old_path = None
+                elif old_path is not None and line.startswith("diff --git "):
+                    self.fail(
+                        f"{patch.name}: file section for {old_path} has a --- "
+                        f"line but no +++ line; drop the leftover section")
 
     def test_no_source_file_contains_gn_build_syntax(self):
         """A GN fragment inside a .cc/.h means a hunk landed in the wrong file.

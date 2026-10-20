@@ -1,6 +1,3 @@
-diff --git a/chrome/browser/chrome_content_browser_client.cc b/chrome/browser/chrome_content_browser_client.cc
-index 19045777b3..6902984550 100644
---- a/chrome/browser/chrome_content_browser_client.cc
 diff --git a/content/renderer/BUILD.gn b/content/renderer/BUILD.gn
 index 6a40348748..66022beadb 100644
 --- a/content/renderer/BUILD.gn
@@ -13,9 +10,6 @@ index 6a40348748..66022beadb 100644
      "//base",
      "//base:i18n",
      "//build:chromecast_buildflags",
-diff --git a/content/renderer/renderer_main.cc b/content/renderer/renderer_main.cc
-index 2fd21f7ee5..cc2d2fd932 100644
---- a/content/renderer/renderer_main.cc
 diff --git a/third_party/blink/renderer/core/BUILD.gn b/third_party/blink/renderer/core/BUILD.gn
 index 383115087f..6dad2cb479 100644
 --- a/third_party/blink/renderer/core/BUILD.gn

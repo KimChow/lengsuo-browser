@@ -58,10 +58,10 @@ index 0000000..e6cfc65
 +}
 diff --git a/lengsuo/integration/browser_bootstrap.cc b/lengsuo/integration/browser_bootstrap.cc
 new file mode 100644
-index 0000000..92a7757
+index 0000000..fbd1868
 --- /dev/null
 +++ b/lengsuo/integration/browser_bootstrap.cc
-@@ -0,0 +1,230 @@
+@@ -0,0 +1,241 @@
 +#include "lengsuo/integration/browser_bootstrap.h"
 +#include <string>
 +#include <vector>
@@ -167,12 +167,23 @@ index 0000000..92a7757
 +  return State().InitializeCatalog(command.HasSwitch(kCatalogWireSwitch),
 +      IsSafeProfilePath(catalog_path), [&]() { return ReadWire(catalog_path); });
 +}
++int64_t L3ClockUnixSeconds() {
++  // The L3W1 signature line carries "<md5>_v1_t<unix-seconds>", so the
++  // freshness window is only meaningful in Unix seconds.
++  //
++  // Do NOT use ToDeltaSinceWindowsEpoch() here: that counts from 1601-01-01
++  // and runs 11644473600 seconds ahead of Unix time, so every document would
++  // look older than the window and startup would abort with
++  // "Lengsuo L3 bootstrap rejected".
++  return static_cast<int64_t>(base::Time::Now().InSecondsFSinceUnixEpoch());
++}
++
 +bool InitializeBrowserL3(const base::CommandLine& command) {
 +  const bool requested = command.HasSwitch(kL3WireSwitch);
 +  const auto path = command.GetSwitchValuePath(kL3WireSwitch);
 +  // The anti-rollback window is checked against the browser's clock here, so
 +  // the renderer never has to trust its own.
-+  const int64_t now = base::Time::Now().ToDeltaSinceWindowsEpoch().InSeconds();
++  const int64_t now = L3ClockUnixSeconds();
 +  if (!L3State().Initialize(requested, IsSafeProfilePath(path),
 +                             [&]() { return ReadL3Wire(path); }, now,
 +                             kL3MaxAgeSeconds)) {
@@ -294,12 +305,13 @@ index 0000000..92a7757
 +}  // namespace lengsuo
 diff --git a/lengsuo/integration/browser_bootstrap.h b/lengsuo/integration/browser_bootstrap.h
 new file mode 100644
-index 0000000..889b8b7
+index 0000000..3c352a7
 --- /dev/null
 +++ b/lengsuo/integration/browser_bootstrap.h
-@@ -0,0 +1,60 @@
+@@ -0,0 +1,66 @@
 +#ifndef LENGSUO_INTEGRATION_BROWSER_BOOTSTRAP_H_
 +#define LENGSUO_INTEGRATION_BROWSER_BOOTSTRAP_H_
++#include <cstdint>
 +#include <string_view>
 +#include "base/command_line.h"
 +#include "base/files/file_path.h"
@@ -328,6 +340,11 @@ index 0000000..889b8b7
 +// false when a document was requested but could not be loaded or verified;
 +// the caller must abort startup rather than continue unpinned.
 +bool InitializeBrowserL3(const base::CommandLine& command);
++// Current time in **Unix** seconds (since 1970-01-01), the unit the L3W1
++// signature line uses. Exposed so the unit test can pin the epoch: reading
++// base::Time::ToDeltaSinceWindowsEpoch() here would count from 1601 and
++// make every document look older than the freshness window.
++int64_t L3ClockUnixSeconds();
 +// Base64 of the frozen L3 document, ready to hand to a renderer. Empty when
 +// no document is loaded. The encoding keeps the multi-line document off the
 +// command line verbatim.
@@ -360,12 +377,13 @@ index 0000000..889b8b7
 +#endif
 diff --git a/lengsuo/integration/browser_bootstrap_unittest.cc b/lengsuo/integration/browser_bootstrap_unittest.cc
 new file mode 100644
-index 0000000..b657c89
+index 0000000..5737fd6
 --- /dev/null
 +++ b/lengsuo/integration/browser_bootstrap_unittest.cc
-@@ -0,0 +1,354 @@
+@@ -0,0 +1,374 @@
 +// Requires Chromium base/gtest build; standalone tests live separately.
 +#include "lengsuo/integration/browser_bootstrap.h"
++#include <ctime>
 +#include "build/build_config.h"
 +#include "components/content_settings/core/common/content_settings_pattern.h"
 +#include "third_party/blink/public/common/peerconnection/webrtc_ip_handling_url_entry.h"
@@ -716,6 +734,25 @@ index 0000000..b657c89
 +  EXPECT_EQ(1080, infos.current().available_rect.height());
 +  EXPECT_FLOAT_EQ(1.f, infos.current().device_scale_factor);
 +  EXPECT_EQ(24, infos.current().depth);
++}
++
++TEST(BrowserBootstrap, L3ClockReadsUnixSecondsNotWindowsEpoch) {
++  // The L3W1 signature line carries "<md5>_v1_t<unix-seconds>". If the
++  // browser's clock were read from the Windows epoch (1601-01-01) it would
++  // run 11644473600 seconds ahead, every document would fall outside the
++  // 7-day freshness window, and startup would abort with
++  // "Lengsuo L3 bootstrap rejected".
++  const int64_t now = L3ClockUnixSeconds();
++  const int64_t reference = static_cast<int64_t>(std::time(nullptr));
++  EXPECT_GT(now, 0);
++  // One minute of slack covers a slow test machine and a clock that ticks
++  // between the two reads.
++  EXPECT_NEAR(reference, now, 60);
++  // Spell the bug out: with the Windows epoch the reading would sit around
++  // 1.34e10 (Unix time plus the 11644473600 s offset), not around 1.79e9.
++  constexpr int64_t kWindowsToUnixEpoch = 11644473600;
++  EXPECT_LT(now, kWindowsToUnixEpoch);
++  EXPECT_GT(now, reference - 60);
 +}
 +}  // namespace lengsuo
 diff --git a/lengsuo/integration/l3_bootstrap.cc b/lengsuo/integration/l3_bootstrap.cc
