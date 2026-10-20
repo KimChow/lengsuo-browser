@@ -1,33 +1,6 @@
 diff --git a/chrome/browser/chrome_browser_main.cc b/chrome/browser/chrome_browser_main.cc
 index cbf3b6c563..2ce92a68e8 100644
 --- a/chrome/browser/chrome_browser_main.cc
-+++ b/chrome/browser/chrome_browser_main.cc
-@@ -4,6 +4,9 @@
- 
- #include "chrome/browser/chrome_browser_main.h"
- 
-+#include "lengsuo/integration/browser_bootstrap.h"
-+#include "lengsuo/integration/official_defaults.h"
-+
- #include <memory>
- #include <string>
- #include <tuple>
-@@ -1004,6 +1007,15 @@ void ChromeBrowserMainParts::RecordBrowserStartupTime() {
- 
- int ChromeBrowserMainParts::PreEarlyInitialization() {
-   TRACE_EVENT0("startup", "ChromeBrowserMainParts::PreEarlyInitialization");
-+  // Align feature defaults with shipped Chrome. Must happen before field
-+  // trials are loaded below, or the appended switch is ignored.
-+  lengsuo::ApplyOfficialFeatureDefaults(base::CommandLine::ForCurrentProcess());
-+
-+  if (!lengsuo::InitializeBrowserProfile(*base::CommandLine::ForCurrentProcess())) {
-+    LOG(ERROR) << "Lengsuo profile bootstrap rejected";
-+    return CHROME_RESULT_CODE_INVALID_CMDLINE_URL;
-+  }
-+
-   for (auto& chrome_extra_part : chrome_extra_parts_) {
-     chrome_extra_part->PreEarlyInitialization();
-   }
 diff --git a/content/browser/renderer_host/render_process_host_impl.cc b/content/browser/renderer_host/render_process_host_impl.cc
 index b8d41ae535..3097c94817 100644
 --- a/content/browser/renderer_host/render_process_host_impl.cc

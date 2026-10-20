@@ -10,14 +10,6 @@
   ],
   "patches": [
     {
-      "path": "patches/0001-bootstrap-chrome_browser_main.patch",
-      "sha256": "432eae8e340082a6812eab204c9657ba6e74bdd3a6f620408ab0b00d74085133"
-    },
-    {
-      "path": "patches/0002-bootstrap-chrome_content_browser_client.patch",
-      "sha256": "578706d6810eec025eae87b111c6330e9a87026b177b165368f3285fc909a19a"
-    },
-    {
       "path": "patches/0003-bootstrap-chrome_process_singleton.patch",
       "sha256": "2e17b987e3c5b21cc33c2356a0d2b0a81755d0d0055ec5ccccd3709cfbe14e5c"
     },
@@ -30,20 +22,16 @@
       "sha256": "971217e4ebc95f0d484bf1b8d02e2980df9251c414cb291d2120a67e58ab21e5"
     },
     {
-      "path": "patches/0006-browser-ua-catalog.patch",
-      "sha256": "b489ab552a3816cdc176121452fbbab9a8a9c5bfa8dafaa7a46b597df98b2ad6"
-    },
-    {
       "path": "patches/0007-canvas-readback.patch",
-      "sha256": "7618ff7b6354d73c705a4c950e8c6d295363be995defcc4e23dadaeb05769f80"
+      "sha256": "a620e40796e21fd95ef936c7dd5a6689def1d448eba843c3cfc7348c8b2feed9"
     },
     {
       "path": "patches/0007-profile-language.patch",
-      "sha256": "c542abf1cced06caf6ebd891b0e57af9d3783420747cfa224da976a6bbd95ed3"
+      "sha256": "9bffde3927e34f35b29804634b3c1530d410498b88f57c7cbe1ec9bd5b68643c"
     },
     {
       "path": "patches/0008-fp-overrides.patch",
-      "sha256": "285d52ce78d4350b8fb00b6c2ecd66de77ac2193819262952e87b13bc6dc9716"
+      "sha256": "690488f49a22b02761f75516902349b7f13b57c1e099cae7aebc80cba1ce7de1"
     },
     {
       "path": "patches/0008-profile-timezone.patch",
@@ -67,15 +55,19 @@
     },
     {
       "path": "patches/0013-official-feature-defaults.patch",
-      "sha256": "4c3bd2260c0dadb00e480cebc284d7fda62ab46b82c886abebaf4e22a9dfd561"
+      "sha256": "cc684055f1a612f0354e87b6aa5cff506a9728ce6bf4698d6aecd7bccbcc160f"
     },
     {
       "path": "patches/0014-font-metrics.patch",
-      "sha256": "4196cd1512f7f34af856be367bbfc482de1ef9a3fbd1784a37be7c5f32f4ffda"
+      "sha256": "4c24d2bead9bd1b14109470e600dd788ef89cc64c003136938e17f53aa1b8833"
     },
     {
       "path": "patches/0015-l3-storage.patch",
-      "sha256": "605665807835d15e3868345d48b13874e5c8311c719b9b70d3258c4ea6be8bc4"
+      "sha256": "9bb810cf4340ae6344766e9af1dce17566f6873bcd52f11450df4e435466da41"
+    },
+    {
+      "path": "patches/0016-browser-wiring.patch",
+      "sha256": "35d9c1a8186f5a0f2885f82f512504bbf32b16a1aeada49ba7fc7eab4c5533d6"
     }
   ]
 }
