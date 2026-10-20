@@ -103,12 +103,23 @@ bool InitializeBrowserProfile(const base::CommandLine& command) {
   return State().InitializeCatalog(command.HasSwitch(kCatalogWireSwitch),
       IsSafeProfilePath(catalog_path), [&]() { return ReadWire(catalog_path); });
 }
+int64_t L3ClockUnixSeconds() {
+  // The L3W1 signature line carries "<md5>_v1_t<unix-seconds>", so the
+  // freshness window is only meaningful in Unix seconds.
+  //
+  // Do NOT use ToDeltaSinceWindowsEpoch() here: that counts from 1601-01-01
+  // and runs 11644473600 seconds ahead of Unix time, so every document would
+  // look older than the window and startup would abort with
+  // "Lengsuo L3 bootstrap rejected".
+  return static_cast<int64_t>(base::Time::Now().InSecondsFSinceUnixEpoch());
+}
+
 bool InitializeBrowserL3(const base::CommandLine& command) {
   const bool requested = command.HasSwitch(kL3WireSwitch);
   const auto path = command.GetSwitchValuePath(kL3WireSwitch);
   // The anti-rollback window is checked against the browser's clock here, so
   // the renderer never has to trust its own.
-  const int64_t now = base::Time::Now().ToDeltaSinceWindowsEpoch().InSeconds();
+  const int64_t now = L3ClockUnixSeconds();
   if (!L3State().Initialize(requested, IsSafeProfilePath(path),
                              [&]() { return ReadL3Wire(path); }, now,
                              kL3MaxAgeSeconds)) {

@@ -1,5 +1,6 @@
 #ifndef LENGSUO_INTEGRATION_BROWSER_BOOTSTRAP_H_
 #define LENGSUO_INTEGRATION_BROWSER_BOOTSTRAP_H_
+#include <cstdint>
 #include <string_view>
 #include "base/command_line.h"
 #include "base/files/file_path.h"
@@ -28,6 +29,11 @@ const CatalogGpuEntry* BrowserGpu();
 // false when a document was requested but could not be loaded or verified;
 // the caller must abort startup rather than continue unpinned.
 bool InitializeBrowserL3(const base::CommandLine& command);
+// Current time in **Unix** seconds (since 1970-01-01), the unit the L3W1
+// signature line uses. Exposed so the unit test can pin the epoch: reading
+// base::Time::ToDeltaSinceWindowsEpoch() here would count from 1601 and
+// make every document look older than the freshness window.
+int64_t L3ClockUnixSeconds();
 // Base64 of the frozen L3 document, ready to hand to a renderer. Empty when
 // no document is loaded. The encoding keeps the multi-line document off the
 // command line verbatim.

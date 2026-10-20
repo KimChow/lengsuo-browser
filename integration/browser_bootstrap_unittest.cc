@@ -1,5 +1,6 @@
 // Requires Chromium base/gtest build; standalone tests live separately.
 #include "lengsuo/integration/browser_bootstrap.h"
+#include <ctime>
 #include "build/build_config.h"
 #include "components/content_settings/core/common/content_settings_pattern.h"
 #include "third_party/blink/public/common/peerconnection/webrtc_ip_handling_url_entry.h"
@@ -350,5 +351,24 @@ TEST(BrowserBootstrap, ScreenInfosOverrideFollowsProfilePresence) {
   EXPECT_EQ(1080, infos.current().available_rect.height());
   EXPECT_FLOAT_EQ(1.f, infos.current().device_scale_factor);
   EXPECT_EQ(24, infos.current().depth);
+}
+
+TEST(BrowserBootstrap, L3ClockReadsUnixSecondsNotWindowsEpoch) {
+  // The L3W1 signature line carries "<md5>_v1_t<unix-seconds>". If the
+  // browser's clock were read from the Windows epoch (1601-01-01) it would
+  // run 11644473600 seconds ahead, every document would fall outside the
+  // 7-day freshness window, and startup would abort with
+  // "Lengsuo L3 bootstrap rejected".
+  const int64_t now = L3ClockUnixSeconds();
+  const int64_t reference = static_cast<int64_t>(std::time(nullptr));
+  EXPECT_GT(now, 0);
+  // One minute of slack covers a slow test machine and a clock that ticks
+  // between the two reads.
+  EXPECT_NEAR(reference, now, 60);
+  // Spell the bug out: with the Windows epoch the reading would sit around
+  // 1.34e10 (Unix time plus the 11644473600 s offset), not around 1.79e9.
+  constexpr int64_t kWindowsToUnixEpoch = 11644473600;
+  EXPECT_LT(now, kWindowsToUnixEpoch);
+  EXPECT_GT(now, reference - 60);
 }
 }  // namespace lengsuo
