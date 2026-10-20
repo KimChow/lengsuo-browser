@@ -37,9 +37,9 @@ def _added_or_modified_paths(patch_text):
 
 
 def _git_blob(rel: str):
-    """The repository's content for `rel`, staged content first."""
+    """The repository's content for `rel`, committed content first."""
     import subprocess
-    for spec in (f":{rel}", f"HEAD:{rel}"):
+    for spec in (f"HEAD:{rel}", f":{rel}"):
         try:
             return subprocess.run(
                 ["git", "cat-file", "blob", spec],

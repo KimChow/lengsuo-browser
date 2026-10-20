@@ -7,14 +7,16 @@ lock that the Linux build host could never satisfy: patch_apply rejected
 every patch with "digest differs from baseline" even though nothing was
 wrong with the patch.
 
-The fix is to hash the blob git actually has staged, which is what a fresh
+The fix is to hash the blob git actually holds, which is what a fresh
 `git clone` gives every host:
 
-    git cat-file blob :<path>        -> the staged content
     git cat-file blob HEAD:<path>    -> the committed content
+    git cat-file blob :<path>        -> the staged content
 
-The staged blob is preferred so that a not-yet-committed edit is still
-lockable; the committed blob is the fallback for a path that is not staged.
+The committed blob is preferred. The staged one is only a fallback for a
+path that has never been committed, because a staged-but-uncommitted blob
+is a different byte sequence from what other hosts will check out, and
+locking that produces a lock nobody else can satisfy.
 """
 
 from __future__ import annotations
@@ -35,7 +37,7 @@ def _git(args: list[str]) -> bytes:
 
 def blob_bytes(rel: str) -> bytes | None:
     """Return the repository's content for `rel`, or None when unknown."""
-    for spec in (f":{rel}", f"HEAD:{rel}"):
+    for spec in (f"HEAD:{rel}", f":{rel}"):
         try:
             return _git(["cat-file", "blob", spec])
         except subprocess.CalledProcessError:

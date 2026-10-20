@@ -23,7 +23,7 @@
     },
     {
       "path": "patches/0007-canvas-readback.patch",
-      "sha256": "a620e40796e21fd95ef936c7dd5a6689def1d448eba843c3cfc7348c8b2feed9"
+      "sha256": "4982a83094e97e52461f26b624e24257896550d03b9cedd0685273fe46d32ffc"
     },
     {
       "path": "patches/0007-profile-language.patch",
@@ -31,7 +31,7 @@
     },
     {
       "path": "patches/0008-fp-overrides.patch",
-      "sha256": "690488f49a22b02761f75516902349b7f13b57c1e099cae7aebc80cba1ce7de1"
+      "sha256": "f09c7a5155d5b9d29d93e9382015931fc34d97cda40da00bea9c49940ea38180"
     },
     {
       "path": "patches/0008-profile-timezone.patch",
@@ -47,7 +47,7 @@
     },
     {
       "path": "patches/0011-lengsuo-sources.patch",
-      "sha256": "8638362b4c95801d3d1f9b9a186b3c0228eadd9677f3b0190d58552f01acb2d9"
+      "sha256": "1da26cfb76ef17d4e30add1cac6a740786da0a8e324b7852e77ecc80ecbda085"
     },
     {
       "path": "patches/0012-ua-ch-brand.patch",
@@ -55,15 +55,15 @@
     },
     {
       "path": "patches/0013-official-feature-defaults.patch",
-      "sha256": "cc684055f1a612f0354e87b6aa5cff506a9728ce6bf4698d6aecd7bccbcc160f"
+      "sha256": "42018c7a17ead7bcb023fccc53fe2b6195ad2e419a4c179707f35598002a47fb"
     },
     {
       "path": "patches/0014-font-metrics.patch",
-      "sha256": "4c24d2bead9bd1b14109470e600dd788ef89cc64c003136938e17f53aa1b8833"
+      "sha256": "24f8a6033ce43f577964c39e3a185e0a1b18962d984ea821d271657fe749de93"
     },
     {
       "path": "patches/0015-l3-storage.patch",
-      "sha256": "9bb810cf4340ae6344766e9af1dce17566f6873bcd52f11450df4e435466da41"
+      "sha256": "3320f95b40f5ca697bda31e935ae68cfc0d74e411184eb329e5d42c349f45ea2"
     },
     {
       "path": "patches/0016-browser-wiring.patch",
