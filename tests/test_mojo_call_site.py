@@ -58,6 +58,15 @@ except SystemExit as exc:  # capstone missing: the module exits on import
     mcs = None
     IMPORT_ERROR = str(exc)
 
+# The tool under test needs capstone, and it says so by exiting on
+# import. A machine without capstone cannot run these checks, and the
+# run has to say that rather than report an error in the tool: the
+# tests below would fail with a None dereference, which reads like the
+# tool is broken.
+_requires_capstone = unittest.skipIf(
+    mcs is None,
+    "the tool under test needs capstone: %s" % (IMPORT_ERROR or "unknown"))
+
 
 def build_pe(*, text: bytes, rdata: bytes = b"", pdata: bytes = b"") -> bytes:
     """Lay out a minimal PE32+ whose .text/.rdata/.pdata we control.
@@ -105,6 +114,7 @@ def pdata_entry(begin: int, end: int) -> bytes:
     return struct.pack("<III", begin, end, 0)
 
 
+@_requires_capstone
 class FlagTests(unittest.TestCase):
     """Mojo message flags live in the low three bits of the ordinal."""
 
@@ -121,6 +131,7 @@ class FlagTests(unittest.TestCase):
         self.assertEqual(mcs.flags_of(0x12345678), [])
 
 
+@_requires_capstone
 class PeTests(unittest.TestCase):
     """Section lookup and .pdata lookup must be exact."""
 
@@ -168,7 +179,7 @@ class PeTests(unittest.TestCase):
         self.assertIsNone(pe.function_range(TEXT_RVA + 0x40))
 
 
-@unittest.skipIf(mcs is None, f"capstone unavailable: {IMPORT_ERROR}")
+@_requires_capstone
 class DecodeTests(unittest.TestCase):
     """End-to-end: immediates and call targets from real instruction bytes."""
 

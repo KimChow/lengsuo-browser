@@ -45,7 +45,11 @@ class OverlayTests(unittest.TestCase):
         }
         for origin, _ in MAPPING:
             file = self.repository / origin
-            file.parent.mkdir(exist_ok=True)
+            # The mapping names files in nested directories, so the
+            # parent has to be created all the way down. Without it the
+            # fixture fails to set up and every test in the class errors
+            # out before it reaches the behaviour it is about.
+            file.parent.mkdir(parents=True, exist_ok=True)
             file.write_text("fixture " + origin + "\n")
 
     def git(self, *args):
