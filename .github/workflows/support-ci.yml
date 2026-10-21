@@ -21,6 +21,8 @@ jobs:
           persist-credentials: false
       - name: Source line limits
         run: python tools/check_line_limit.py
+      - name: Docs are local-only
+        run: python scripts/check_docs_not_tracked.py --allow-history
       - name: Source baseline helper tests
         run: python -m unittest discover -s tests -v
       - name: Configure native support in Release
