@@ -621,3 +621,41 @@ R 是**两仓**的卡。内核侧已合入，**客户端侧仍未交卷**：
   并把 `zip 9.0.5` 的 API 结论、拆文件方案、通道①的处置写进任务书 §7 后重派。
 
 ⇒ **R 卡的跨仓验收（清单逐字节相同 + `ConfigBundle` 帧固定向量）要等客户端侧交卷才能做。**
+
+## R-D. ⛔ 内核侧的 `profile_bundle` **当前没有任何调用者** ⇒ 这批代码不进 chrome 二进制
+
+**事实**（派卡方在 47 上实测，不是推断）：
+
+```bash
+# 构建树里谁引用 profile_bundle？
+grep -rn "profile_bundle" --include=BUILD.gn --include=*.gni .
+  → 只有 lengsuo/native/BUILD.gn:178 自己的 source_set 定义，没有第二处
+# ninja 目标存在吗？
+ninja -t targets all | grep profile_bundle
+  → obj/lengsuo/native/profile_bundle/profile_bundle.o: cxx   （目标存在）
+# 编译产物生成了吗？
+ls out/lengsuo/obj/lengsuo/native/profile_bundle/
+  → （空 —— 没被编译）
+```
+
+⇒ `source_set("profile_bundle")` **是一个叶子节点**：没有任何 target 依赖它，
+所以 `ninja chrome` **不会编译它**，它**不进 chrome 二进制**。
+⇒ **内核侧这批代码现在是「有 18 条单测、无运行路径」**。
+
+**为什么这不是 R 卡的错**：R 卡的任务书「内核侧要做什么」明确只让卡做
+`native/profile_bundle.{h,cc}` 这个**纯逻辑**组件（收集规则 + 清单形状），
+**没让卡接线**；接线要么在客户端侧通过管道驱动，要么另开一张接线卡。
+
+**待裁定（不自行决定）**：
+1. **谁调用 `CollectProfileBundle`？** 三条候选：
+   ① 内核侧在容器关闭时算清单 → 需要内核侧有个「关闭时」钩子（不在 R 卡范围）；
+   ② **客户端侧不自己扫目录**，改为消费内核侧算好的清单 ⇒ 需要一条
+   **「内核 → runner」的清单帧**（契约 §3 的帧类型表里**没有**这一类，
+   现有五类是 `0x01`–`0x05`）⇒ **要改契约**；
+   ③ 两侧各算各的（现状）⇒ 那内核侧这个组件**没有存在的必要**，
+   除非它将来给别的调用者用。
+2. ⇒ **若裁定 ②，契约 §3 要加一个帧类型**（例如 `0x06 ProfileManifest`），
+   且要定它的载荷形状（§4.5 的 JSON 清单）与方向（内核 → runner），
+   并给固定向量。
+
+⚠️ **这条影响的是「内核侧这批代码要不要留」** ⇒ 请主理人明示。
