@@ -659,3 +659,39 @@ ls out/lengsuo/obj/lengsuo/native/profile_bundle/
    并给固定向量。
 
 ⚠️ **这条影响的是「内核侧这批代码要不要留」** ⇒ 请主理人明示。
+
+## R-E. ✅ 2026-10-22 06:5x–07:1x 补记：真编译 + accept 全绿，客户端侧也已合入
+
+**内核侧最后一道闸门**（派卡方自己复跑）：
+
+| 闸门 | 结果 |
+|---|---|
+| 真编译 | **57228 步 0 失败**（`ninja -C out/lengsuo chrome`，1h40m；chrome 于 **06:54** 重链接，523,930,288 B）|
+| 编译日志 | `FAILED` **0** 条、`error: ` **0** 条；93 条 warning **全部来自既有文件**（`storage_pin.h` 的 chromium-style 提示等），**新文件 `profile_bundle` 不在编译集里**（与 R-D 一致）|
+| 二进制新鲜度 | `find chrome content components blink lengsuo -newer out/lengsuo/chrome` ⇒ **空**（二进制不比源新）|
+| `accept_l3.py` | **8/8 ALL PASS**（含「renderer cmdline carries no `lengsuo-managed-l3`」，6 个 renderer 观察、0 泄漏）|
+| `accept_l3_noprofile.py` | **8/8 ALL PASS**（上游行为不变）|
+
+**客户端侧**：卡第二次派发仍以 `error_max_turns` 收尾（201 轮 / $17.95），
+**但这次落了提交 `df09efa`**（1096 行 / 9 文件）⇒ 派卡方自己复跑四道门禁全绿：
+fmt RC=0、clippy `-D warnings` RC=0、**test 436 用例 0 失败**、build RC=0、行数 hard 0；
+仓库自带的 `card_guard merge` 门禁也全绿（line_limit / fmt / clippy `--features ui` / test `--features ui`）⇒ **已合入客户端主线 `3d120b3`**。
+
+⭐ **`upload.rs` 从 841 行降到 641 行**（拆出 `profile_rules.rs` 441 行）⇒
+卡按派卡方写进任务书 §7.4 的方案拆了，**超 700 硬上限的问题解决了**。
+
+⭐⭐ **跨仓互验是派卡方独立复现的，不是照抄卡的自述**：
+把内核侧**真实的** `profile_bundle.cc` + `kernel_pipe_json.cc` 编成独立程序，
+喂 20 条难缠 bundle，与客户端 Rust 实现逐条比对：
+- **20/20 归一化后全同**（含「缺 `profile_sync` 段」这一条两侧形状不同但效果同）；
+- `ConfigBundle` 载荷：**155 字节、`BYTE_IDENTICAL: yes`**；
+- 既有固定向量（密文 45B / tag 16B / AAD 16B / 载荷 85B）：**`cross-repo vectors agree: YES`**。
+
+⚠️ **一个必须说清的落差**：客户端状态台账 §6 写的是
+「内核侧 `native/profile_bundle_test.cc` 的 `TheDefaultSectionRoundTripsThroughTheParser`
+（内核侧自己拼一份，与本行逐字节比较）」——
+**该 gtest 本身并没有做逐字节比较**（它只做「内核默认 ⇒ JSON ⇒ 解析 ⇒ 字段相等」的往返）；
+逐字节比较是卡在 `/tmp/xcheck/` 用**临时编出来的独立程序**做的。
+⇒ **这个跨仓固定向量没有落进任何仓的常驻测试** ⇒ 下次改键序或字段会静默漂移。
+⇒ **建议**：把「155 字节载荷」写成内核侧一条 gtest（断言字节串）+
+客户端侧一条 `const`（已有 `profile_vectors.rs`）⇒ 两侧 CI 各跑各的，才算真守卫。
