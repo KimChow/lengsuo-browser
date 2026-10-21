@@ -270,5 +270,72 @@ class ResolveModeTest(unittest.TestCase):
                                     "the report does not give two paths")
 
 
+class CrossRepoCardTest(unittest.TestCase):
+    """A card that touches both repos must be dispatchable end to end.
+
+    Why this exists
+    ---------------
+    The machine-code alignment card is the first card that has to touch
+    the kernel repo and the client repo at once. Two things have to line
+    up for it: the launcher has to know which brief the letter points
+    at, and that brief has to carry a section for the letter. If either
+    is missing the card is refused at dispatch time -- and the refusal
+    looks like a script bug rather than a missing section, so the card
+    simply never runs.
+
+    The letter is "M0" rather than "M" because "M" is already taken by
+    an earlier round with a different brief, and a card that reads the
+    wrong brief implements the wrong thing.
+    """
+
+    def test_the_cross_repo_card_resolves_to_its_brief(self):
+        """The letter must be in the mapping, or it falls back to
+        another round's brief."""
+        result = _run_resolve(["M0"])
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertIn("cc-task-brief-l3f.md", result.stdout,
+                      "M0 does not resolve to the fifth-round brief: %r"
+                      % result.stdout)
+        self.assertNotIn("cc-task-brief-l3b.md", result.stdout,
+                         "M0 fell back to another round's brief: %r"
+                         % result.stdout)
+
+    def test_the_brief_carries_a_section_for_the_card(self):
+        """The dispatch refuses a letter the brief has no section for.
+
+        This is the check the launcher itself makes before it starts a
+        session, so the brief has to satisfy the same pattern here.
+        """
+        brief = ROOT / "docs" / "cc-task-brief-l3f.md"
+        self.assertTrue(brief.exists(),
+                        "the fifth-round brief is missing: %s" % brief)
+        text = brief.read_text(encoding="utf-8")
+        self.assertRegex(text, r"(?m)^## 任务 M0[：: ]",
+                         "the brief has no section for the M0 card")
+
+    def test_the_card_may_not_carry_a_chosen_route(self):
+        """The card must not decide which repo changes.
+
+        The route is the principal's call: it decides which repo owns
+        the machine-code rules. A brief that already picks one turns a
+        decision into a fait accompli, and the other route's work never
+        happens. The brief has to state the two routes and leave the
+        choice open.
+        """
+        brief = ROOT / "docs" / "cc-task-brief-l3f.md"
+        text = brief.read_text(encoding="utf-8")
+        start = text.index("## 任务 M0")
+        section = text[start:]
+        end = section.find("\n## ", 1)
+        if end != -1:
+            section = section[:end]
+        self.assertIn("4A", section,
+                      "the M0 section does not name the first route")
+        self.assertIn("4B", section,
+                      "the M0 section does not name the second route")
+        self.assertRegex(section, r"不许自己选|不许自行拍板|未拍板则本卡不启动",
+                         "the M0 section does not forbid choosing a route")
+
+
 if __name__ == "__main__":
     unittest.main()

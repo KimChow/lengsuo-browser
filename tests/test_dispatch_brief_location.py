@@ -79,12 +79,19 @@ class BriefLocationTest(unittest.TestCase):
         self.assertIsNotNone(block, "the task->brief case block is gone")
         mapped = set()
         for line in block.group(1).splitlines():
+            # A task letter is not always a single capital: the
+            # cross-repo card that follows M is "M0", because "M"
+            # already belonged to an earlier round with a different
+            # brief. A pattern that only accepts capitals silently
+            # drops it from the mapping, and the card then falls
+            # through to the default brief and reads another round's
+            # instructions.
             match = re.match(
-                r'\s*([A-Z][A-Z|]*)\)\s*(?:echo\s+)?"(cc-task-brief[^"]+)"', line)
+                r'\s*([A-Z][A-Z0-9|]*)\)\s*(?:echo\s+)?"(cc-task-brief[^"]+)"', line)
             if match:
                 for task in match.group(1).split("|"):
                     mapped.add(task)
-        for task in ("O", "N", "Q", "R", "M"):
+        for task in ("O", "N", "Q", "R", "M", "M0"):
             self.assertIn(task, mapped,
                           "task %s lost its brief mapping" % task)
 

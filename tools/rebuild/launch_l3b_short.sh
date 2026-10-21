@@ -45,7 +45,7 @@ BRIEF_DIR="${LENGSUO_L3B_BRIEF_DIR:-/home/ubuntu/l3b-briefs}"
 brief_for_task() {
     case "$1" in
         O)   echo "cc-task-brief-l3e.md" ;;
-        N|Q|R) echo "cc-task-brief-l3f.md" ;;
+        N|Q|R|M0) echo "cc-task-brief-l3f.md" ;;
         M)   echo "cc-task-brief-l3d.md" ;;
         *)   echo "cc-task-brief-l3b.md" ;;
     esac
