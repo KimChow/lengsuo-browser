@@ -327,5 +327,47 @@ TEST(ProfileSyncConfig, TheDefaultSectionRoundTripsThroughTheParser) {
   EXPECT_EQ(parsed.max_package_bytes, kernel_default.max_package_bytes);
 }
 
+TEST(ProfileSyncConfig, TheRunnerPayloadIsTheCrossRepoVector) {
+  // The bytes the runner actually sends, hardcoded.
+  //
+  // The client repo hardcodes the same 155 bytes in
+  // `crates/lengsuo-desktop/src/kernel_pipe/profile_vectors.rs`
+  // (`CONFIG_BUNDLE_PAYLOAD`) and asserts that its own output matches
+  // them. This is the kernel's copy of that vector.
+  //
+  // Why it is hardcoded rather than assembled: a test that built the
+  // expected value out of the same constants it is checking would agree
+  // with a broken implementation, and "both sides are wrong" would look
+  // like "both sides match". The two repos compare the literals
+  // directly -- `tools/cross_repo_vectors.py` reads this one and the
+  // client's, and requires them to be identical.
+  //
+  // Note the payload carries `max_package_bytes` explicitly. The
+  // round-trip test above leaves it out, which is a shorter string: the
+  // runner's payload and the kernel's own assembly are not the same
+  // bytes, and only the runner's bytes travel on the wire.
+  constexpr char kRunnerPayload[] =
+      R"({"profile_sync":{"include":["*Local Storage*","*Extension State*","*History*"],"exclude":["*Cache*","*Cookies*","*Network*"],"max_package_bytes":33554432}})";
+
+  // The kernel's own default must produce exactly these rules.
+  ProfileSyncConfig parsed;
+  std::string error;
+  ASSERT_TRUE(ParseProfileSyncConfig(kRunnerPayload, &parsed, &error))
+      << error;
+
+  const ProfileSyncConfig kernel_default = DefaultProfileSyncConfig();
+  EXPECT_EQ(parsed.include, kernel_default.include);
+  EXPECT_EQ(parsed.exclude, kernel_default.exclude);
+  EXPECT_EQ(parsed.max_package_bytes, kernel_default.max_package_bytes);
+
+  // The length is pinned because it is the frame header's `len` field.
+  EXPECT_EQ(std::string(kRunnerPayload).size(), 155u);
+
+  // The payload carries rules only: no key, no session key, no bitmap.
+  const std::string payload(kRunnerPayload);
+  EXPECT_EQ(payload.find("key"), std::string::npos);
+  EXPECT_EQ(payload.find("data_url"), std::string::npos);
+}
+
 }  // namespace
 }  // namespace lengsuo::fp

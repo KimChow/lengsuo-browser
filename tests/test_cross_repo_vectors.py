@@ -36,6 +36,7 @@ transcription slip would enter -- and a slip there looks exactly like a
 protocol disagreement.
 """
 import importlib.util
+import os
 import pathlib
 import tempfile
 import unittest
@@ -180,3 +181,60 @@ class CrossRepoVectorOffsetsTest(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class ProfileConfigBundleVectorTest(unittest.TestCase):
+    """The R card's ConfigBundle payload must be guarded byte for byte.
+
+    Why this exists
+    ---------------
+    Task R produced two implementations of the same wire payload: the
+    kernel side parses it, the client side sends it. The client hardcodes
+    the 155-byte payload in `profile_vectors.rs` and asserts that its own
+    output matches it. The kernel side had no such constant -- its test
+    only checked that a payload it assembled itself round-tripped through
+    its own parser, so a key-order or field change on either side would
+    have gone unnoticed.
+
+    The check below compares the two sides' literals directly. The
+    kernel's copy is the one this repository owns, so the tool reads it
+    from `native/profile_bundle_test.cc`.
+    """
+
+    def setUp(self):
+        self.kernel = ROOT
+        self.client = pathlib.Path(
+            os.environ.get("LENGSUO_DESKTOP_REPO",
+                            "/home/ubuntu/lengsuo-desktop-dev/repo"))
+
+    def test_the_kernel_side_ships_the_profile_payload_literal(self):
+        """The kernel's copy of the payload must be findable."""
+        payload = tool.find_kernel_profile_payload(self.kernel)
+        # The readers return hex, so the byte count is half the length.
+        self.assertEqual(len(payload) // 2, tool.PROFILE_PAYLOAD_LEN)
+
+    def test_the_client_side_ships_the_same_literal(self):
+        """The client must hardcode the identical bytes."""
+        client = self.client / tool.CLIENT_PROFILE_REL
+        if not client.is_file():
+            self.skipTest("the client repo is not available on this host")
+        payload = tool.rust_profile_payload(
+            client.read_text(encoding="utf-8"))
+        self.assertEqual(len(payload) // 2, tool.PROFILE_PAYLOAD_LEN)
+
+    def test_the_two_sides_agree_byte_for_byte(self):
+        """The whole point: the two literals must be identical."""
+        client = self.client / tool.CLIENT_PROFILE_REL
+        if not client.is_file():
+            self.skipTest("the client repo is not available on this host")
+        kernel_payload = tool.find_kernel_profile_payload(self.kernel)
+        client_payload = tool.rust_profile_payload(
+            client.read_text(encoding="utf-8"))
+        self.assertEqual(kernel_payload, client_payload,
+                         "the two repos' ConfigBundle payload differs")
+
+    def test_the_payload_carries_no_secret(self):
+        """The payload must not carry a key or a session key."""
+        payload = tool.find_kernel_profile_payload(self.kernel)
+        self.assertNotIn("key", payload.lower())
+        self.assertNotIn("data_url", payload.lower())

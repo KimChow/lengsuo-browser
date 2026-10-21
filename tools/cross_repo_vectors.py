@@ -47,6 +47,18 @@ import sys
 CONTRACT_REL = "docs/kernel-wire-contract.md"
 CLIENT_REL = "crates/lengsuo-desktop/src/kernel_pipe/tests.rs"
 
+# The client repo's home for task R's cross-repo vectors. The ConfigBundle
+# payload lives in its own file because it is a wire vector, not a test
+# helper: the client asserts against it, and the kernel repo compares
+# against it too.
+CLIENT_PROFILE_REL = (
+    "crates/lengsuo-desktop/src/kernel_pipe/profile_vectors.rs")
+
+# The kernel side's copy of the same payload, and its length in bytes.
+# The length is the frame header's `len` field, so it is pinned twice:
+# once here, and once by the kernel's own gtest.
+PROFILE_PAYLOAD_LEN = 155
+
 # Where the wire contract lives when the repository does not ship it.
 #
 # The repository keeps `docs/` as a local-only working area, so a clone of
@@ -217,8 +229,58 @@ def find_kernel_payload(kernel: pathlib.Path,
         % ", ".join(str(p) for p in paths))
 
 
+def _raw_strings(text: str, name: str) -> str:
+    """Return the raw string literal(s) a Rust constant is built from.
+
+    The client declares the payload with `concat!` over several raw
+    string pieces, so the pieces are joined in the order they appear.
+    """
+    match = re.search(r"const\s+%s\s*:\s*&str\s*=\s*(.*?);" % name, text, re.S)
+    if not match:
+        raise VectorError("the client lost the %r constant" % name)
+    body = match.group(1)
+    pieces = re.findall(r'r#"(.*?)"#', body, re.S)
+    if not pieces:
+        raise VectorError("the client's %r constant has no raw string" % name)
+    return "".join(pieces)
+
+
+def rust_profile_payload(text: str) -> str:
+    """Extract the client's ConfigBundle payload as raw bytes.
+
+    The payload is a JSON string, so it is compared as text rather than
+    as hex: the two sides must spell the same JSON, and hex-encoding it
+    here would only move the question to the encoder.
+    """
+    return _raw_strings(text, "CONFIG_BUNDLE_PAYLOAD").encode("utf-8").hex()
+
+
+def cpp_profile_payload(text: str) -> str:
+    """Extract the kernel side's ConfigBundle payload as raw bytes.
+
+    The kernel declares it as a C++ raw string literal next to the test
+    that checks it, so the literal is read straight out of the source.
+    """
+    match = re.search(
+        r'constexpr\s+char\s+kRunnerPayload\[\]\s*=\s*R"\((.*?)\)";', text, re.S)
+    if not match:
+        raise VectorError("the kernel test lost the kRunnerPayload literal")
+    return match.group(1).encode("utf-8").hex()
+
+
+def find_kernel_profile_payload(kernel: pathlib.Path) -> str:
+    """Read the kernel side's ConfigBundle payload literal.
+
+    The literal lives in the profile bundle's test file, next to the test
+    that asserts against it.
+    """
+    path = kernel / "native" / "profile_bundle_test.cc"
+    if not path.is_file():
+        raise VectorError("the kernel repo has no %s" % path)
+    return cpp_profile_payload(path.read_text(encoding="utf-8"))
+
+
 def main(argv: list[str] | None = None) -> int:
-    parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--kernel", required=True,
                         help="path to the kernel repo working copy")
     parser.add_argument("--client", required=True,
@@ -279,6 +341,32 @@ def main(argv: list[str] | None = None) -> int:
         print("clear region omits %-18s %s"
               % (forbidden, "OK" if clean else "LEAKED"))
         ok = ok and clean
+
+    # Task R's ConfigBundle payload. The kernel parses it, the client
+    # sends it, and the two repos each hardcode their own copy -- so the
+    # copies are compared here, the same way the envelope vectors are.
+    # A missing side is reported, not skipped: a silently absent check
+    # would look like a passing one.
+    print()
+    try:
+        kernel_profile = find_kernel_profile_payload(kernel)
+        client_profile_file = client / CLIENT_PROFILE_REL
+        if not client_profile_file.is_file():
+            raise VectorError("the client repo has no %s" % client_profile_file)
+        client_profile = rust_profile_payload(
+            client_profile_file.read_text(encoding="utf-8"))
+    except (OSError, VectorError) as error:
+        print("ConfigBundle payload  %s" % error)
+        ok = False
+    else:
+        agree = kernel_profile == client_profile
+        print("ConfigBundle payload  %-18s %s"
+              % ("%d B" % (len(kernel_profile) // 2),
+                 "OK" if agree else "MISMATCH"))
+        if not agree:
+            ok = False
+            print("    %-9s %s" % ("client", client_profile))
+            print("    %-9s %s" % ("kernel", kernel_profile))
 
     print()
     print("cross-repo vectors agree:" , "YES" if ok else "NO")
