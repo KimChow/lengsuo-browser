@@ -3,34 +3,28 @@
 // The merge must be idempotent and must never discard an operator's own
 // --disable-features value: this runs on every startup, and clobbering a
 // debugging flag would be a silent regression in the field.
+//
+// This file used to carry its own main() and hand-rolled pass counter, which
+// silently replaced the gtest runner of the bootstrap_unittests binary: every
+// TEST() in the other files compiled into it never executed. It is a gtest
+// TEST now, like the rest of the binary.
 #include "lengsuo/integration/official_defaults.h"
 
-#include <cstdio>
 #include <string>
 
 #include "base/command_line.h"
+#include "testing/gtest/include/gtest/gtest.h"
 
 namespace {
-int g_passes = 0;
-int g_failures = 0;
-
-void Check(bool ok, const char* expr, int line) {
-  if (ok) {
-    ++g_passes;
-  } else {
-    std::printf("FAIL line %d: %s\n", line, expr);
-    ++g_failures;
-  }
-}
 
 bool Has(std::string_view haystack, std::string_view needle) {
   return haystack.find(needle) != std::string_view::npos;
 }
 }  // namespace
 
-#define CHECK(cond) Check((cond), #cond, __LINE__)
+#define CHECK(cond) EXPECT_TRUE(cond)
 
-int main() {
+TEST(OfficialDefaults, MergeAndApply) {
   using lengsuo::MergeDisabledFeatures;
 
   // 1. Empty input still gets the required feature.
@@ -88,8 +82,4 @@ int main() {
 
   // 9. Null-safe: callers may pass nothing in tests.
   lengsuo::ApplyOfficialFeatureDefaults(nullptr);
-
-  std::printf("official_defaults_unittest: %d passes, %d failures\n", g_passes,
-              g_failures);
-  return g_failures == 0 ? 0 : 1;
 }
