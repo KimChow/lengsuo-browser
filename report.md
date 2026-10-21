@@ -78,6 +78,10 @@ L3 文档（`--lengsuo-managed-l3`）」。
 一字未改**。若裁定认为这属于越界，可单独回退——但那样 `bootstrap_unittests`
 就继续只跑 17 条手写断言，本任务的 5 条 gtest 也不会在里面。
 
+唯一的措辞改动：断言宏从手写的 `CHECK(cond)` 换成 gtest 的 `EXPECT_TRUE(cond)`。
+原因是 gtest 自己也定义了 `CHECK` 宏，沿用同名会触发 `-Wmacro-redefined`
+告警。语义等价（原来失败时打印 `FAIL line N: expr`，现在由 gtest 报失败位置）。
+
 ## F. `tools/rebuild/apply_l3_wiring.py` 重写（请复核）
 
 该脚本原本自带一份接线代码副本（exact-string 替换），与
@@ -96,6 +100,12 @@ L3 文档（`--lengsuo-managed-l3`）」。
 - 任务书说「`tools/overlay.py` MAPPING 加 3 个新文件」，实际新增了
   **7 个**（含 `.mojom`、`BUILD.gn`、`impl.h`、`impl.cc`、gtest 源文件）。
   漏一个 = gn gen 过、链接炸，所以按实际需要全加了。
+- 纯逻辑的形状从「类 `L3DocumentSource`」改成「自由函数
+  `GetL3Document(reader)`」。原因是 Chromium 的 chromium-style 检查要求
+  复杂类有 out-of-line 构造/析构，而 `.cc` 里的 Mojo 适配层需要生成的绑定
+  头文件——`run_l3_gtest.sh` 那条 standalone 编译命令编不到那个 `.cc`，
+  照着风格检查改就会链接失败。改成自由函数后：风格检查零告警，
+  standalone 编译照旧成立，功能不变。
 
 ## H. 验收覆盖分层（任务书第 6 条要求写清）
 
