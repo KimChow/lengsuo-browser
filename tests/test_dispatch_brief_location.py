@@ -297,9 +297,16 @@ echo "MENTIONS_DIR=$(grep -c 'briefs/cc-task-brief-l3f.md' "$T/case3" || true)"
         self.assertIn("--resolve-brief", text,
                       "the launcher has no mode that only resolves the brief")
         # It must exit before the clone and before the session starter.
+        #
+        # The search has to look for the command, not for the word: a
+        # comment that explains how the session is started mentions the
+        # same program, and matching the word would put the "session
+        # starter" before the resolve mode in a file that is actually
+        # ordered correctly. The command names the script it runs, and
+        # only the real invocation does that.
         resolve_at = text.find("--resolve-brief")
         clone_at = text.find("git clone")
-        setsid_at = text.find("setsid")
+        setsid_at = text.find('setsid -f bash "$work/run.sh"')
         self.assertNotEqual(clone_at, -1, "the launcher no longer clones")
         self.assertNotEqual(setsid_at, -1,
                             "the launcher no longer starts a session")
