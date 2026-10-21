@@ -170,3 +170,33 @@ source_set("action_table") {
   ]
   public_deps = [ ":kernel_pipe_json" ]
 }
+
+# The L3E1 document envelope: an L3W1 document sealed under a 32-byte master
+# key the caller supplies (task N). It is a layer of its own because the
+# crypto is its own dependency: the file format, the KDF and the AEAD live
+# here and nowhere else.
+#
+# The master key never comes from this target. It is the caller's, and the
+# caller's key source is the runner handshake - see
+# docs/l3-reports/task-N.md.
+source_set("l3_envelope") {
+  sources = [
+    "l3_envelope.cc",
+    "l3_envelope.h",
+  ]
+  deps = [ "//third_party/boringssl" ]
+}
+
+# The seam between the pipe's session key and the envelope: the key is
+# supplied by the caller and from nowhere else. A separate target because it
+# is a separate layer, and because l3_envelope.cc is already near the 700
+# line hard limit.
+source_set("l3_envelope_session") {
+  sources = [
+    "l3_envelope_session.cc",
+    "l3_envelope_session.h",
+  ]
+  # The BoringSSL dependency comes with :l3_envelope - this layer calls into
+  # it, it does not reach for the crypto itself.
+  public_deps = [ ":l3_envelope" ]
+}

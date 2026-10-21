@@ -47,7 +47,7 @@
     },
     {
       "path": "patches/0011-lengsuo-sources.patch",
-      "sha256": "e0a4e4f7f6c986147f5a53f324022ac353fdbc84bea96700d8405670748321b9"
+      "sha256": "7c7725323a7b508f069c5d03d744d850b1052d1a657ec51a3a27d88a6a45dcde"
     },
     {
       "path": "patches/0012-ua-ch-brand.patch",

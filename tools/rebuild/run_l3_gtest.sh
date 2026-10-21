@@ -11,7 +11,8 @@
 #   recipe-dir  default: $PWD
 #   gtest-root  default: <repo>/../src/third_party/googletest/src/googletest
 #
-# kernel_pipe needs BoringSSL (AES-256-GCM, SHA-256, HKDF). It is found in
+# kernel_pipe needs BoringSSL (AES-256-GCM, SHA-256, HKDF), and so does the
+# L3E1 document envelope (AES-256-GCM, PBKDF2, SHA-256). It is found in
 # this order: $BORINGSSL_DIR, the Chromium tree's third_party/boringssl, a
 # host build cached under ~/.cache/lengsuo-boringssl. The target is skipped
 # with a loud message when no BoringSSL is available - it is never silently
@@ -84,6 +85,8 @@ TARGETS=(
   "kernel_pipe_envelope|native/kernel_pipe_envelope.cc native/kernel_pipe_frame.cc native/kernel_pipe_keys.cc"
   "kernel_pipe|native/kernel_pipe.cc native/kernel_pipe_frame.cc native/kernel_pipe_json.cc native/kernel_pipe_keys.cc native/kernel_pipe_envelope.cc"
   "action_table|native/action_table.cc native/kernel_pipe_json.cc"
+  "l3_envelope|native/l3_envelope.cc"
+  "l3_envelope_session|native/l3_envelope_session.cc native/l3_envelope.cc native/kernel_pipe_keys.cc native/kernel_pipe_frame.cc"
 )
 
 FAILED=()
@@ -102,10 +105,11 @@ for spec in "${TARGETS[@]}"; do
   # The pipe targets that use BoringSSL. When it is unavailable the target is
   # reported as failed, not skipped: a silently missing target would make
   # "passed 8" a lie. The frame and JSON layers deliberately do not need it.
+  # The L3E1 document envelope needs it too (AES-256-GCM, PBKDF2, SHA-256).
   target_flags=("${CXXFLAGS[@]}")
   target_link=(-pthread)
   case "$name" in
-    kernel_pipe|kernel_pipe_envelope|kernel_pipe_keys)
+    kernel_pipe|kernel_pipe_envelope|kernel_pipe_keys|l3_envelope|l3_envelope_session)
       if [ -z "$BORINGSSL_DIR" ] || [ -z "$BORINGSSL_LIB" ]; then
         echo "COMPILE-FAIL  $name (BoringSSL not found; set BORINGSSL_DIR)"
         FAILED+=("$name")

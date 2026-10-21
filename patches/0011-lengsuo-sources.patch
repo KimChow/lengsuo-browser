@@ -2130,10 +2130,10 @@ index 0000000..3bd62d6
 +#endif
 diff --git a/lengsuo/native/BUILD.gn b/lengsuo/native/BUILD.gn
 new file mode 100644
-index 0000000..d063ff9
+index 0000000..2e5a514
 --- /dev/null
 +++ b/lengsuo/native/BUILD.gn
-@@ -0,0 +1,172 @@
+@@ -0,0 +1,202 @@
 +# Decoder source sets. Chromium integration evidence lives in VERIFICATION.md.
 +source_set("profile_wire") {
 +  sources = [
@@ -2305,6 +2305,36 @@ index 0000000..d063ff9
 +    "action_table.h",
 +  ]
 +  public_deps = [ ":kernel_pipe_json" ]
++}
++
++# The L3E1 document envelope: an L3W1 document sealed under a 32-byte master
++# key the caller supplies (task N). It is a layer of its own because the
++# crypto is its own dependency: the file format, the KDF and the AEAD live
++# here and nowhere else.
++#
++# The master key never comes from this target. It is the caller's, and the
++# caller's key source is the runner handshake - see
++# docs/l3-reports/task-N.md.
++source_set("l3_envelope") {
++  sources = [
++    "l3_envelope.cc",
++    "l3_envelope.h",
++  ]
++  deps = [ "//third_party/boringssl" ]
++}
++
++# The seam between the pipe's session key and the envelope: the key is
++# supplied by the caller and from nowhere else. A separate target because it
++# is a separate layer, and because l3_envelope.cc is already near the 700
++# line hard limit.
++source_set("l3_envelope_session") {
++  sources = [
++    "l3_envelope_session.cc",
++    "l3_envelope_session.h",
++  ]
++  # The BoringSSL dependency comes with :l3_envelope - this layer calls into
++  # it, it does not reach for the crypto itself.
++  public_deps = [ ":l3_envelope" ]
 +}
 diff --git a/lengsuo/native/action_table.cc b/lengsuo/native/action_table.cc
 new file mode 100644
@@ -8051,6 +8081,1251 @@ index 0000000..2792da0
 +}  // namespace lengsuo::fp::test
 +
 +#endif  // LENGSUO_NATIVE_KERNEL_PIPE_TEST_UTIL_H_
+diff --git a/lengsuo/native/l3_envelope.cc b/lengsuo/native/l3_envelope.cc
+new file mode 100644
+index 0000000..07a539b
+--- /dev/null
++++ b/lengsuo/native/l3_envelope.cc
+@@ -0,0 +1,290 @@
++#include "l3_envelope.h"
++
++#include <openssl/aead.h>
++#include <openssl/evp.h>
++#include <openssl/mem.h>
++#include <openssl/rand.h>
++
++#include <cstring>
++#include <utility>
++
++namespace lengsuo::fp {
++namespace {
++
++constexpr char kMagic[4] = {'L', '3', 'E', '1'};
++constexpr std::uint8_t kFormatVersion = 1;
++constexpr std::uint8_t kKdfPbkdf2HmacSha256 = 1;
++constexpr std::uint8_t kCipherAes256Gcm = 1;
++
++// Little-endian 32-bit load/store. The envelope is a byte-exact on-disk
++// format, so the encoding must not depend on the host's endianness.
++void StoreU32(char* out, std::uint32_t value) {
++  out[0] = static_cast<char>(value & 0xff);
++  out[1] = static_cast<char>((value >> 8) & 0xff);
++  out[2] = static_cast<char>((value >> 16) & 0xff);
++  out[3] = static_cast<char>((value >> 24) & 0xff);
++}
++
++std::uint32_t LoadU32(const char* in) {
++  return static_cast<std::uint32_t>(static_cast<unsigned char>(in[0])) |
++         (static_cast<std::uint32_t>(static_cast<unsigned char>(in[1])) << 8) |
++         (static_cast<std::uint32_t>(static_cast<unsigned char>(in[2])) << 16) |
++         (static_cast<std::uint32_t>(static_cast<unsigned char>(in[3])) << 24);
++}
++
++// Derives the 32-byte AEAD key from the master key, the salt and the
++// iteration count.  Returns false when the KDF fails (e.g. an iteration
++// count of 0, which BoringSSL rejects).
++bool DeriveKey(const L3EnvelopeKey& master,
++               const std::uint8_t* salt,
++               std::size_t salt_len,
++               std::uint32_t iterations,
++               std::uint8_t* out) {
++  if (iterations == 0) return false;
++  return PKCS5_PBKDF2_HMAC(master.bytes().data(), master.bytes().size(), salt,
++                            salt_len, iterations, EVP_sha256(),
++                            kL3EnvelopeKeyBytes, out) == 1;
++}
++
++// Wipes a buffer that held key material.
++void Wipe(void* buffer, std::size_t size) {
++  if (buffer != nullptr && size > 0) {
++    OPENSSL_cleanse(buffer, size);
++  }
++}
++
++}  // namespace
++
++L3EnvelopeKey::L3EnvelopeKey(const std::string& bytes) {
++  // A wrong-length key is rejected outright.  Padding a short key up would
++  // silently weaken the KDF, and truncating a long one would ignore bits the
++  // caller believed were protecting the document.
++  if (bytes.size() != kL3EnvelopeKeyBytes) {
++    return;
++  }
++  bytes_ = bytes;
++  valid_ = true;
++}
++
++L3EnvelopeKey::~L3EnvelopeKey() {
++  Wipe(bytes_.data(), bytes_.size());
++}
++
++L3EnvelopeKey::L3EnvelopeKey(L3EnvelopeKey&& other) noexcept
++    : bytes_(std::move(other.bytes_)), valid_(other.valid_) {
++  other.bytes_.clear();
++  other.valid_ = false;
++}
++
++L3EnvelopeKey& L3EnvelopeKey::operator=(L3EnvelopeKey&& other) noexcept {
++  if (this != &other) {
++    Wipe(bytes_.data(), bytes_.size());
++    bytes_ = std::move(other.bytes_);
++    valid_ = other.valid_;
++    other.bytes_.clear();
++    other.valid_ = false;
++  }
++  return *this;
++}
++
++bool SealL3Envelope(std::string_view plaintext,
++                    const L3EnvelopeKey& key,
++                    std::uint32_t iterations,
++                    std::string* out,
++                    std::string* error) {
++  const auto fail = [error](const char* message) {
++    if (error) *error = message;
++    return false;
++  };
++  if (out == nullptr) return fail("l3envelope: null output");
++  if (!key.valid()) return fail("l3envelope: invalid key");
++  if (plaintext.empty()) return fail("l3envelope: empty document");
++  if (plaintext.size() > kMaxL3EnvelopePlaintextBytes) {
++    return fail("l3envelope: oversized document");
++  }
++  if (iterations == 0) iterations = kDefaultL3EnvelopeIterations;
++
++  std::uint8_t salt[kL3EnvelopeSaltBytes] = {};
++  std::uint8_t nonce[kL3EnvelopeNonceBytes] = {};
++  if (RAND_bytes(salt, sizeof(salt)) != 1 ||
++      RAND_bytes(nonce, sizeof(nonce)) != 1) {
++    return fail("l3envelope: no randomness");
++  }
++
++  std::uint8_t derived[kL3EnvelopeKeyBytes] = {};
++  if (!DeriveKey(key, salt, sizeof(salt), iterations, derived)) {
++    Wipe(derived, sizeof(derived));
++    return fail("l3envelope: key derivation failed");
++  }
++
++  EVP_AEAD_CTX* ctx = EVP_AEAD_CTX_new(EVP_aead_aes_256_gcm(), derived,
++                                        sizeof(derived),
++                                        kL3EnvelopeTagBytes);
++  if (ctx == nullptr) {
++    Wipe(derived, sizeof(derived));
++    return fail("l3envelope: aead init failed");
++  }
++
++  // The ciphertext is the plaintext followed by the GCM tag.
++  const std::size_t ciphertext_len = plaintext.size() + kL3EnvelopeTagBytes;
++
++  // The header is additional data: it is authenticated but not encrypted, so
++  // a flipped length or iteration count fails the open instead of changing
++  // how the payload is interpreted.
++  char header[kL3EnvelopeHeaderBytes] = {};
++  std::memcpy(header, kMagic, sizeof(kMagic));
++  header[4] = static_cast<char>(kFormatVersion);
++  header[5] = static_cast<char>(kKdfPbkdf2HmacSha256);
++  header[6] = static_cast<char>(kCipherAes256Gcm);
++  header[7] = 0;
++  StoreU32(header + 8, kL3EnvelopeHeaderBytes);
++  StoreU32(header + 12, iterations);
++  StoreU32(header + 16, static_cast<std::uint32_t>(sizeof(salt)));
++  StoreU32(header + 20, static_cast<std::uint32_t>(sizeof(nonce)));
++  StoreU32(header + 24, static_cast<std::uint32_t>(kL3EnvelopeTagBytes));
++  StoreU32(header + 28, static_cast<std::uint32_t>(ciphertext_len));
++
++  std::string buffer;
++  buffer.reserve(kL3EnvelopeHeaderBytes + sizeof(salt) + sizeof(nonce) +
++                 ciphertext_len);
++  buffer.append(header, sizeof(header));
++  buffer.append(reinterpret_cast<const char*>(salt), sizeof(salt));
++  buffer.append(reinterpret_cast<const char*>(nonce), sizeof(nonce));
++  // The buffer is grown to its final size before sealing, so the AEAD
++  // writes into the string's own storage rather than past its end.
++  buffer.resize(kL3EnvelopeHeaderBytes + sizeof(salt) + sizeof(nonce) +
++                ciphertext_len);
++
++  std::size_t sealed_len = 0;
++  const bool sealed = EVP_AEAD_CTX_seal(
++      ctx, reinterpret_cast<std::uint8_t*>(&buffer[kL3EnvelopeHeaderBytes +
++                                                    sizeof(salt) +
++                                                    sizeof(nonce)]),
++      &sealed_len, ciphertext_len, nonce, sizeof(nonce),
++      reinterpret_cast<const std::uint8_t*>(plaintext.data()),
++      plaintext.size(), reinterpret_cast<const std::uint8_t*>(header),
++      sizeof(header)) == 1;
++  EVP_AEAD_CTX_free(ctx);
++  Wipe(derived, sizeof(derived));
++  if (!sealed || sealed_len != ciphertext_len) {
++    return fail("l3envelope: seal failed");
++  }
++  buffer.resize(kL3EnvelopeHeaderBytes + sizeof(salt) + sizeof(nonce) +
++                sealed_len);
++
++  *out = std::move(buffer);
++  if (error) error->clear();
++  return true;
++}
++
++bool OpenL3Envelope(std::string_view envelope,
++                    const L3EnvelopeKey& key,
++                    std::string* out,
++                    std::string* error) {
++  const auto fail = [error](const char* message) {
++    if (error) *error = message;
++    return false;
++  };
++  if (out == nullptr) return fail("l3envelope: null output");
++  if (!key.valid()) return fail("l3envelope: invalid key");
++  if (envelope.empty()) return fail("l3envelope: empty envelope");
++  if (envelope.size() > kMaxL3EnvelopeBytes) {
++    return fail("l3envelope: oversized envelope");
++  }
++  // The envelope must carry at least a header, a salt, a nonce and a tag.
++  if (envelope.size() < kL3EnvelopeOverheadBytes) {
++    return fail("l3envelope: truncated envelope");
++  }
++  if (envelope.size() < kL3EnvelopeHeaderBytes) {
++    return fail("l3envelope: truncated header");
++  }
++  if (std::memcmp(envelope.data(), kMagic, sizeof(kMagic)) != 0) {
++    return fail("l3envelope: bad magic");
++  }
++  if (static_cast<std::uint8_t>(envelope[4]) != kFormatVersion) {
++    return fail("l3envelope: unsupported version");
++  }
++  if (static_cast<std::uint8_t>(envelope[5]) != kKdfPbkdf2HmacSha256 ||
++      static_cast<std::uint8_t>(envelope[6]) != kCipherAes256Gcm) {
++    return fail("l3envelope: unsupported algorithm");
++  }
++  if (static_cast<std::uint8_t>(envelope[7]) != 0) {
++    return fail("l3envelope: reserved bits set");
++  }
++
++  const std::uint32_t header_len = LoadU32(envelope.data() + 8);
++  const std::uint32_t iterations = LoadU32(envelope.data() + 12);
++  const std::uint32_t salt_len = LoadU32(envelope.data() + 16);
++  const std::uint32_t nonce_len = LoadU32(envelope.data() + 20);
++  const std::uint32_t tag_len = LoadU32(envelope.data() + 24);
++  const std::uint32_t ciphertext_len = LoadU32(envelope.data() + 28);
++
++  // Every length must be exactly what this format defines. Accepting a
++  // different salt or nonce size would mean interpreting bytes the writer
++  // never meant, and a header length other than the fixed one would move
++  // the payload boundary.
++  if (header_len != kL3EnvelopeHeaderBytes ||
++      salt_len != kL3EnvelopeSaltBytes ||
++      nonce_len != kL3EnvelopeNonceBytes ||
++      tag_len != kL3EnvelopeTagBytes) {
++    return fail("l3envelope: bad header lengths");
++  }
++  if (iterations == 0) return fail("l3envelope: bad iteration count");
++  if (ciphertext_len < tag_len) return fail("l3envelope: bad ciphertext length");
++  const std::size_t plaintext_len = ciphertext_len - tag_len;
++  if (plaintext_len == 0) return fail("l3envelope: empty document");
++
++  const std::size_t expected =
++      kL3EnvelopeHeaderBytes + salt_len + nonce_len + ciphertext_len;
++  if (envelope.size() != expected) {
++    return fail("l3envelope: truncated or oversized envelope");
++  }
++
++  const char* salt = envelope.data() + kL3EnvelopeHeaderBytes;
++  const char* nonce = salt + salt_len;
++  const char* ciphertext = nonce + nonce_len;
++
++  std::uint8_t derived[kL3EnvelopeKeyBytes] = {};
++  if (!DeriveKey(key, reinterpret_cast<const std::uint8_t*>(salt), salt_len,
++                 iterations, derived)) {
++    Wipe(derived, sizeof(derived));
++    return fail("l3envelope: key derivation failed");
++  }
++
++  EVP_AEAD_CTX* ctx = EVP_AEAD_CTX_new(EVP_aead_aes_256_gcm(), derived,
++                                        sizeof(derived), tag_len);
++  if (ctx == nullptr) {
++    Wipe(derived, sizeof(derived));
++    return fail("l3envelope: aead init failed");
++  }
++
++  std::string plaintext;
++  plaintext.resize(plaintext_len);
++  std::size_t opened_len = 0;
++  // A wrong key, a flipped ciphertext byte or a tampered header all make
++  // EVP_AEAD_CTX_open fail, and the plaintext buffer is zeroed by then, so
++  // nothing partial escapes.
++  const bool opened = EVP_AEAD_CTX_open(
++      ctx, reinterpret_cast<std::uint8_t*>(&plaintext[0]), &opened_len,
++      plaintext_len, reinterpret_cast<const std::uint8_t*>(nonce), nonce_len,
++      reinterpret_cast<const std::uint8_t*>(ciphertext), ciphertext_len,
++      reinterpret_cast<const std::uint8_t*>(envelope.data()), header_len) == 1;
++  EVP_AEAD_CTX_free(ctx);
++  Wipe(derived, sizeof(derived));
++  if (!opened || opened_len != plaintext_len) {
++    Wipe(plaintext.data(), plaintext.size());
++    return fail("l3envelope: authentication failed");
++  }
++
++  *out = std::move(plaintext);
++  if (error) error->clear();
++  return true;
++}
++
++bool IsL3Envelope(std::string_view envelope) {
++  return envelope.size() >= kL3EnvelopeHeaderBytes &&
++         std::memcmp(envelope.data(), kMagic, sizeof(kMagic)) == 0 &&
++         static_cast<std::uint8_t>(envelope[4]) == kFormatVersion;
++}
++
++}  // namespace lengsuo::fp
+diff --git a/lengsuo/native/l3_envelope.h b/lengsuo/native/l3_envelope.h
+new file mode 100644
+index 0000000..252d8cd
+--- /dev/null
++++ b/lengsuo/native/l3_envelope.h
+@@ -0,0 +1,142 @@
++// l3_envelope - the encrypted envelope around an L3W1 document (task N).
++//
++// Why this exists: the managed L3 document used to travel as plaintext
++// base64 on the command line. Base64 is an encoding, not encryption, so
++// anyone who can read the process command line recovers every pinned
++// fingerprint value. The 对标端's own measurement agrees: its `init_bak.json`
++// payload is 724,160 B, i.e. 16-byte aligned, which is an AES block size.
++//
++// This module is the "中期方案" (mid-term plan) half of the fix:
++//
++//   * the on-disk managed file (`--lengsuo-l3-wire=<path>`) holds an
++//     *envelope*, not a plaintext L3W1 document;
++//   * the command line keeps its shape - it still carries only a path;
++//   * `--lengsuo-managed-l3=<base64>` is untouched and still carries the
++//     plaintext document to the renderer as the transitional path.
++//
++// Envelope layout (all integers little-endian, all offsets byte counts):
++//
++//   offset  size  field
++//   0       4     magic "L3E1"
++//   4       1     format version (1)
++//   5       1     KDF id (1 = PBKDF2-HMAC-SHA256)
++//   6       1     cipher id (1 = AES-256-GCM)
++//   7       1     reserved, must be 0
++//   8       4     header length (bytes, from offset 0 to the ciphertext)
++//   12      4     KDF iteration count
++//   16      4     salt length
++//   20      4     nonce length
++//   24      4     tag length
++//   28      4     ciphertext length
++//   32      ...   salt bytes
++//   ...     ...   nonce bytes
++//   ...     ...   ciphertext bytes
++//   ...     16    GCM authentication tag
++//
++// The header is authenticated as additional data, so flipping a byte in the
++// iteration count, the salt or the lengths is a decryption failure and not a
++// silent re-interpretation.
++//
++// Key handling: the master key is NEVER hardcoded and never derived from a
++// constant in this file.  It is supplied by the caller (see
++// L3EnvelopeKey).  A caller that has no secure key source must fail
++// closed rather than fall back to a weak key - see the task-N report.
++//
++// Every failure mode is fail-closed: a wrong key, a tampered ciphertext, a
++// truncated envelope, an empty payload or an oversized payload all produce
++// failure with no partial plaintext escaping.
++#ifndef LENGSUO_NATIVE_L3_ENVELOPE_H_
++#define LENGSUO_NATIVE_L3_ENVELOPE_H_
++
++#include <cstddef>
++#include <cstdint>
++#include <string>
++#include <string_view>
++
++namespace lengsuo::fp {
++
++// The managed L3 document is bounded by kMaxL3WireBytes (64 KiB). An
++// envelope adds a bounded header, a salt, a nonce and a tag, so the envelope
++// bound is the document bound plus that overhead.
++inline constexpr std::size_t kMaxL3EnvelopeBytes = 64 * 1024 + 1024;
++
++inline constexpr std::size_t kL3EnvelopeSaltBytes = 16;
++inline constexpr std::size_t kL3EnvelopeNonceBytes = 12;
++inline constexpr std::size_t kL3EnvelopeTagBytes = 16;
++inline constexpr std::size_t kL3EnvelopeKeyBytes = 32;
++inline constexpr std::size_t kL3EnvelopeHeaderBytes = 32;
++
++// Bytes an envelope adds around the plaintext: the 32-byte header, the
++// 16-byte salt, the 12-byte nonce and the 16-byte tag.
++inline constexpr std::size_t kL3EnvelopeOverheadBytes =
++    kL3EnvelopeHeaderBytes + kL3EnvelopeSaltBytes + kL3EnvelopeNonceBytes +
++    kL3EnvelopeTagBytes;
++
++// The largest plaintext that still fits inside kMaxL3EnvelopeBytes.
++inline constexpr std::size_t kMaxL3EnvelopePlaintextBytes =
++    kMaxL3EnvelopeBytes - kL3EnvelopeOverheadBytes;
++
++// PBKDF2-HMAC-SHA256 iteration count used when the caller does not pick one.
++// Chosen so a single derivation costs ~20 ms on the build host: slow enough
++// to make offline guessing of a weak master key expensive, fast enough that
++// startup is not noticeable.  BoringSSL does ~270k iterations/second here.
++inline constexpr std::uint32_t kDefaultL3EnvelopeIterations = 100000;
++
++// The master key for the envelope.  `bytes` must be exactly
++// kL3EnvelopeKeyBytes long; a shorter or longer key is rejected rather
++// than padded or truncated, because silently accepting a weak key is how a
++// "protected" document turns out to be readable.
++//
++// The key is held by value and wiped on destruction: the plaintext
++// fingerprint values this protects are exactly the ones that must not
++// linger in memory longer than needed.
++class L3EnvelopeKey {
++ public:
++  L3EnvelopeKey() = default;
++  explicit L3EnvelopeKey(const std::string& bytes);
++  ~L3EnvelopeKey();
++  L3EnvelopeKey(const L3EnvelopeKey&) = delete;
++  L3EnvelopeKey& operator=(const L3EnvelopeKey&) = delete;
++  L3EnvelopeKey(L3EnvelopeKey&& other) noexcept;
++  L3EnvelopeKey& operator=(L3EnvelopeKey&& other) noexcept;
++
++  // True when a key of the right length is held.
++  bool valid() const { return valid_; }
++  std::size_t size() const { return bytes_.size(); }
++  const std::string& bytes() const { return bytes_; }
++
++ private:
++  std::string bytes_;
++  bool valid_ = false;
++};
++
++// Seals `plaintext` (the exact bytes of an L3W1 document) into an
++// envelope.  `key` must be valid; an invalid key fails rather than falling
++// back to a default.  `iterations` of 0 means kDefaultL3EnvelopeIterations.
++//
++// Returns false and sets `*error` (when non-null) on failure.  On success
++// `*out` holds a complete envelope.
++bool SealL3Envelope(std::string_view plaintext,
++                    const L3EnvelopeKey& key,
++                    std::uint32_t iterations,
++                    std::string* out,
++                    std::string* error);
++
++// Opens an envelope and returns the plaintext bytes.
++//
++// `*out` is left untouched on every failure, so a wrong key or a tampered
++// envelope can never yield partial plaintext.  Returns false and sets
++// `*error` (when non-null) on failure.
++bool OpenL3Envelope(std::string_view envelope,
++                    const L3EnvelopeKey& key,
++                    std::string* out,
++                    std::string* error);
++
++// True when `envelope` starts with the L3E1 magic and the format version.
++// This is a cheap structural check, not a validation: use OpenL3Envelope
++// for the real thing.
++bool IsL3Envelope(std::string_view envelope);
++
++}  // namespace lengsuo::fp
++
++#endif  // LENGSUO_NATIVE_L3_ENVELOPE_H_
+diff --git a/lengsuo/native/l3_envelope_session.cc b/lengsuo/native/l3_envelope_session.cc
+new file mode 100644
+index 0000000..7dbabc2
+--- /dev/null
++++ b/lengsuo/native/l3_envelope_session.cc
+@@ -0,0 +1,79 @@
++#include "l3_envelope_session.h"
++
++#include <utility>
++
++namespace lengsuo::fp {
++namespace {
++
++void SetError(std::string* error, const char* message) {
++  if (error != nullptr) {
++    *error = message;
++  }
++}
++
++}  // namespace
++
++bool MakeL3EnvelopeKey(std::string_view session_key,
++                       L3EnvelopeKey* out,
++                       std::string* error) {
++  if (out == nullptr) {
++    SetError(error, "l3session: no output");
++    return false;
++  }
++  // The key is the caller's, and the caller's is the only source there is.
++  // There is no default, no derivation and no fallback: a caller that has no
++  // key has no envelope.
++  //
++  // The length is checked here and nowhere else, because the envelope's own
++  // key constructor checks it too. A key of the wrong length is refused
++  // rather than padded or truncated.
++  if (session_key.size() != kL3EnvelopeSessionKeyBytes) {
++    // The message says how long the key was, never what it was.
++    SetError(error, "l3session: bad session key length");
++    return false;
++  }
++  *out = L3EnvelopeKey(std::string(session_key));
++  if (!out->valid()) {
++    // Unreachable while the two length checks agree; kept so a future change
++    // to either one fails closed instead of sealing under a bad key.
++    SetError(error, "l3session: bad session key length");
++    return false;
++  }
++  if (error != nullptr) {
++    error->clear();
++  }
++  return true;
++}
++
++bool SealL3Document(std::string_view document,
++                    std::string_view session_key,
++                    std::uint32_t iterations,
++                    std::string* out,
++                    std::string* error) {
++  if (out == nullptr) {
++    SetError(error, "l3session: no output");
++    return false;
++  }
++  L3EnvelopeKey key;
++  if (!MakeL3EnvelopeKey(session_key, &key, error)) {
++    return false;
++  }
++  return SealL3Envelope(document, key, iterations, out, error);
++}
++
++bool OpenL3Document(std::string_view envelope,
++                    std::string_view session_key,
++                    std::string* out,
++                    std::string* error) {
++  if (out == nullptr) {
++    SetError(error, "l3session: no output");
++    return false;
++  }
++  L3EnvelopeKey key;
++  if (!MakeL3EnvelopeKey(session_key, &key, error)) {
++    return false;
++  }
++  return OpenL3Envelope(envelope, key, out, error);
++}
++
++}  // namespace lengsuo::fp
+diff --git a/lengsuo/native/l3_envelope_session.h b/lengsuo/native/l3_envelope_session.h
+new file mode 100644
+index 0000000..9815060
+--- /dev/null
++++ b/lengsuo/native/l3_envelope_session.h
+@@ -0,0 +1,102 @@
++// l3_envelope_session - the seam between the pipe's session key and the L3E1
++// document envelope (task N).
++//
++// Two envelopes live in this tree and they are two different layers:
++//
++//   native/l3_envelope.{h,cc}          the L3E1 envelope: the L3W1 document
++//                                      in its on-disk form, sealed under a
++//                                      32-byte master key. Little-endian
++//                                      header, PBKDF2-HMAC-SHA256, 76 bytes
++//                                      of overhead.
++//   native/kernel_pipe_envelope.{h,cc} the KeyEnvelope of the runner <-> kernel
++//                                      pipe: the session key handed down at
++//                                      handshake time. Big-endian, no KDF, an
++//                                      85-byte payload.
++//
++// Their only meeting point is this one: **the key is supplied by the caller**.
++// This file is that meeting point, and it is deliberately thin.
++//
++// Where the key comes from (and it is not from here):
++//
++//   The runner seals the session key into the pipe's KeyEnvelope; the kernel
++//   opens it in the handshake (task Q, native/kernel_pipe.{h,cc}). The
++//   handshake holds the key in memory only, and hands it out as
++//   KernelPipeHandshake::session_key(). **That is the caller**:
++//
++//       L3EnvelopeKey key;
++//       if (!MakeL3EnvelopeKey(handshake.session_key(), &key, &error)) { ... }
++//       SealL3Envelope(document, key, iterations, &envelope, &error);
++//
++// This module never derives a key, never defaults one, never reads one from
++// the environment, a file or a constant. A caller with no key has no
++// envelope: the failure is "unavailable", not "a weak key".
++//
++// The layer boundary is deliberate: this file does not include
++// kernel_pipe*.h, because a disk-format module must not depend on the
++// transport that happens to carry its key today. The one thing both layers
++// must agree on - the session key's length - is pinned here and checked
++// against the pipe's own constant by the test, not by a header include.
++//
++// The lifetime of the key is the caller's business too: the pipe's session
++// key expires, and the contract says an expired key must be refused. The
++// envelope layer imposes no lifetime of its own, because the key's source
++// may stop being a per-session key later. See docs/l3-reports/task-N.md
++// section 4 for the open questions.
++#ifndef LENGSUO_NATIVE_L3_ENVELOPE_SESSION_H_
++#define LENGSUO_NATIVE_L3_ENVELOPE_SESSION_H_
++
++#include <cstddef>
++#include <cstdint>
++#include <string>
++#include <string_view>
++
++#include "l3_envelope.h"
++
++namespace lengsuo::fp {
++
++// The length the caller's key must have. It is the envelope's own key length
++// (32 bytes) and also the length the pipe contract pins for the session key
++// (contract section 1), so the pipe's session key fits the envelope without
++// padding or truncation.
++inline constexpr std::size_t kL3EnvelopeSessionKeyBytes = kL3EnvelopeKeyBytes;
++
++// Builds the envelope's master key from the caller's key.
++//
++// `session_key` must be exactly kL3EnvelopeSessionKeyBytes long. A shorter
++// or longer key is refused rather than padded or truncated: padding would
++// silently weaken the KDF, truncating would ignore bits the caller believed
++// were protecting the document.
++//
++// Returns false and sets `*error` (when non-null) on failure. `*out` is left
++// untouched on failure, so a rejected key cannot leave a half-built key
++// behind.
++bool MakeL3EnvelopeKey(std::string_view session_key,
++                       L3EnvelopeKey* out,
++                       std::string* error);
++
++// Seals an L3W1 document under the caller's key.
++//
++// `iterations` of 0 means kDefaultL3EnvelopeIterations. This is
++// SealL3Envelope with the key taken from the caller in one step, so a caller
++// cannot accidentally seal under a key it never validated.
++//
++// Returns false and sets `*error` (when non-null) on failure. `*out` is left
++// untouched on failure.
++bool SealL3Document(std::string_view document,
++                    std::string_view session_key,
++                    std::uint32_t iterations,
++                    std::string* out,
++                    std::string* error);
++
++// Opens an envelope with the caller's key.
++//
++// Returns false and sets `*error` (when non-null) on failure. `*out` is left
++// untouched on failure, so no partial plaintext escapes.
++bool OpenL3Document(std::string_view envelope,
++                    std::string_view session_key,
++                    std::string* out,
++                    std::string* error);
++
++}  // namespace lengsuo::fp
++
++#endif  // LENGSUO_NATIVE_L3_ENVELOPE_SESSION_H_
+diff --git a/lengsuo/native/l3_envelope_session_test.cc b/lengsuo/native/l3_envelope_session_test.cc
+new file mode 100644
+index 0000000..a58305a
+--- /dev/null
++++ b/lengsuo/native/l3_envelope_session_test.cc
+@@ -0,0 +1,217 @@
++// l3_envelope_session_test - the seam between the pipe's session key and the
++// L3E1 document envelope (task N).
++//
++// Two envelopes live in this tree and they are NOT the same thing:
++//
++//   native/l3_envelope.{h,cc}          the L3E1 envelope: an L3W1 document on
++//                                      disk, sealed under a master key the
++//                                      caller supplies. Little-endian,
++//                                      PBKDF2, 76 bytes of overhead.
++//   native/kernel_pipe_envelope.{h,cc} the KeyEnvelope of the runner <-> kernel
++//                                      pipe: the session key handed down at
++//                                      handshake time. Big-endian, no KDF, an
++//                                      85-byte payload.
++//
++// This file's subject is the seam between them, and it is the only one: the
++// pipe's session key becomes the L3E1 master key, unchanged.
++//
++// The tests below pin the three properties that matter:
++//   * the key comes from the caller and from nowhere else;
++//   * no key means "unavailable", never "a weak key";
++//   * the seam does not weaken the authentication the envelope already had.
++#include "l3_envelope_session.h"
++
++#include <gtest/gtest.h>
++
++#include <string>
++
++#include "kernel_pipe_keys.h"
++
++namespace lengsuo::fp {
++namespace {
++
++// The session key length the pipe contract pins (contract section 1): the
++// runner sends 32 bytes of session key inside the KeyEnvelope. The L3E1
++// master key is exactly that many bytes, so the two agree by construction
++// rather than by coincidence.
++//
++// The check is against the pipe's own constant, not against a number
++// written here: if the pipe ever changes the length, this file fails to
++// compile instead of silently padding or truncating.
++static_assert(kKernelPipeSessionKeyBytes == kL3EnvelopeSessionKeyBytes,
++              "the pipe's session key and the envelope's master key must "
++              "have the same length");
++static_assert(kL3EnvelopeSessionKeyBytes == kL3EnvelopeKeyBytes,
++              "the seam's key length and the envelope's key length must "
++              "have the same length");
++
++constexpr std::size_t kSessionKeyBytes = kKernelPipeSessionKeyBytes;
++
++// A session key. It is a test fixture, not a secret.
++std::string SessionKey(char fill) {
++  return std::string(kSessionKeyBytes, fill);
++}
++
++// An L3W1 document: the body plus its sign line, the same shape
++// l3_envelope_test.cc seals.
++std::string ReferenceDocument() {
++  return "L3W1\n"
++         "pins 1\n"
++         "https://mms.pinduoduo.com|local|finger-key_0.1.5|"
++         "7FcROXwfKGAKuwlRwwlBCEUPeZXjwrH5\n"
++         "sign 0123456789abcdef0123456789abcdef_v1_t1700000000\n";
++}
++
++// --- the mapping -----------------------------------------------------------
++
++TEST(L3EnvelopeSessionTest, TheSessionKeyLengthIsThePipeContractLength) {
++  // The pipe's session key (contract section 1) and the L3E1 master key
++  // must be the same size, otherwise the seam could not hand one to the
++  // other without padding or truncating. The static_asserts above make the
++  // compile fail if the two ever drift apart; this test is the runtime
++  // half of the same statement.
++  EXPECT_EQ(kSessionKeyBytes, kL3EnvelopeSessionKeyBytes);
++  EXPECT_EQ(kL3EnvelopeSessionKeyBytes, kL3EnvelopeKeyBytes);
++}
++
++TEST(L3EnvelopeSessionTest, ASessionKeyBecomesAValidEnvelopeKey) {
++  L3EnvelopeKey key;
++  std::string error = "unset";
++  ASSERT_TRUE(MakeL3EnvelopeKey(SessionKey('S'), &key, &error)) << error;
++  EXPECT_TRUE(error.empty());
++  EXPECT_TRUE(key.valid());
++  EXPECT_EQ(key.size(), kL3EnvelopeSessionKeyBytes);
++  EXPECT_EQ(key.bytes(), SessionKey('S'));
++}
++
++TEST(L3EnvelopeSessionTest, ASessionKeyOfTheWrongLengthIsRejected) {
++  // Padding a short key up would weaken the KDF; truncating a long one
++  // would drop entropy the sender believed was protecting the document.
++  // Both are refused.
++  for (const std::size_t size : {std::size_t{0}, std::size_t{16},
++                                 std::size_t{31}, std::size_t{33},
++                                 std::size_t{64}}) {
++    L3EnvelopeKey key;
++    std::string error;
++    EXPECT_FALSE(MakeL3EnvelopeKey(std::string(size, 'S'), &key, &error))
++        << "a session key of " << size << " bytes was accepted";
++    EXPECT_FALSE(error.empty());
++    EXPECT_FALSE(key.valid());
++  }
++}
++
++TEST(L3EnvelopeSessionTest, ARejectedSessionKeyLeavesTheOutputUntouched) {
++  L3EnvelopeKey key;
++  std::string error;
++  ASSERT_TRUE(MakeL3EnvelopeKey(SessionKey('S'), &key, &error)) << error;
++  const std::string before = key.bytes();
++
++  EXPECT_FALSE(MakeL3EnvelopeKey("too short", &key, &error));
++  EXPECT_EQ(key.bytes(), before);
++  EXPECT_TRUE(key.valid());
++}
++
++TEST(L3EnvelopeSessionTest, NoSessionKeyMeansUnavailableNotAWeakKey) {
++  // There is no default key and no derivation from a constant: a caller
++  // without a session key simply has no envelope.
++  L3EnvelopeKey key;
++  std::string error;
++  EXPECT_FALSE(MakeL3EnvelopeKey("", &key, &error));
++  EXPECT_FALSE(key.valid());
++  EXPECT_EQ(key.size(), 0u);
++  EXPECT_TRUE(key.bytes().empty());
++}
++
++TEST(L3EnvelopeSessionTest, DifferentSessionKeysGiveDifferentEnvelopeKeys) {
++  L3EnvelopeKey first;
++  L3EnvelopeKey second;
++  std::string error;
++  ASSERT_TRUE(MakeL3EnvelopeKey(SessionKey('A'), &first, &error)) << error;
++  ASSERT_TRUE(MakeL3EnvelopeKey(SessionKey('B'), &second, &error)) << error;
++  EXPECT_NE(first.bytes(), second.bytes());
++}
++
++// --- seal and open through the seam ---------------------------------------
++
++TEST(L3EnvelopeSessionTest, ADocumentRoundTripsThroughTheSessionKey) {
++  const std::string document = ReferenceDocument();
++  std::string envelope;
++  std::string error;
++  ASSERT_TRUE(SealL3Document(document, SessionKey('S'), 1000, &envelope,
++                             &error))
++      << error;
++  EXPECT_TRUE(error.empty());
++  EXPECT_TRUE(IsL3Envelope(envelope));
++
++  std::string opened;
++  ASSERT_TRUE(OpenL3Document(envelope, SessionKey('S'), &opened, &error))
++      << error;
++  EXPECT_EQ(opened, document);
++}
++
++TEST(L3EnvelopeSessionTest, TheWrongSessionKeyCannotOpenTheDocument) {
++  std::string envelope;
++  std::string error;
++  ASSERT_TRUE(SealL3Document(ReferenceDocument(), SessionKey('S'), 1000,
++                             &envelope, &error))
++      << error;
++
++  std::string opened = "sentinel";
++  EXPECT_FALSE(OpenL3Document(envelope, SessionKey('T'), &opened, &error));
++  EXPECT_EQ(opened, "sentinel");
++}
++
++TEST(L3EnvelopeSessionTest, TheSessionKeyIsNotInTheEnvelope) {
++  // The session key must not survive in the envelope as readable bytes.
++  std::string envelope;
++  std::string error;
++  ASSERT_TRUE(SealL3Document(ReferenceDocument(), SessionKey('S'), 1000,
++                             &envelope, &error))
++      << error;
++  EXPECT_EQ(envelope.find(SessionKey('S')), std::string::npos);
++  EXPECT_EQ(envelope.find("L3W1"), std::string::npos);
++  EXPECT_EQ(envelope.find("finger-key_0.1.5"), std::string::npos);
++}
++
++TEST(L3EnvelopeSessionTest, SealingWithoutASessionKeyFails) {
++  std::string envelope = "sentinel";
++  std::string error;
++  EXPECT_FALSE(SealL3Document(ReferenceDocument(), "", 1000, &envelope,
++                              &error));
++  EXPECT_EQ(envelope, "sentinel");
++  EXPECT_FALSE(error.empty());
++}
++
++TEST(L3EnvelopeSessionTest, OpeningWithoutASessionKeyFails) {
++  // An envelope sealed under one session key must not open under no key at
++  // all: there is no "empty key" to fall back to.
++  std::string envelope;
++  std::string error;
++  ASSERT_TRUE(SealL3Document(ReferenceDocument(), SessionKey('S'), 1000,
++                             &envelope, &error))
++      << error;
++
++  std::string opened = "sentinel";
++  EXPECT_FALSE(OpenL3Document(envelope, "", &opened, &error));
++  EXPECT_EQ(opened, "sentinel");
++}
++
++TEST(L3EnvelopeSessionTest, TheSeamDoesNotWeakenAuthentication) {
++  std::string envelope;
++  std::string error;
++  ASSERT_TRUE(SealL3Document(ReferenceDocument(), SessionKey('S'), 1000,
++                             &envelope, &error))
++      << error;
++
++  // One flipped byte in the ciphertext body still fails to open.
++  std::string tampered = envelope;
++  tampered[kL3EnvelopeHeaderBytes + kL3EnvelopeSaltBytes +
++            kL3EnvelopeNonceBytes + 3] ^= 0x01;
++
++  std::string opened = "sentinel";
++  EXPECT_FALSE(OpenL3Document(tampered, SessionKey('S'), &opened, &error));
++  EXPECT_EQ(opened, "sentinel");
++}
++
++}  // namespace
++}  // namespace lengsuo::fp
+diff --git a/lengsuo/native/l3_envelope_test.cc b/lengsuo/native/l3_envelope_test.cc
+new file mode 100644
+index 0000000..2174395
+--- /dev/null
++++ b/lengsuo/native/l3_envelope_test.cc
+@@ -0,0 +1,379 @@
++// l3_envelope_test - the encrypted envelope around an L3W1 document.
++//
++// The scenario is the one the task brief describes: a managed L3 document
++// (pins / cookie facts / extension whitelist / mirror rules) that used to
++// travel as plaintext base64 on the command line, and that must now be
++// sealed into an envelope whose only on-disk form is ciphertext.
++//
++// The reference document is the pinduoduo pin set from the 对标端 cache,
++// the same fixture l3_wire_test.cc uses, so a sealed envelope and a parsed
++// L3Config describe the same environment.
++#include "l3_envelope.h"
++
++#include <gtest/gtest.h>
++
++#include <string>
++
++namespace lengsuo::fp {
++namespace {
++
++// A real L3W1 document: the body plus its sign line. The bytes matter -
++// the envelope must recover them exactly, not an equivalent document.
++std::string ReferenceDocument() {
++  const std::string body =
++      "L3W1\n"
++      "pins 2\n"
++      "https://mms.pinduoduo.com|local|finger-key_0.1.5|"
++      "7FcROXwfKGAKuwlRwwlBCEUPeZXjwrH5\n"
++      "https://mms.pinduoduo.com|local|finger-uuid1_0.1.5|"
++      "9df4fd33-43dc-4432-b6aa-67c80d64545d\n"
++      "cookies 1\n"
++      ".pinduoduo.com|_bee|7FcROXwfKGAKuwlRwwlBCEUPeZXjwrH5\n"
++      "ext 1\n"
++      "fjchbfkopknlodpfoaeogfbclcpppiog\n"
++      "rules 1\n"
++      ".pinduoduo.com|_bee|https://mms.pinduoduo.com|finger-key_0.1.5\n";
++  // The sign line is part of the document bytes, so it is sealed too.
++  return body + "sign 0123456789abcdef0123456789abcdef_v1_t1700000000\n";
++}
++
++// A 32-byte master key. It is a test fixture, not a secret: the point of
++// the tests is that the key comes from the caller and never from a
++// constant baked into the implementation.
++L3EnvelopeKey TestKey() {
++  return L3EnvelopeKey(std::string(32, 'K'));
++}
++
++L3EnvelopeKey OtherKey() {
++  return L3EnvelopeKey(std::string(32, 'X'));
++}
++
++// A key of the wrong length must be rejected, not padded or truncated.
++L3EnvelopeKey ShortKey() {
++  return L3EnvelopeKey(std::string(16, 'K'));
++}
++
++TEST(L3EnvelopeTest, RoundTripReproducesDocumentByteForByte) {
++  const std::string document = ReferenceDocument();
++  const L3EnvelopeKey key = TestKey();
++
++  std::string envelope;
++  std::string error = "unset";
++  ASSERT_TRUE(SealL3Envelope(document, key, 1000, &envelope, &error)) << error;
++  EXPECT_TRUE(error.empty());
++  EXPECT_TRUE(IsL3Envelope(envelope));
++
++  std::string opened;
++  ASSERT_TRUE(OpenL3Envelope(envelope, key, &opened, &error)) << error;
++  EXPECT_EQ(opened, document);
++}
++
++TEST(L3EnvelopeTest, EnvelopeDoesNotContainThePlaintext) {
++  const std::string document = ReferenceDocument();
++  const L3EnvelopeKey key = TestKey();
++
++  std::string envelope;
++  std::string error;
++  ASSERT_TRUE(SealL3Envelope(document, key, 1000, &envelope, &error)) << error;
++
++  // The pinned value must not survive in the envelope as readable bytes.
++  EXPECT_EQ(envelope.find("7FcROXwfKGAKuwlRwwlBCEUPeZXjwrH5"), std::string::npos);
++  EXPECT_EQ(envelope.find("finger-key_0.1.5"), std::string::npos);
++  EXPECT_EQ(envelope.find("L3W1"), std::string::npos);
++}
++
++TEST(L3EnvelopeTest, TwoEnvelopesOfTheSameDocumentDiffer) {
++  // A fresh salt and nonce per seal, so the same document never produces
++  // the same bytes twice on disk.
++  const std::string document = ReferenceDocument();
++  const L3EnvelopeKey key = TestKey();
++
++  std::string first;
++  std::string second;
++  std::string error;
++  ASSERT_TRUE(SealL3Envelope(document, key, 1000, &first, &error)) << error;
++  ASSERT_TRUE(SealL3Envelope(document, key, 1000, &second, &error)) << error;
++  EXPECT_NE(first, second);
++
++  std::string opened_first;
++  std::string opened_second;
++  ASSERT_TRUE(OpenL3Envelope(first, key, &opened_first, &error)) << error;
++  ASSERT_TRUE(OpenL3Envelope(second, key, &opened_second, &error)) << error;
++  EXPECT_EQ(opened_first, document);
++  EXPECT_EQ(opened_second, document);
++}
++
++TEST(L3EnvelopeTest, WrongKeyFailsAndReturnsNoPlaintext) {
++  const std::string document = ReferenceDocument();
++  const L3EnvelopeKey key = TestKey();
++  const L3EnvelopeKey wrong = OtherKey();
++
++  std::string envelope;
++  std::string error;
++  ASSERT_TRUE(SealL3Envelope(document, key, 1000, &envelope, &error)) << error;
++
++  std::string opened = "sentinel";
++  std::string failure;
++  EXPECT_FALSE(OpenL3Envelope(envelope, wrong, &opened, &failure));
++  EXPECT_FALSE(failure.empty());
++  // Not even a prefix of the plaintext may escape.
++  EXPECT_EQ(opened, "sentinel");
++  EXPECT_EQ(opened.find("L3W1"), std::string::npos);
++}
++
++TEST(L3EnvelopeTest, TamperedCiphertextFailsAuthentication) {
++  const std::string document = ReferenceDocument();
++  const L3EnvelopeKey key = TestKey();
++
++  std::string envelope;
++  std::string error;
++  ASSERT_TRUE(SealL3Envelope(document, key, 1000, &envelope, &error)) << error;
++
++  // Flip one bit in the ciphertext body. The GCM tag covers it, so the
++  // open must fail rather than return modified plaintext.
++  std::string tampered = envelope;
++  const std::size_t offset = kL3EnvelopeHeaderBytes + kL3EnvelopeSaltBytes +
++                             kL3EnvelopeNonceBytes + 3;
++  ASSERT_LT(offset, tampered.size());
++  tampered[offset] = static_cast<char>(tampered[offset] ^ 0x01);
++
++  std::string opened = "sentinel";
++  std::string failure;
++  EXPECT_FALSE(OpenL3Envelope(tampered, key, &opened, &failure));
++  EXPECT_EQ(opened, "sentinel");
++}
++
++TEST(L3EnvelopeTest, TamperedAuthenticationTagFails) {
++  const std::string document = ReferenceDocument();
++  const L3EnvelopeKey key = TestKey();
++
++  std::string envelope;
++  std::string error;
++  ASSERT_TRUE(SealL3Envelope(document, key, 1000, &envelope, &error)) << error;
++
++  std::string tampered = envelope;
++  tampered[tampered.size() - 1] =
++      static_cast<char>(tampered[tampered.size() - 1] ^ 0x80);
++
++  std::string opened = "sentinel";
++  std::string failure;
++  EXPECT_FALSE(OpenL3Envelope(tampered, key, &opened, &failure));
++  EXPECT_EQ(opened, "sentinel");
++}
++
++TEST(L3EnvelopeTest, TamperedHeaderFailsAuthentication) {
++  // The header is additional data: changing the iteration count must fail
++  // the open, not silently re-derive a different key.
++  const std::string document = ReferenceDocument();
++  const L3EnvelopeKey key = TestKey();
++
++  std::string envelope;
++  std::string error;
++  ASSERT_TRUE(SealL3Envelope(document, key, 1000, &envelope, &error)) << error;
++
++  std::string tampered = envelope;
++  tampered[12] = static_cast<char>(tampered[12] ^ 0x01);
++
++  std::string opened = "sentinel";
++  std::string failure;
++  EXPECT_FALSE(OpenL3Envelope(tampered, key, &opened, &failure));
++  EXPECT_EQ(opened, "sentinel");
++}
++
++TEST(L3EnvelopeTest, TruncatedEnvelopeFails) {
++  const std::string document = ReferenceDocument();
++  const L3EnvelopeKey key = TestKey();
++
++  std::string envelope;
++  std::string error;
++  ASSERT_TRUE(SealL3Envelope(document, key, 1000, &envelope, &error)) << error;
++
++  // Every truncation must fail: the length in the header no longer matches
++  // the bytes present.
++  for (std::size_t cut : {std::size_t{0}, std::size_t{1}, std::size_t{16},
++                          kL3EnvelopeHeaderBytes, envelope.size() / 2,
++                          envelope.size() - 1}) {
++    std::string truncated = envelope.substr(0, cut);
++    std::string opened = "sentinel";
++    std::string failure;
++    EXPECT_FALSE(OpenL3Envelope(truncated, key, &opened, &failure))
++        << "truncation to " << cut << " bytes was accepted";
++    EXPECT_EQ(opened, "sentinel");
++  }
++}
++
++TEST(L3EnvelopeTest, EmptyInputFails) {
++  const L3EnvelopeKey key = TestKey();
++  std::string error;
++
++  // Sealing an empty document is refused: an envelope with no payload
++  // carries no L3 statement, and accepting it would let a truncated file
++  // look like a valid one.
++  std::string envelope = "sentinel";
++  EXPECT_FALSE(SealL3Envelope("", key, 1000, &envelope, &error));
++  EXPECT_EQ(envelope, "sentinel");
++
++  // Opening an empty envelope is refused too.
++  std::string opened = "sentinel";
++  EXPECT_FALSE(OpenL3Envelope("", key, &opened, &error));
++  EXPECT_EQ(opened, "sentinel");
++}
++
++TEST(L3EnvelopeTest, OversizedInputFails) {
++  const L3EnvelopeKey key = TestKey();
++  std::string error;
++  const std::string huge(kMaxL3EnvelopeBytes + 1, 'x');
++
++  std::string envelope = "sentinel";
++  EXPECT_FALSE(SealL3Envelope(huge, key, 1000, &envelope, &error));
++  EXPECT_EQ(envelope, "sentinel");
++
++  std::string opened = "sentinel";
++  EXPECT_FALSE(OpenL3Envelope(huge, key, &opened, &error));
++  EXPECT_EQ(opened, "sentinel");
++}
++
++TEST(L3EnvelopeTest, DocumentSizeBoundaryIsRespected) {
++  const L3EnvelopeKey key = TestKey();
++  std::string error;
++
++  // The largest plaintext that still fits in an envelope must seal and
++  // open; one byte more must be refused.
++  const std::string at_limit(kMaxL3EnvelopePlaintextBytes, 'd');
++  std::string envelope;
++  ASSERT_TRUE(SealL3Envelope(at_limit, key, 1000, &envelope, &error)) << error;
++  EXPECT_LE(envelope.size(), kMaxL3EnvelopeBytes);
++
++  std::string opened;
++  ASSERT_TRUE(OpenL3Envelope(envelope, key, &opened, &error)) << error;
++  EXPECT_EQ(opened.size(), at_limit.size());
++
++  const std::string over_limit(kMaxL3EnvelopePlaintextBytes + 1, 'd');
++  std::string rejected = "sentinel";
++  EXPECT_FALSE(SealL3Envelope(over_limit, key, 1000, &rejected, &error));
++  EXPECT_EQ(rejected, "sentinel");
++}
++
++TEST(L3EnvelopeTest, InvalidKeyLengthIsRejected) {
++  // A wrong-length master key is refused rather than padded or truncated:
++  // silently accepting it is how a "protected" document stays readable.
++  const L3EnvelopeKey short_key = ShortKey();
++  EXPECT_FALSE(short_key.valid());
++  EXPECT_EQ(short_key.size(), 0u);
++
++  std::string envelope = "sentinel";
++  std::string error;
++  EXPECT_FALSE(SealL3Envelope(ReferenceDocument(), short_key, 1000, &envelope,
++                              &error));
++  EXPECT_EQ(envelope, "sentinel");
++
++  // An open with a rejected key fails as well.
++  std::string opened = "sentinel";
++  EXPECT_FALSE(OpenL3Envelope("L3E1garbage", short_key, &opened, &error));
++  EXPECT_EQ(opened, "sentinel");
++}
++
++TEST(L3EnvelopeTest, ForeignDataIsNotAnEnvelope) {
++  const L3EnvelopeKey key = TestKey();
++  std::string opened = "sentinel";
++  std::string error;
++
++  // A plaintext L3W1 document is not an envelope: the reader must not
++  // mistake the transitional base64 payload for a sealed one.
++  EXPECT_FALSE(OpenL3Envelope(ReferenceDocument(), key, &opened, &error));
++  EXPECT_EQ(opened, "sentinel");
++  EXPECT_FALSE(IsL3Envelope(ReferenceDocument()));
++}
++
++TEST(L3EnvelopeTest, UnknownVersionIsRejected) {
++  const L3EnvelopeKey key = TestKey();
++  std::string envelope;
++  std::string error;
++  ASSERT_TRUE(SealL3Envelope(ReferenceDocument(), key, 1000, &envelope, &error))
++      << error;
++
++  std::string bumped = envelope;
++  bumped[4] = static_cast<char>(99);
++
++  std::string opened = "sentinel";
++  std::string failure;
++  EXPECT_FALSE(OpenL3Envelope(bumped, key, &opened, &failure));
++  EXPECT_EQ(opened, "sentinel");
++  EXPECT_FALSE(IsL3Envelope(bumped));
++}
++
++TEST(L3EnvelopeTest, BadMagicIsRejected) {
++  const L3EnvelopeKey key = TestKey();
++  std::string opened = "sentinel";
++  std::string error;
++  EXPECT_FALSE(OpenL3Envelope("XXXXnot-an-envelope-at-all", key, &opened, &error));
++  EXPECT_EQ(opened, "sentinel");
++}
++
++TEST(L3EnvelopeTest, InconsistentLengthsAreRejected) {
++  // A header whose ciphertext length does not match the bytes present must
++  // fail before any decryption is attempted.
++  const L3EnvelopeKey key = TestKey();
++  std::string envelope;
++  std::string error;
++  ASSERT_TRUE(SealL3Envelope(ReferenceDocument(), key, 1000, &envelope, &error))
++      << error;
++
++  std::string stretched = envelope;
++  stretched[28] = static_cast<char>(stretched[28] + 1);
++
++  std::string opened = "sentinel";
++  std::string failure;
++  EXPECT_FALSE(OpenL3Envelope(stretched, key, &opened, &failure));
++  EXPECT_EQ(opened, "sentinel");
++}
++
++TEST(L3EnvelopeTest, IterationCountIsHonoured) {
++  // The iteration count travels in the header, so a caller can pick a
++  // different cost and the reader must use the one that was written.
++  const std::string document = ReferenceDocument();
++  const L3EnvelopeKey key = TestKey();
++
++  std::string envelope;
++  std::string error;
++  ASSERT_TRUE(SealL3Envelope(document, key, 2000, &envelope, &error)) << error;
++
++  const std::uint32_t iterations =
++      static_cast<std::uint32_t>(static_cast<unsigned char>(envelope[12])) |
++      (static_cast<std::uint32_t>(static_cast<unsigned char>(envelope[13]))
++       << 8) |
++      (static_cast<std::uint32_t>(static_cast<unsigned char>(envelope[14]))
++       << 16) |
++      (static_cast<std::uint32_t>(static_cast<unsigned char>(envelope[15]))
++       << 24);
++  EXPECT_EQ(iterations, 2000u);
++
++  std::string opened;
++  ASSERT_TRUE(OpenL3Envelope(envelope, key, &opened, &error)) << error;
++  EXPECT_EQ(opened, document);
++}
++
++TEST(L3EnvelopeTest, DefaultIterationCountIsUsedWhenUnspecified) {
++  const L3EnvelopeKey key = TestKey();
++  std::string envelope;
++  std::string error;
++  ASSERT_TRUE(SealL3Envelope(ReferenceDocument(), key, 0, &envelope, &error))
++      << error;
++
++  const std::uint32_t iterations =
++      static_cast<std::uint32_t>(static_cast<unsigned char>(envelope[12])) |
++      (static_cast<std::uint32_t>(static_cast<unsigned char>(envelope[13]))
++       << 8) |
++      (static_cast<std::uint32_t>(static_cast<unsigned char>(envelope[14]))
++       << 16) |
++      (static_cast<std::uint32_t>(static_cast<unsigned char>(envelope[15]))
++       << 24);
++  EXPECT_EQ(iterations, kDefaultL3EnvelopeIterations);
++
++  std::string opened;
++  ASSERT_TRUE(OpenL3Envelope(envelope, key, &opened, &error)) << error;
++  EXPECT_EQ(opened, ReferenceDocument());
++}
++
++}  // namespace
++}  // namespace lengsuo::fp
 diff --git a/lengsuo/native/l3_runtime.cc b/lengsuo/native/l3_runtime.cc
 new file mode 100644
 index 0000000..d6e40f7
