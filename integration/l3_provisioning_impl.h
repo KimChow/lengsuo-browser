@@ -34,23 +34,16 @@ inline std::string EncodeL3Document(const fp::L3Config& config) {
 
 // What the browser answers a renderer's GetDocument() with. Empty means
 // "this session has no L3 statement" and the renderer keeps upstream storage
-// behaviour. Every call re-reads the frozen snapshot, so all renderers of one
-// session receive identical bytes.
-class L3DocumentSource {
- public:
-  // Returns the frozen snapshot, or nullptr when none was loaded.
-  using Reader = std::function<const fp::L3Config*()>;
-
-  explicit L3DocumentSource(Reader reader) : reader_(std::move(reader)) {}
-
-  std::string GetDocument() const {
-    const fp::L3Config* config = reader_();
-    return config ? EncodeL3Document(*config) : std::string();
-  }
-
- private:
-  Reader reader_;
-};
+// behaviour.
+//
+// |reader| returns the frozen snapshot, or nullptr when none was loaded. It is
+// called on every request, so all renderers of one session receive identical
+// bytes.
+inline std::string GetL3Document(
+    const std::function<const fp::L3Config*()>& reader) {
+  const fp::L3Config* config = reader();
+  return config ? EncodeL3Document(*config) : std::string();
+}
 
 // Binds |receiver| when it names L3Provisioning and returns true. Returns
 // false for any other interface, leaving the receiver untouched, so the

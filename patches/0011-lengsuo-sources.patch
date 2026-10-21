@@ -907,10 +907,10 @@ index 0000000..c2f0b62
 +#endif  // LENGSUO_INTEGRATION_L3_BOOTSTRAP_H_
 diff --git a/lengsuo/integration/l3_provisioning_impl.cc b/lengsuo/integration/l3_provisioning_impl.cc
 new file mode 100644
-index 0000000..8c4d8e4
+index 0000000..6f075cd
 --- /dev/null
 +++ b/lengsuo/integration/l3_provisioning_impl.cc
-@@ -0,0 +1,50 @@
+@@ -0,0 +1,47 @@
 +#include "lengsuo/integration/l3_provisioning_impl.h"
 +
 +#include <cstdint>
@@ -929,20 +929,17 @@ index 0000000..8c4d8e4
 +
 +class L3ProvisioningImpl : public mojom::L3Provisioning {
 + public:
-+  L3ProvisioningImpl() : source_([] { return BrowserL3Config(); }) {}
++  L3ProvisioningImpl() = default;
 +
 +  // The answer is rebuilt from the snapshot frozen before this renderer was
 +  // launched; nothing is cached per renderer, so two renderers started from
 +  // the same browser always see the same bytes.
 +  void GetDocument(GetDocumentCallback callback) override {
-+    const std::string document = source_.GetDocument();
++    const std::string document = GetL3Document([] { return BrowserL3Config(); });
 +    auto reply = mojom::L3Document::New();
 +    reply->bytes = std::vector<uint8_t>(document.begin(), document.end());
 +    std::move(callback).Run(std::move(reply));
 +  }
-+
-+ private:
-+  L3DocumentSource source_;
 +};
 +
 +}  // namespace
@@ -963,10 +960,10 @@ index 0000000..8c4d8e4
 +}  // namespace lengsuo
 diff --git a/lengsuo/integration/l3_provisioning_impl.h b/lengsuo/integration/l3_provisioning_impl.h
 new file mode 100644
-index 0000000..95ab68e
+index 0000000..656b891
 --- /dev/null
 +++ b/lengsuo/integration/l3_provisioning_impl.h
-@@ -0,0 +1,62 @@
+@@ -0,0 +1,55 @@
 +// l3_provisioning_impl - browser side of the L3 Mojo channel (task O).
 +//
 +// Before this file the frozen document travelled to every renderer as base64
@@ -1003,23 +1000,16 @@ index 0000000..95ab68e
 +
 +// What the browser answers a renderer's GetDocument() with. Empty means
 +// "this session has no L3 statement" and the renderer keeps upstream storage
-+// behaviour. Every call re-reads the frozen snapshot, so all renderers of one
-+// session receive identical bytes.
-+class L3DocumentSource {
-+ public:
-+  // Returns the frozen snapshot, or nullptr when none was loaded.
-+  using Reader = std::function<const fp::L3Config*()>;
-+
-+  explicit L3DocumentSource(Reader reader) : reader_(std::move(reader)) {}
-+
-+  std::string GetDocument() const {
-+    const fp::L3Config* config = reader_();
-+    return config ? EncodeL3Document(*config) : std::string();
-+  }
-+
-+ private:
-+  Reader reader_;
-+};
++// behaviour.
++//
++// |reader| returns the frozen snapshot, or nullptr when none was loaded. It is
++// called on every request, so all renderers of one session receive identical
++// bytes.
++inline std::string GetL3Document(
++    const std::function<const fp::L3Config*()>& reader) {
++  const fp::L3Config* config = reader();
++  return config ? EncodeL3Document(*config) : std::string();
++}
 +
 +// Binds |receiver| when it names L3Provisioning and returns true. Returns
 +// false for any other interface, leaving the receiver untouched, so the
@@ -1031,10 +1021,10 @@ index 0000000..95ab68e
 +#endif  // LENGSUO_INTEGRATION_L3_PROVISIONING_IMPL_H_
 diff --git a/lengsuo/integration/l3_provisioning_impl_test.cc b/lengsuo/integration/l3_provisioning_impl_test.cc
 new file mode 100644
-index 0000000..a717364
+index 0000000..af80612
 --- /dev/null
 +++ b/lengsuo/integration/l3_provisioning_impl_test.cc
-@@ -0,0 +1,100 @@
+@@ -0,0 +1,96 @@
 +// l3_provisioning_impl_test - what the browser answers on the L3 Mojo channel
 +// (task O).
 +//
@@ -1071,15 +1061,13 @@ index 0000000..a717364
 +}
 +
 +TEST(L3ProvisioningTest, NoSnapshotAnswersEmpty) {
-+  L3DocumentSource source([] { return nullptr; });
-+  EXPECT_TRUE(source.GetDocument().empty());
++  EXPECT_TRUE(GetL3Document([] { return nullptr; }).empty());
 +}
 +
 +TEST(L3ProvisioningTest, SnapshotIsAnsweredInRawWireForm) {
 +  const fp::L3Config config = MakeConfig(kSignedAt);
-+  L3DocumentSource source([&config] { return &config; });
 +
-+  const std::string document = source.GetDocument();
++  const std::string document = GetL3Document([&config] { return &config; });
 +  // Raw L3W1, not base64: a regression to the old transport would start with
 +  // an alphabet character and carry no newline.
 +  EXPECT_EQ(document.rfind("L3W1\n", 0), 0u);
@@ -1089,13 +1077,12 @@ index 0000000..a717364
 +
 +TEST(L3ProvisioningTest, RendererAcceptsTheAnswer) {
 +  const fp::L3Config config = MakeConfig(kSignedAt);
-+  L3DocumentSource source([&config] { return &config; });
 +
 +  // What renderer_main.cc does with a non-empty answer: now_unix = 0 because
 +  // the browser already judged freshness.
 +  fp::L3Runtime runtime;
-+  ASSERT_TRUE(runtime.Init(source.GetDocument(), /*now_unix=*/0,
-+                           /*max_age_seconds=*/0));
++  ASSERT_TRUE(runtime.Init(GetL3Document([&config] { return &config; }),
++                           /*now_unix=*/0, /*max_age_seconds=*/0));
 +  const std::string* pinned = runtime.PinnedValue(kOrigin, kKey);
 +  ASSERT_NE(pinned, nullptr);
 +  EXPECT_EQ(*pinned, kValue);
@@ -1104,8 +1091,7 @@ index 0000000..a717364
 +
 +TEST(L3ProvisioningTest, SignatureTimestampIsPreserved) {
 +  const fp::L3Config config = MakeConfig(kSignedAt);
-+  L3DocumentSource source([&config] { return &config; });
-+  const std::string document = source.GetDocument();
++  const std::string document = GetL3Document([&config] { return &config; });
 +
 +  fp::L3Config decoded;
 +  std::string error;
@@ -1122,13 +1108,13 @@ index 0000000..a717364
 +TEST(L3ProvisioningTest, EveryRequestReReadsTheSnapshot) {
 +  const fp::L3Config config = MakeConfig(kSignedAt);
 +  int reads = 0;
-+  L3DocumentSource source([&config, &reads] {
++  const auto reader = [&config, &reads]() -> const fp::L3Config* {
 +    ++reads;
 +    return &config;
-+  });
++  };
 +
-+  const std::string first = source.GetDocument();
-+  const std::string second = source.GetDocument();
++  const std::string first = GetL3Document(reader);
++  const std::string second = GetL3Document(reader);
 +  EXPECT_EQ(first, second);
 +  EXPECT_EQ(reads, 2);
 +}
@@ -1273,10 +1259,10 @@ index 0000000..6792c06
 +#endif  // LENGSUO_INTEGRATION_OFFICIAL_DEFAULTS_H_
 diff --git a/lengsuo/integration/official_defaults_unittest.cc b/lengsuo/integration/official_defaults_unittest.cc
 new file mode 100644
-index 0000000..e557d52
+index 0000000..226c891
 --- /dev/null
 +++ b/lengsuo/integration/official_defaults_unittest.cc
-@@ -0,0 +1,85 @@
+@@ -0,0 +1,83 @@
 +// Unit tests for the feature-default alignment helper.
 +//
 +// The merge must be idempotent and must never discard an operator's own
@@ -1301,23 +1287,21 @@ index 0000000..e557d52
 +}
 +}  // namespace
 +
-+#define CHECK(cond) EXPECT_TRUE(cond)
-+
 +TEST(OfficialDefaults, MergeAndApply) {
 +  using lengsuo::MergeDisabledFeatures;
 +
 +  // 1. Empty input still gets the required feature.
 +  const std::string from_empty = MergeDisabledFeatures("");
-+  CHECK(Has(from_empty, "ReduceAcceptLanguage"));
++  EXPECT_TRUE(Has(from_empty, "ReduceAcceptLanguage"));
 +
 +  // 2. An operator value is preserved, not replaced.
 +  const std::string merged = MergeDisabledFeatures("MyFeature,OtherThing");
-+  CHECK(Has(merged, "MyFeature"));
-+  CHECK(Has(merged, "OtherThing"));
-+  CHECK(Has(merged, "ReduceAcceptLanguage"));
++  EXPECT_TRUE(Has(merged, "MyFeature"));
++  EXPECT_TRUE(Has(merged, "OtherThing"));
++  EXPECT_TRUE(Has(merged, "ReduceAcceptLanguage"));
 +
 +  // 3. Idempotent: merging the result again changes nothing.
-+  CHECK(MergeDisabledFeatures(merged) == merged);
++  EXPECT_TRUE(MergeDisabledFeatures(merged) == merged);
 +
 +  // 4. No duplicates when the feature is already present.
 +  const std::string twice = MergeDisabledFeatures("ReduceAcceptLanguage");
@@ -1326,38 +1310,38 @@ index 0000000..e557d52
 +       pos = twice.find("ReduceAcceptLanguage", pos + 1)) {
 +    ++occurrences;
 +  }
-+  CHECK(occurrences == 1);
++  EXPECT_TRUE(occurrences == 1);
 +
 +  // 5. Whitespace and empty segments do not produce stray commas.
 +  const std::string messy = MergeDisabledFeatures(" A , , B ");
-+  CHECK(Has(messy, "A"));
-+  CHECK(Has(messy, "B"));
-+  CHECK(messy.find(",,") == std::string::npos);
-+  CHECK(!messy.empty() && messy.front() != ',' && messy.back() != ',');
++  EXPECT_TRUE(Has(messy, "A"));
++  EXPECT_TRUE(Has(messy, "B"));
++  EXPECT_TRUE(messy.find(",,") == std::string::npos);
++  EXPECT_TRUE(!messy.empty() && messy.front() != ',' && messy.back() != ',');
 +
 +  // 6. Applying onto a command line that has no switch sets it.
 +  base::CommandLine cmd(base::CommandLine::NO_PROGRAM);
 +  lengsuo::ApplyOfficialFeatureDefaults(&cmd);
-+  CHECK(cmd.HasSwitch("disable-features"));
-+  CHECK(Has(cmd.GetSwitchValueASCII("disable-features"),
-+            "ReduceAcceptLanguage"));
++  EXPECT_TRUE(cmd.HasSwitch("disable-features"));
++  EXPECT_TRUE(Has(cmd.GetSwitchValueASCII("disable-features"),
++                  "ReduceAcceptLanguage"));
 +  // The renderer-side switch is separate and also required: the renderer never
 +  // rebuilds its feature list from the browser's --disable-features.
-+  CHECK(cmd.HasSwitch("disable-reduce-accept-language"));
++  EXPECT_TRUE(cmd.HasSwitch("disable-reduce-accept-language"));
 +
 +  // 7. Applying twice is stable (startup may call it more than once).
 +  const std::string once = cmd.GetSwitchValueASCII("disable-features");
 +  lengsuo::ApplyOfficialFeatureDefaults(&cmd);
-+  CHECK(cmd.GetSwitchValueASCII("disable-features") == once);
-+  CHECK(cmd.HasSwitch("disable-reduce-accept-language"));
++  EXPECT_TRUE(cmd.GetSwitchValueASCII("disable-features") == once);
++  EXPECT_TRUE(cmd.HasSwitch("disable-reduce-accept-language"));
 +
 +  // 8. A pre-existing switch keeps its own entries.
 +  base::CommandLine existing(base::CommandLine::NO_PROGRAM);
 +  existing.AppendSwitchASCII("disable-features", "KeepMe");
 +  lengsuo::ApplyOfficialFeatureDefaults(&existing);
 +  const std::string value = existing.GetSwitchValueASCII("disable-features");
-+  CHECK(Has(value, "KeepMe"));
-+  CHECK(Has(value, "ReduceAcceptLanguage"));
++  EXPECT_TRUE(Has(value, "KeepMe"));
++  EXPECT_TRUE(Has(value, "ReduceAcceptLanguage"));
 +
 +  // 9. Null-safe: callers may pass nothing in tests.
 +  lengsuo::ApplyOfficialFeatureDefaults(nullptr);

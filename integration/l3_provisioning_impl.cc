@@ -16,20 +16,17 @@ namespace {
 
 class L3ProvisioningImpl : public mojom::L3Provisioning {
  public:
-  L3ProvisioningImpl() : source_([] { return BrowserL3Config(); }) {}
+  L3ProvisioningImpl() = default;
 
   // The answer is rebuilt from the snapshot frozen before this renderer was
   // launched; nothing is cached per renderer, so two renderers started from
   // the same browser always see the same bytes.
   void GetDocument(GetDocumentCallback callback) override {
-    const std::string document = source_.GetDocument();
+    const std::string document = GetL3Document([] { return BrowserL3Config(); });
     auto reply = mojom::L3Document::New();
     reply->bytes = std::vector<uint8_t>(document.begin(), document.end());
     std::move(callback).Run(std::move(reply));
   }
-
- private:
-  L3DocumentSource source_;
 };
 
 }  // namespace

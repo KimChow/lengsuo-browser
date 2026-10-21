@@ -22,23 +22,21 @@ bool Has(std::string_view haystack, std::string_view needle) {
 }
 }  // namespace
 
-#define CHECK(cond) EXPECT_TRUE(cond)
-
 TEST(OfficialDefaults, MergeAndApply) {
   using lengsuo::MergeDisabledFeatures;
 
   // 1. Empty input still gets the required feature.
   const std::string from_empty = MergeDisabledFeatures("");
-  CHECK(Has(from_empty, "ReduceAcceptLanguage"));
+  EXPECT_TRUE(Has(from_empty, "ReduceAcceptLanguage"));
 
   // 2. An operator value is preserved, not replaced.
   const std::string merged = MergeDisabledFeatures("MyFeature,OtherThing");
-  CHECK(Has(merged, "MyFeature"));
-  CHECK(Has(merged, "OtherThing"));
-  CHECK(Has(merged, "ReduceAcceptLanguage"));
+  EXPECT_TRUE(Has(merged, "MyFeature"));
+  EXPECT_TRUE(Has(merged, "OtherThing"));
+  EXPECT_TRUE(Has(merged, "ReduceAcceptLanguage"));
 
   // 3. Idempotent: merging the result again changes nothing.
-  CHECK(MergeDisabledFeatures(merged) == merged);
+  EXPECT_TRUE(MergeDisabledFeatures(merged) == merged);
 
   // 4. No duplicates when the feature is already present.
   const std::string twice = MergeDisabledFeatures("ReduceAcceptLanguage");
@@ -47,38 +45,38 @@ TEST(OfficialDefaults, MergeAndApply) {
        pos = twice.find("ReduceAcceptLanguage", pos + 1)) {
     ++occurrences;
   }
-  CHECK(occurrences == 1);
+  EXPECT_TRUE(occurrences == 1);
 
   // 5. Whitespace and empty segments do not produce stray commas.
   const std::string messy = MergeDisabledFeatures(" A , , B ");
-  CHECK(Has(messy, "A"));
-  CHECK(Has(messy, "B"));
-  CHECK(messy.find(",,") == std::string::npos);
-  CHECK(!messy.empty() && messy.front() != ',' && messy.back() != ',');
+  EXPECT_TRUE(Has(messy, "A"));
+  EXPECT_TRUE(Has(messy, "B"));
+  EXPECT_TRUE(messy.find(",,") == std::string::npos);
+  EXPECT_TRUE(!messy.empty() && messy.front() != ',' && messy.back() != ',');
 
   // 6. Applying onto a command line that has no switch sets it.
   base::CommandLine cmd(base::CommandLine::NO_PROGRAM);
   lengsuo::ApplyOfficialFeatureDefaults(&cmd);
-  CHECK(cmd.HasSwitch("disable-features"));
-  CHECK(Has(cmd.GetSwitchValueASCII("disable-features"),
-            "ReduceAcceptLanguage"));
+  EXPECT_TRUE(cmd.HasSwitch("disable-features"));
+  EXPECT_TRUE(Has(cmd.GetSwitchValueASCII("disable-features"),
+                  "ReduceAcceptLanguage"));
   // The renderer-side switch is separate and also required: the renderer never
   // rebuilds its feature list from the browser's --disable-features.
-  CHECK(cmd.HasSwitch("disable-reduce-accept-language"));
+  EXPECT_TRUE(cmd.HasSwitch("disable-reduce-accept-language"));
 
   // 7. Applying twice is stable (startup may call it more than once).
   const std::string once = cmd.GetSwitchValueASCII("disable-features");
   lengsuo::ApplyOfficialFeatureDefaults(&cmd);
-  CHECK(cmd.GetSwitchValueASCII("disable-features") == once);
-  CHECK(cmd.HasSwitch("disable-reduce-accept-language"));
+  EXPECT_TRUE(cmd.GetSwitchValueASCII("disable-features") == once);
+  EXPECT_TRUE(cmd.HasSwitch("disable-reduce-accept-language"));
 
   // 8. A pre-existing switch keeps its own entries.
   base::CommandLine existing(base::CommandLine::NO_PROGRAM);
   existing.AppendSwitchASCII("disable-features", "KeepMe");
   lengsuo::ApplyOfficialFeatureDefaults(&existing);
   const std::string value = existing.GetSwitchValueASCII("disable-features");
-  CHECK(Has(value, "KeepMe"));
-  CHECK(Has(value, "ReduceAcceptLanguage"));
+  EXPECT_TRUE(Has(value, "KeepMe"));
+  EXPECT_TRUE(Has(value, "ReduceAcceptLanguage"));
 
   // 9. Null-safe: callers may pass nothing in tests.
   lengsuo::ApplyOfficialFeatureDefaults(nullptr);

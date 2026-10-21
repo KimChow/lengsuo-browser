@@ -34,15 +34,13 @@ fp::L3Config MakeConfig(int64_t signed_unix) {
 }
 
 TEST(L3ProvisioningTest, NoSnapshotAnswersEmpty) {
-  L3DocumentSource source([] { return nullptr; });
-  EXPECT_TRUE(source.GetDocument().empty());
+  EXPECT_TRUE(GetL3Document([] { return nullptr; }).empty());
 }
 
 TEST(L3ProvisioningTest, SnapshotIsAnsweredInRawWireForm) {
   const fp::L3Config config = MakeConfig(kSignedAt);
-  L3DocumentSource source([&config] { return &config; });
 
-  const std::string document = source.GetDocument();
+  const std::string document = GetL3Document([&config] { return &config; });
   // Raw L3W1, not base64: a regression to the old transport would start with
   // an alphabet character and carry no newline.
   EXPECT_EQ(document.rfind("L3W1\n", 0), 0u);
@@ -52,13 +50,12 @@ TEST(L3ProvisioningTest, SnapshotIsAnsweredInRawWireForm) {
 
 TEST(L3ProvisioningTest, RendererAcceptsTheAnswer) {
   const fp::L3Config config = MakeConfig(kSignedAt);
-  L3DocumentSource source([&config] { return &config; });
 
   // What renderer_main.cc does with a non-empty answer: now_unix = 0 because
   // the browser already judged freshness.
   fp::L3Runtime runtime;
-  ASSERT_TRUE(runtime.Init(source.GetDocument(), /*now_unix=*/0,
-                           /*max_age_seconds=*/0));
+  ASSERT_TRUE(runtime.Init(GetL3Document([&config] { return &config; }),
+                           /*now_unix=*/0, /*max_age_seconds=*/0));
   const std::string* pinned = runtime.PinnedValue(kOrigin, kKey);
   ASSERT_NE(pinned, nullptr);
   EXPECT_EQ(*pinned, kValue);
@@ -67,8 +64,7 @@ TEST(L3ProvisioningTest, RendererAcceptsTheAnswer) {
 
 TEST(L3ProvisioningTest, SignatureTimestampIsPreserved) {
   const fp::L3Config config = MakeConfig(kSignedAt);
-  L3DocumentSource source([&config] { return &config; });
-  const std::string document = source.GetDocument();
+  const std::string document = GetL3Document([&config] { return &config; });
 
   fp::L3Config decoded;
   std::string error;
@@ -85,13 +81,13 @@ TEST(L3ProvisioningTest, SignatureTimestampIsPreserved) {
 TEST(L3ProvisioningTest, EveryRequestReReadsTheSnapshot) {
   const fp::L3Config config = MakeConfig(kSignedAt);
   int reads = 0;
-  L3DocumentSource source([&config, &reads] {
+  const auto reader = [&config, &reads]() -> const fp::L3Config* {
     ++reads;
     return &config;
-  });
+  };
 
-  const std::string first = source.GetDocument();
-  const std::string second = source.GetDocument();
+  const std::string first = GetL3Document(reader);
+  const std::string second = GetL3Document(reader);
   EXPECT_EQ(first, second);
   EXPECT_EQ(reads, 2);
 }
