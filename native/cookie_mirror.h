@@ -13,7 +13,8 @@
 // The renderer cannot see the live jar: Blink's CookieJar talks to the
 // network service over Mojo, so the jar lives in the browser process. The
 // snapshot is the only cookie state a renderer can hold, and it is the very
-// document the browser already hands down (--lengsuo-managed-l3). The Blink
+// document the renderer already pulled from the browser over Mojo (task O;
+// no fingerprint state rides the command line). The Blink
 // interception points that would consume this class are outside this task's
 // file scope; they are described in docs/l3-reports/task-M.md. This task
 // delivers the policy, not the patch.
