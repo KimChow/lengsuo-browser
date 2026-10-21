@@ -25,7 +25,21 @@ def _launcher_text():
 
 
 def _task_to_brief():
-    """Parses the `case "$task" in ... esac` block into {task: brief path}."""
+    """Parses the `case "$task" in ... esac` block into {task: brief path}.
+
+    The launcher resolves a brief in two steps: the case block picks the
+    file name, and the lookup that follows decides which directory the
+    name is read from. The mapping under test is the first step, so the
+    name is reported with the directory it is expected to resolve to
+    when the repository ships its briefs.
+
+    Both spellings of the assignment are accepted. The older one named
+    the whole path in the case block; the newer one names only the file
+    and lets the lookup add the directory. A test that only understood
+    one of them would report an empty mapping -- which reads as "the
+    script lost the mapping" rather than "the test stopped following
+    it", and sends the reader looking in the wrong place.
+    """
     text = _launcher_text()
     block = re.search(r'case "\$task" in(.*?)esac', text, re.S)
     if not block:
@@ -35,6 +49,12 @@ def _task_to_brief():
         match = re.match(
             r'\s*([A-Z][A-Z|]*)\)\s*task_brief="\$REPO_SRC/([^"]+)"', line)
         if not match:
+            match = re.match(
+                r'\s*([A-Z][A-Z|]*)\)\s*brief_name="([^"]+)"', line)
+            if not match:
+                continue
+            mapping.update({task: "docs/" + match.group(2)
+                            for task in match.group(1).split("|")})
             continue
         brief = match.group(2)
         for task in match.group(1).split("|"):
