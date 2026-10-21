@@ -28,6 +28,19 @@ ROOT="${LENGSUO_L3B_ROOT:-/home/ubuntu/l3b-tasks}"
 #
 # The same PATH is used by the client line's runner.
 AGENT_PATH="${LENGSUO_AGENT_PATH:-/home/ubuntu/.local/bin:/home/ubuntu/bin:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin}"
+# The ceiling on how many turns a card's agent may take.
+#
+# The client line's runner passes --max-turns to the agent; the kernel line
+# did not, so a kernel card could read files for hours without writing a
+# line of code. That is not hypothetical: the client line's P3 card spent
+# all 60 turns testing two dependency routes and landed no code at all, and
+# the kernel line's R card ran for over an hour with an empty working tree.
+# The card guard rejects an empty change set, so the whole card was wasted.
+#
+# This is a ceiling, not a deadline: the agent may stop earlier on its own.
+# It is set high enough that a card which writes code, compiles it and runs
+# the tests is never cut off mid-file.
+MAX_TURNS="${LENGSUO_MAX_TURNS:-200}"
 REPO_SRC="${LENGSUO_REPO_SRC:-/home/ubuntu/lengsuo-browser-dev/recipe}"
 # The brief is selected by the task name: the third round (M/N) has its own
 # brief, the second round (I/J/K/L) keeps the original one.
@@ -207,7 +220,7 @@ echo \$\$ > "$work/session.pid"
 # "started". The client line's runner sets the same PATH for the same
 # reason.
 exec env PATH="$AGENT_PATH" ANTHROPIC_BASE_URL="$GATEWAY" ANTHROPIC_MODEL="$MODEL" \\
-    claude --permission-mode acceptEdits -p "\$(cat "$work/prompt.txt")"
+    claude --permission-mode acceptEdits --max-turns "$MAX_TURNS" -p "\$(cat "$work/prompt.txt")"
 RUNNER
     chmod +x "$work/run.sh"
 

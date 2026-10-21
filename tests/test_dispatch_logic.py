@@ -418,5 +418,86 @@ class SessionPathTest(unittest.TestCase):
                          "own environment")
 
 
+class SessionTurnBudgetTest(unittest.TestCase):
+    """A card has to be stopped before it burns its whole budget on research.
+
+    Why this exists
+    ---------------
+    The client line's runner passes ``--max-turns`` to the agent. The
+    kernel line did not, so a kernel card could read files for hours
+    without ever writing a line of code.
+
+    That is not hypothetical: the client line's P3 card spent all 60
+    turns testing two dependency routes and landed **no code at all**,
+    and the kernel line's R card ran for over an hour with an empty
+    working tree. The card guard rejects an empty change set, so the
+    whole card was wasted.
+
+    The budget is not a deadline: the agent may stop earlier on its own.
+    It is a ceiling, and it has to be high enough that a card that is
+    genuinely writing code is never cut off mid-file.
+    """
+
+    def test_the_agent_is_given_a_turn_limit(self):
+        """The run script must cap how many turns the agent may take."""
+        text = _launcher_text()
+        run = re.search(r"cat > \"\$work/run\.sh\" <<RUNNER\n(.*?)\nRUNNER",
+                        text, re.S)
+        self.assertIsNotNone(run, "the launcher no longer writes run.sh")
+        script = run.group(1)
+        self.assertRegex(script, r"--max-turns",
+                         "the agent is started without a turn limit")
+
+    def test_the_turn_limit_comes_from_a_named_variable(self):
+        """The number must be settable from outside the script.
+
+        A literal in the middle of the run script would mean changing
+        the launcher to change the budget. The client line reads it from
+        the card's own task spec, so one card can be given a larger
+        budget without touching the other.
+        """
+        text = _launcher_text()
+        run = re.search(r"cat > \"\$work/run\.sh\" <<RUNNER\n(.*?)\nRUNNER",
+                        text, re.S)
+        self.assertIsNotNone(run, "the launcher no longer writes run.sh")
+        script = run.group(1)
+        match = re.search(r"--max-turns[\" ]+\"?\$?\{?([A-Za-z_][A-Z0-9_]*)",
+                          script)
+        self.assertIsNotNone(match,
+                             "the turn limit is a literal, not a variable")
+        variable = match.group(1)
+        definition = re.search(
+            r'^%s="\$\{[^}]*:-([0-9]+)\}"' % variable, text, re.M)
+        self.assertIsNotNone(
+            definition,
+            "the turn limit variable has no numeric default")
+
+    def test_the_default_budget_is_large_enough_for_a_real_card(self):
+        """The ceiling must not cut a card off in the middle of its work.
+
+        A card that writes code, compiles it and runs the tests needs
+        room for all three. The limit exists to stop an endless reading
+        loop, not to interrupt real work.
+        """
+        text = _launcher_text()
+        run = re.search(r"cat > \"\$work/run\.sh\" <<RUNNER\n(.*?)\nRUNNER",
+                        text, re.S)
+        self.assertIsNotNone(run, "the launcher no longer writes run.sh")
+        script = run.group(1)
+        match = re.search(r"--max-turns[\" ]+\"?\$?\{?([A-Za-z_][A-Z0-9_]*)",
+                          script)
+        self.assertIsNotNone(match,
+                             "the turn limit is a literal, not a variable")
+        variable = match.group(1)
+        definition = re.search(
+            r'^%s="\$\{[^}]*:-([0-9]+)\}"' % variable, text, re.M)
+        self.assertIsNotNone(definition,
+                             "the turn limit variable has no default")
+        self.assertGreaterEqual(
+            int(definition.group(1)), 150,
+            "the default turn budget is too small for a card that also "
+            "compiles and tests its work")
+
+
 if __name__ == "__main__":
     unittest.main()
