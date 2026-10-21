@@ -35,6 +35,7 @@ import unittest
 
 sys.path.insert(0, str(pathlib.Path(__file__).resolve().parent))
 from bash_helper import find_bash  # noqa: E402  (path set up above)
+from docs_helper import doc_path  # noqa: E402  (path set up above)
 
 ROOT = pathlib.Path(__file__).resolve().parents[1]
 LAUNCHER = ROOT / "tools" / "rebuild" / "launch_l3b_short.sh"
@@ -305,10 +306,16 @@ class CrossRepoCardTest(unittest.TestCase):
 
         This is the check the launcher itself makes before it starts a
         session, so the brief has to satisfy the same pattern here.
+
+        The brief is looked up the way the launcher looks it up: the
+        repository copy first, the shared out-of-repository copy second.
+        The repository does not ship `docs/`, so on the build machine
+        only the second location has the file -- reading the repository
+        path directly would report a missing brief where there is one.
         """
-        brief = ROOT / "docs" / "cc-task-brief-l3f.md"
-        self.assertTrue(brief.exists(),
-                        "the fifth-round brief is missing: %s" % brief)
+        brief = doc_path("cc-task-brief-l3f.md")
+        self.assertIsNotNone(brief,
+                             "the fifth-round brief is missing: %s" % brief)
         text = brief.read_text(encoding="utf-8")
         self.assertRegex(text, r"(?m)^## 任务 M0[：: ]",
                          "the brief has no section for the M0 card")
@@ -322,7 +329,9 @@ class CrossRepoCardTest(unittest.TestCase):
         happens. The brief has to state the two routes and leave the
         choice open.
         """
-        brief = ROOT / "docs" / "cc-task-brief-l3f.md"
+        brief = doc_path("cc-task-brief-l3f.md")
+        self.assertIsNotNone(brief,
+                             "the fifth-round brief is missing: %s" % brief)
         text = brief.read_text(encoding="utf-8")
         start = text.index("## 任务 M0")
         section = text[start:]
