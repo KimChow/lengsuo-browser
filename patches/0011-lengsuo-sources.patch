@@ -2130,10 +2130,10 @@ index 0000000..3bd62d6
 +#endif
 diff --git a/lengsuo/native/BUILD.gn b/lengsuo/native/BUILD.gn
 new file mode 100644
-index 0000000..2e5a514
+index 0000000..16e12fe
 --- /dev/null
 +++ b/lengsuo/native/BUILD.gn
-@@ -0,0 +1,202 @@
+@@ -0,0 +1,214 @@
 +# Decoder source sets. Chromium integration evidence lives in VERIFICATION.md.
 +source_set("profile_wire") {
 +  sources = [
@@ -2303,6 +2303,18 @@ index 0000000..2e5a514
 +  sources = [
 +    "action_table.cc",
 +    "action_table.h",
++  ]
++  public_deps = [ ":kernel_pipe_json" ]
++}
++
++# The collection rules for the profile upload (task R). The kernel side
++# owns which files are collected; the client side packs and uploads them.
++# The rules arrive in the ConfigBundle, so this target needs the JSON reader
++# and nothing else - no crypto, no Chromium.
++source_set("profile_bundle") {
++  sources = [
++    "profile_bundle.cc",
++    "profile_bundle.h",
 +  ]
 +  public_deps = [ ":kernel_pipe_json" ]
 +}
@@ -9965,6 +9977,867 @@ index 0000000..0bd9cc8
 +}  // namespace lengsuo::native
 +
 +#endif  // LENGSUO_NATIVE_PRODUCT_BRAND_H_
+diff --git a/lengsuo/native/profile_bundle.cc b/lengsuo/native/profile_bundle.cc
+new file mode 100644
+index 0000000..fea0852
+--- /dev/null
++++ b/lengsuo/native/profile_bundle.cc
+@@ -0,0 +1,359 @@
++#include "profile_bundle.h"
++
++#include <algorithm>
++#include <utility>
++
++#include "kernel_pipe_json.h"
++
++namespace lengsuo::fp {
++namespace {
++
++// The patterns no collection may ever contain.
++//
++// The brief's rule is that Cookies and Network Cache are excluded "under
++// any circumstances". The exclude list in the configuration says the same
++// thing, but the configuration is remote input: a platform that listed
++// "*Cookies*" in the include list would otherwise get the cookies. So
++// these two patterns are a floor, not a preference - the collection cannot
++// contain them even if the configuration asks for them.
++//
++// This is the only place in this file that names a file. The white list
++// stays in the configuration: what is collected is the platform's decision.
++constexpr char kForbiddenCookies[] = "*Cookies*";
++constexpr char kForbiddenNetwork[] = "*Network*";
++
++// Compares two paths byte-wise, as unsigned bytes.
++//
++// std::string's own operator< would do the same on every platform we
++// build for, but the two repos that agree on the manifest order have to
++// agree for a reason that is written down rather than inherited. The
++// comparison is therefore spelled out: unsigned byte by unsigned byte, and
++// a prefix sorts before the longer path that starts with it.
++int ComparePaths(const std::string& left, const std::string& right) {
++  const std::size_t shared = std::min(left.size(), right.size());
++  for (std::size_t i = 0; i < shared; ++i) {
++    const auto a = static_cast<unsigned char>(left[i]);
++    const auto b = static_cast<unsigned char>(right[i]);
++    if (a != b) {
++      return a < b ? -1 : 1;
++    }
++  }
++  if (left.size() == right.size()) {
++    return 0;
++  }
++  return left.size() < right.size() ? -1 : 1;
++}
++
++// Reads a JSON string literal, resolving the escapes.
++//
++// The reader in kernel_pipe_json.h keeps arrays as raw text, so the array
++// of patterns has to be scanned here. The escape set is the one JSON
++// defines; a \u escape is accepted for a BMP code point and a lone
++// surrogate is refused, because a pattern that names a half a character
++// cannot match a path.
++bool ScanJsonString(std::string_view text, std::size_t* pos, std::string* out) {
++  if (*pos >= text.size() || text[*pos] != '"') {
++    return false;
++  }
++  ++(*pos);
++  out->clear();
++  while (*pos < text.size()) {
++    const char c = text[*pos];
++    if (c == '"') {
++      ++(*pos);
++      return true;
++    }
++    if (c == '\\') {
++      ++(*pos);
++      if (*pos >= text.size()) {
++        return false;
++      }
++      const char escape = text[*pos];
++      ++(*pos);
++      switch (escape) {
++        case '"': out->push_back('"'); break;
++        case '\\': out->push_back('\\'); break;
++        case '/': out->push_back('/'); break;
++        case 'b': out->push_back('\b'); break;
++        case 'f': out->push_back('\f'); break;
++        case 'n': out->push_back('\n'); break;
++        case 'r': out->push_back('\r'); break;
++        case 't': out->push_back('\t'); break;
++        case 'u': {
++          if (*pos + 4 > text.size()) {
++            return false;
++          }
++          std::uint32_t code = 0;
++          for (int i = 0; i < 4; ++i) {
++            const char digit = text[*pos + static_cast<std::size_t>(i)];
++            std::uint32_t value = 0;
++            if (digit >= '0' && digit <= '9') {
++              value = static_cast<std::uint32_t>(digit - '0');
++            } else if (digit >= 'a' && digit <= 'f') {
++              value = static_cast<std::uint32_t>(digit - 'a' + 10);
++            } else if (digit >= 'A' && digit <= 'F') {
++              value = static_cast<std::uint32_t>(digit - 'A' + 10);
++            } else {
++              return false;
++            }
++            code = (code << 4) | value;
++          }
++          *pos += 4;
++          if (code >= 0xD800 && code <= 0xDFFF) {
++            // A surrogate on its own is not a character.
++            return false;
++          }
++          if (code <= 0x7F) {
++            out->push_back(static_cast<char>(code));
++          } else if (code <= 0x7FF) {
++            out->push_back(static_cast<char>(0xC0 | (code >> 6)));
++            out->push_back(static_cast<char>(0x80 | (code & 0x3F)));
++          } else {
++            out->push_back(static_cast<char>(0xE0 | (code >> 12)));
++            out->push_back(static_cast<char>(0x80 | ((code >> 6) & 0x3F)));
++            out->push_back(static_cast<char>(0x80 | (code & 0x3F)));
++          }
++          break;
++        }
++        default:
++          return false;
++      }
++      continue;
++    }
++    if (static_cast<unsigned char>(c) < 0x20) {
++      return false;
++    }
++    out->push_back(c);
++    ++(*pos);
++  }
++  return false;
++}
++
++// Reads a JSON array of strings. The array text is the raw text the
++// reader kept, so it starts with '[' and ends with ']'.
++bool ParseStringArray(std::string_view text, std::vector<std::string>* out) {
++  std::size_t pos = 0;
++  auto skip_space = [&text, &pos]() {
++    while (pos < text.size() && (text[pos] == ' ' || text[pos] == '\t' ||
++                                 text[pos] == '\n' || text[pos] == '\r')) {
++      ++pos;
++    }
++  };
++  skip_space();
++  if (pos >= text.size() || text[pos] != '[') {
++    return false;
++  }
++  ++pos;
++  skip_space();
++  if (pos < text.size() && text[pos] == ']') {
++    ++pos;
++    skip_space();
++    return pos == text.size();
++  }
++  while (true) {
++    skip_space();
++    std::string item;
++    if (!ScanJsonString(text, &pos, &item)) {
++      return false;
++    }
++    out->push_back(std::move(item));
++    skip_space();
++    if (pos >= text.size()) {
++      return false;
++    }
++    if (text[pos] == ',') {
++      ++pos;
++      continue;
++    }
++    if (text[pos] == ']') {
++      ++pos;
++      break;
++    }
++    return false;
++  }
++  skip_space();
++  return pos == text.size();
++}
++
++// True when any of `patterns` matches `text`.
++bool MatchesAny(const std::vector<std::string>& patterns,
++                 std::string_view text) {
++  for (const std::string& pattern : patterns) {
++    if (MatchGlob(pattern, text)) {
++      return true;
++    }
++  }
++  return false;
++}
++
++}  // namespace
++
++ProfileSyncConfig DefaultProfileSyncConfig() {
++  ProfileSyncConfig config;
++  // The white list. History is in it because the ruling is that the
++  // history is uploaded by default; its scope is still the pattern's, so
++  // a path that does not look like a history file is not collected.
++  config.include = {"*Local Storage*", "*Extension State*", "*History*"};
++  // The black list. The exclude always wins.
++  config.exclude = {"*Cache*", "*Cookies*", "*Network*"};
++  config.max_package_bytes = kProfileBundleMaxBytes;
++  return config;
++}
++
++bool MatchGlob(std::string_view pattern, std::string_view text) {
++  std::size_t p = 0;
++  std::size_t t = 0;
++  std::size_t star = std::string_view::npos;
++  std::size_t star_end = 0;
++  while (t < text.size()) {
++    if (p < pattern.size() && (pattern[p] == '?' || pattern[p] == text[t])) {
++      ++p;
++      ++t;
++    } else if (p < pattern.size() && pattern[p] == '*') {
++      // Remember where the star was and try the shortest match first.
++      star = p++;
++      star_end = t;
++    } else if (star != std::string_view::npos) {
++      // Let the star swallow one more byte and try again.
++      p = star + 1;
++      t = ++star_end;
++    } else {
++      return false;
++    }
++  }
++  while (p < pattern.size() && pattern[p] == '*') {
++    ++p;
++  }
++  return p == pattern.size();
++}
++
++bool ParseProfileSyncConfig(std::string_view bundle_json,
++                            ProfileSyncConfig* out,
++                            std::string* error) {
++  auto fail = [error](const char* message) {
++    if (error != nullptr) {
++      *error = message;
++    }
++    return false;
++  };
++  if (out == nullptr) {
++    return fail("profile_sync: no output");
++  }
++  JsonObject bundle;
++  if (!JsonObject::Parse(bundle_json, &bundle)) {
++    return fail("profile_sync: malformed bundle");
++  }
++  const JsonValue* section = bundle.Find(kProfileSyncConfigKey);
++  if (section == nullptr) {
++    // No section means the platform did not ask for a profile upload.
++    return fail("profile_sync: the bundle carries no profile_sync section");
++  }
++  if (section->kind != JsonKind::kObject) {
++    return fail("profile_sync: the section is not an object");
++  }
++  // The reader keeps a nested object as raw text, so it is parsed again
++  // with the same reader.
++  JsonObject rules;
++  if (!JsonObject::Parse(section->text, &rules)) {
++    return fail("profile_sync: malformed section");
++  }
++
++  ProfileSyncConfig config;
++  const JsonValue* include = rules.Find("include");
++  if (include == nullptr || include->kind != JsonKind::kArray) {
++    return fail("profile_sync: the section has no include list");
++  }
++  if (!ParseStringArray(include->text, &config.include)) {
++    return fail("profile_sync: the include list is malformed");
++  }
++  const JsonValue* exclude = rules.Find("exclude");
++  if (exclude != nullptr) {
++    if (exclude->kind != JsonKind::kArray) {
++      return fail("profile_sync: the exclude list is not an array");
++    }
++    if (!ParseStringArray(exclude->text, &config.exclude)) {
++      return fail("profile_sync: the exclude list is malformed");
++    }
++  }
++  const JsonValue* ceiling = rules.Find("max_package_bytes");
++  if (ceiling != nullptr) {
++    std::int64_t value = 0;
++    if (!rules.GetInt64("max_package_bytes", &value) || value < 0) {
++      return fail("profile_sync: the package ceiling is malformed");
++    }
++    if (value > 0) {
++      // The configuration may lower the ceiling; it may never raise it.
++      config.max_package_bytes = std::min<std::uint64_t>(
++          static_cast<std::uint64_t>(value), kProfileBundleMaxBytes);
++    }
++  }
++  if (config.max_package_bytes == 0) {
++    config.max_package_bytes = kProfileBundleMaxBytes;
++  }
++  *out = std::move(config);
++  return true;
++}
++
++void CollectProfileBundle(const ProfileSyncConfig& config,
++                          const std::vector<ProfileFile>& files,
++                          ProfileBundle* out) {
++  if (out == nullptr) {
++    return;
++  }
++  *out = ProfileBundle();
++
++  // The order is decided before anything is collected: the manifest is
++  // sorted by path, so two repos that hold the same profile produce the
++  // same list without exchanging anything.
++  std::vector<ProfileFile> ordered = files;
++  std::sort(ordered.begin(), ordered.end(),
++            [](const ProfileFile& left, const ProfileFile& right) {
++              return ComparePaths(left.relative_path, right.relative_path) < 0;
++            });
++
++  const std::uint64_t ceiling =
++      config.max_package_bytes == 0 ? kProfileBundleMaxBytes
++                                    : config.max_package_bytes;
++
++  for (const ProfileFile& file : ordered) {
++    if (!file.readable) {
++      // A file that cannot be read is skipped and counted. It never fails
++      // the collection: one locked file must not stop a container from
++      // closing.
++      ++out->skipped_unreadable;
++      continue;
++    }
++    if (MatchesAny({kForbiddenCookies, kForbiddenNetwork},
++                   file.relative_path)) {
++      // The floor. These never go out, whatever the configuration says.
++      ++out->excluded;
++      continue;
++    }
++    if (!MatchesAny(config.include, file.relative_path)) {
++      ++out->excluded;
++      continue;
++    }
++    if (MatchesAny(config.exclude, file.relative_path)) {
++      // The exclude wins over the include.
++      ++out->excluded;
++      continue;
++    }
++    if (out->size_capped) {
++      // The ceiling was already reached: this file and the ones after it
++      // are cut off.
++      ++out->truncated;
++      continue;
++    }
++    // The subtraction cannot underflow: total_bytes never exceeds the
++    // ceiling, and the addition that would overflow is never done.
++    if (file.size > ceiling - out->total_bytes) {
++      out->size_capped = true;
++      ++out->truncated;
++      continue;
++    }
++    out->entries.push_back(ProfileBundleEntry{file.relative_path, file.size});
++    out->total_bytes += file.size;
++  }
++}
++
++}  // namespace lengsuo::fp
+diff --git a/lengsuo/native/profile_bundle.h b/lengsuo/native/profile_bundle.h
+new file mode 100644
+index 0000000..1daf910
+--- /dev/null
++++ b/lengsuo/native/profile_bundle.h
+@@ -0,0 +1,153 @@
++// profile_bundle - the collection rules for the profile upload (task R).
++//
++// When a container closes, the profile's files are packed into a zip and
++// uploaded to the platform (channel 4). The kernel side owns *which* files
++// are collected; the client side owns the packing and the upload.
++//
++// The rules are configuration, not code. The runner sends them in the
++// ConfigBundle (frame type 0x03) and the kernel applies whatever the
++// bundle says. Nothing in this file names a particular file: "History" is
++// collected because the configuration lists it, not because this code
++// knows what History is.
++//
++// What the configuration carries (contract section 8):
++//
++//   include            glob patterns; a file is collected when it matches
++//                      at least one of them
++//   exclude            glob patterns; a file is never collected when it
++//                      matches one of them
++//   max_package_bytes  the ceiling on the collected bytes
++//
++// Two rules are not negotiable:
++//
++//   * The exclude list wins. "Cookies" and "Network Cache" stay out
++//     whatever else the configuration says.
++//   * A file that cannot be read is skipped and counted. One locked file
++//     never fails the collection: a browser that refuses to close because
++//     of it is worse than one that uploads slightly less.
++//
++// The manifest this produces is the shape the two repos agree on:
++//
++//   * the path is relative to the profile root, always '/' separated,
++//     never absolute, never "..";
++//   * the entries are ordered byte-wise ascending by the path's bytes;
++//   * the size is the file's size in bytes.
++//
++// See docs/kernel-wire-contract.md section 8 for the same rules in prose.
++#ifndef LENGSUO_NATIVE_PROFILE_BUNDLE_H_
++#define LENGSUO_NATIVE_PROFILE_BUNDLE_H_
++
++#include <cstddef>
++#include <cstdint>
++#include <string>
++#include <string_view>
++#include <vector>
++
++namespace lengsuo::fp {
++
++// The ceiling on one package: 32 MiB.
++//
++// A collection that reaches it is cut short and the cut is counted. The
++// configuration may lower this ceiling; it may never raise it.
++inline constexpr std::uint64_t kProfileBundleMaxBytes =
++    32ULL * 1024ULL * 1024ULL;
++
++// The name of the configuration section that carries the rules.
++inline constexpr char kProfileSyncConfigKey[] = "profile_sync";
++
++// The rules the configuration carries.
++struct ProfileSyncConfig {
++  // The patterns a file must match to be collected. An empty list
++  // collects nothing: the list is a white list, and a white list that is
++  // empty is an empty collection.
++  std::vector<std::string> include;
++  // The patterns a file must not match. An exclude wins over an include.
++  std::vector<std::string> exclude;
++  // The ceiling on the collected bytes. Zero means "unset", which is the
++  // fixed ceiling above.
++  std::uint64_t max_package_bytes = kProfileBundleMaxBytes;
++};
++
++// The default set of rules (contract section 8): the white list minus the
++// black list, plus History.
++//
++// The runner sends this when the platform does not override it, so the
++// constant here is the kernel's mirror of the runner's default rather than
++// a second opinion about it. The contract keeps the two together.
++ProfileSyncConfig DefaultProfileSyncConfig();
++
++// Reads the profile_sync section out of a frozen configuration bundle.
++//
++// A bundle without the section means the platform did not ask for a
++// profile upload: the function fails and the caller collects nothing.
++// `*error` then says so. A malformed section fails the same way - a
++// configuration that cannot be read is not a configuration that is
++// partially obeyed.
++bool ParseProfileSyncConfig(std::string_view bundle_json,
++                            ProfileSyncConfig* out,
++                            std::string* error);
++
++// Matches `text` against a glob pattern.
++//
++//   '*'  matches any run of bytes, '/' included
++//   '?'  matches exactly one byte
++//
++// The comparison is byte-wise and case-sensitive: the profile's own
++// directory names are spelled the same way on every platform, and a
++// locale-aware comparison would not agree across two repos.
++bool MatchGlob(std::string_view pattern, std::string_view text);
++
++// One file the caller found under the profile root.
++struct ProfileFile {
++  // The path relative to the profile root, '/' separated.
++  std::string relative_path;
++  // The file's size in bytes.
++  std::uint64_t size = 0;
++  // False when the file could not be read. Such a file is skipped and
++  // counted; it never fails the collection.
++  bool readable = true;
++};
++
++// One collected file.
++struct ProfileBundleEntry {
++  // The path relative to the profile root. Never absolute, never "..".
++  std::string path;
++  // The file's size in bytes.
++  std::uint64_t size = 0;
++};
++
++// The result of applying the rules to a set of files.
++struct ProfileBundle {
++  // The collected files, byte-wise ascending by path.
++  std::vector<ProfileBundleEntry> entries;
++  // The sum of the collected files' sizes.
++  std::uint64_t total_bytes = 0;
++  // Files that could not be read. Skipped, never fatal.
++  std::uint64_t skipped_unreadable = 0;
++  // Files the rules did not collect: no include pattern matched, or an
++  // exclude pattern did.
++  std::uint64_t excluded = 0;
++  // Files that would have been collected but did not fit under the
++  // ceiling.
++  std::uint64_t truncated = 0;
++  // True when the ceiling cut the collection short.
++  bool size_capped = false;
++};
++
++// Applies the rules to `files` and fills `*out`.
++//
++// The entries come out ordered byte-wise ascending by path, so two repos
++// that collect the same profile agree on the order without talking to
++// each other. The ceiling is applied to that order, not to the order the
++// files arrived in: a collection that depended on the caller's directory
++// walk would differ between two machines that see the same profile.
++//
++// A file that does not fit under the ceiling ends the collection; the
++// files after it are counted as truncated.
++void CollectProfileBundle(const ProfileSyncConfig& config,
++                          const std::vector<ProfileFile>& files,
++                          ProfileBundle* out);
++
++}  // namespace lengsuo::fp
++
++#endif  // LENGSUO_NATIVE_PROFILE_BUNDLE_H_
+diff --git a/lengsuo/native/profile_bundle_test.cc b/lengsuo/native/profile_bundle_test.cc
+new file mode 100644
+index 0000000..09a2be4
+--- /dev/null
++++ b/lengsuo/native/profile_bundle_test.cc
+@@ -0,0 +1,331 @@
++// profile_bundle_test - the collection rules for the profile upload.
++//
++// The tests are about the rules, not about the plumbing: which files are
++// collected, which never are, and what happens when the collection does
++// not fit.
++//
++// The four rulings this card implements each get a test of their own:
++//
++//   1B  the history is collected by default
++//   2A  a file that cannot be read is skipped, not fatal
++//   3A  the canvas bitmap is not collected (the action table's default,
++//        which this card leaves alone - see the note below)
++//   and the size ceiling cuts the collection short
++//
++// The bitmap rule is not this file's business: the action table owns it
++// and its default is already off. This file only checks that nothing here
++// turns it on.
++#include "profile_bundle.h"
++
++#include <gtest/gtest.h>
++
++#include <string>
++#include <vector>
++
++namespace lengsuo::fp {
++namespace {
++
++// A file the caller found under the profile root.
++ProfileFile File(const std::string& path, std::uint64_t size) {
++  ProfileFile file;
++  file.relative_path = path;
++  file.size = size;
++  return file;
++}
++
++// The paths of the collected entries, in order.
++std::vector<std::string> Paths(const ProfileBundle& bundle) {
++  std::vector<std::string> paths;
++  paths.reserve(bundle.entries.size());
++  for (const ProfileBundleEntry& entry : bundle.entries) {
++    paths.push_back(entry.path);
++  }
++  return paths;
++}
++
++// A configuration with the ruling's white list and black list.
++ProfileSyncConfig Config() {
++  return DefaultProfileSyncConfig();
++}
++
++TEST(ProfileSyncConfig, DefaultCarriesTheRulingLists) {
++  const ProfileSyncConfig config = Config();
++  // The white list: local storage, extension state, and - by ruling 1B -
++  // the history.
++  EXPECT_NE(std::find(config.include.begin(), config.include.end(),
++                      "*Local Storage*"),
++            config.include.end());
++  EXPECT_NE(std::find(config.include.begin(), config.include.end(),
++                      "*Extension State*"),
++            config.include.end());
++  EXPECT_NE(std::find(config.include.begin(), config.include.end(),
++                      "*History*"),
++            config.include.end());
++  // The black list.
++  EXPECT_NE(std::find(config.exclude.begin(), config.exclude.end(), "*Cache*"),
++            config.exclude.end());
++  EXPECT_NE(std::find(config.exclude.begin(), config.exclude.end(),
++                      "*Cookies*"),
++            config.exclude.end());
++  EXPECT_NE(std::find(config.exclude.begin(), config.exclude.end(),
++                      "*Network*"),
++            config.exclude.end());
++  EXPECT_EQ(config.max_package_bytes, kProfileBundleMaxBytes);
++}
++
++TEST(MatchGlob, MatchesThePatternsTheListsUse) {
++  EXPECT_TRUE(MatchGlob("*Local Storage*", "Default/Local Storage/leveldb/0001.log"));
++  EXPECT_TRUE(MatchGlob("*Local Storage*", "Local Storage"));
++  EXPECT_TRUE(MatchGlob("*History*", "Default/History"));
++  EXPECT_TRUE(MatchGlob("*Extension State*", "Default/Extension State/1.dat"));
++  EXPECT_TRUE(MatchGlob("*Cache*", "Default/Cache/data_0"));
++  // A pattern without a star matches only itself.
++  EXPECT_TRUE(MatchGlob("History", "History"));
++  EXPECT_FALSE(MatchGlob("History", "Default/History"));
++  // '?' matches exactly one byte.
++  EXPECT_TRUE(MatchGlob("file?.dat", "file1.dat"));
++  EXPECT_FALSE(MatchGlob("file?.dat", "file12.dat"));
++  // An empty pattern matches only an empty text.
++  EXPECT_TRUE(MatchGlob("", ""));
++  EXPECT_FALSE(MatchGlob("", "x"));
++  // '*' matches any run of bytes, the empty one included.
++  EXPECT_TRUE(MatchGlob("*", ""));
++  EXPECT_TRUE(MatchGlob("*", "anything"));
++}
++
++TEST(CollectProfileBundle, DefaultSetContainsHistory) {
++  // Ruling 1B: the history is uploaded by default.
++  ProfileBundle bundle;
++  CollectProfileBundle(Config(),
++                       {File("Default/History", 163840),
++                        File("Default/Local Storage/leveldb/0001.log", 4096)},
++                       &bundle);
++  const std::vector<std::string> paths = Paths(bundle);
++  ASSERT_EQ(paths.size(), 2u);
++  EXPECT_EQ(paths[0], "Default/History");
++  EXPECT_EQ(paths[1], "Default/Local Storage/leveldb/0001.log");
++  EXPECT_EQ(bundle.total_bytes, 163840u + 4096u);
++}
++
++TEST(CollectProfileBundle, HistoryScopeIsStillThePatternsScope) {
++  // 1B does not mean "the whole history directory": the collection range
++  // is the pattern's, so a pattern that names one file collects that file
++  // and not its neighbours.
++  ProfileSyncConfig config = Config();
++  config.include = {"Default/History"};
++  ProfileBundle bundle;
++  CollectProfileBundle(config,
++                       {File("Default/History", 100),
++                        File("Default/History-journal", 100),
++                        File("Default/Preferences", 100)},
++                       &bundle);
++  const std::vector<std::string> paths = Paths(bundle);
++  ASSERT_EQ(paths.size(), 1u);
++  EXPECT_EQ(paths[0], "Default/History");
++  EXPECT_EQ(bundle.excluded, 2u);
++}
++
++TEST(CollectProfileBundle, WhiteListHitsAndBlackListExcludes) {
++  ProfileBundle bundle;
++  CollectProfileBundle(
++      Config(),
++      {File("Default/Local Storage/leveldb/0001.log", 10),
++       File("Default/Extension State/abc.dat", 20),
++       File("Default/Cache/data_0", 30),
++       File("Default/Cookies", 40),
++       File("Default/Network Cache/data_1", 50),
++       File("Default/Preferences", 60)},
++      &bundle);
++  const std::vector<std::string> paths = Paths(bundle);
++  ASSERT_EQ(paths.size(), 2u);
++  EXPECT_EQ(paths[0], "Default/Extension State/abc.dat");
++  EXPECT_EQ(paths[1], "Default/Local Storage/leveldb/0001.log");
++  EXPECT_EQ(bundle.excluded, 4u);
++}
++
++TEST(CollectProfileBundle, CookiesAndNetworkCacheNeverGoOut) {
++  // The exclude list says so, but the configuration is remote input. A
++  // platform that listed the cookies in the include list must still not
++  // get them: the two patterns are a floor, not a preference.
++  ProfileSyncConfig config;
++  config.include = {"*"};
++  config.exclude = {};
++  ProfileBundle bundle;
++  CollectProfileBundle(config,
++                       {File("Default/Cookies", 10),
++                        File("Default/Network/Cookies", 10),
++                        File("Default/Local Storage/x", 10)},
++                       &bundle);
++  const std::vector<std::string> paths = Paths(bundle);
++  ASSERT_EQ(paths.size(), 1u);
++  EXPECT_EQ(paths[0], "Default/Local Storage/x");
++}
++
++TEST(CollectProfileBundle, ExcludeWinsOverInclude) {
++  ProfileSyncConfig config;
++  config.include = {"*Local Storage*"};
++  config.exclude = {"*Cache*"};
++  ProfileBundle bundle;
++  CollectProfileBundle(config,
++                       {File("Default/Local Storage/leveldb/Cache/0001.log", 10),
++                        File("Default/Local Storage/leveldb/0002.log", 10)},
++                       &bundle);
++  const std::vector<std::string> paths = Paths(bundle);
++  ASSERT_EQ(paths.size(), 1u);
++  EXPECT_EQ(paths[0], "Default/Local Storage/leveldb/0002.log");
++}
++
++TEST(CollectProfileBundle, AnUnreadableFileIsSkippedAndCounted) {
++  // Ruling 2A's kernel-side half: one file that cannot be read must not
++  // fail the collection.
++  ProfileFile locked = File("Default/Local Storage/locked.log", 100);
++  locked.readable = false;
++  ProfileBundle bundle;
++  CollectProfileBundle(
++      Config(), {locked, File("Default/Local Storage/ok.log", 10)}, &bundle);
++  const std::vector<std::string> paths = Paths(bundle);
++  ASSERT_EQ(paths.size(), 1u);
++  EXPECT_EQ(paths[0], "Default/Local Storage/ok.log");
++  EXPECT_EQ(bundle.skipped_unreadable, 1u);
++  EXPECT_EQ(bundle.total_bytes, 10u);
++}
++
++TEST(CollectProfileBundle, TheCeilingCutsTheCollectionShort) {
++  ProfileSyncConfig config = Config();
++  config.max_package_bytes = 100;
++  ProfileBundle bundle;
++  CollectProfileBundle(config,
++                       {File("Default/History", 60),
++                        File("Default/Local Storage/a.log", 60),
++                        File("Default/Local Storage/b.log", 10)},
++                       &bundle);
++  // The order is by path, so "Default/History" is first and fits; the
++  // second file does not and cuts the collection short.
++  const std::vector<std::string> paths = Paths(bundle);
++  ASSERT_EQ(paths.size(), 1u);
++  EXPECT_EQ(paths[0], "Default/History");
++  EXPECT_TRUE(bundle.size_capped);
++  EXPECT_EQ(bundle.truncated, 2u);
++  EXPECT_LE(bundle.total_bytes, 100u);
++}
++
++TEST(CollectProfileBundle, TheCeilingIsNeverRaisedByTheConfiguration) {
++  ProfileSyncConfig config = Config();
++  config.max_package_bytes = kProfileBundleMaxBytes * 4;
++  ProfileBundle bundle;
++  CollectProfileBundle(config, {File("Default/History", 10)}, &bundle);
++  EXPECT_EQ(bundle.size_capped, false);
++}
++
++TEST(CollectProfileBundle, TheOrderIsByPathNotByArrival) {
++  // Two repos that hold the same profile must produce the same manifest
++  // without exchanging anything, so the order cannot depend on the order
++  // the caller's directory walk happened to produce.
++  ProfileBundle first;
++  CollectProfileBundle(Config(),
++                       {File("Default/Local Storage/b.log", 1),
++                        File("Default/History", 1),
++                        File("Default/Extension State/a.dat", 1)},
++                       &first);
++  ProfileBundle second;
++  CollectProfileBundle(Config(),
++                       {File("Default/Extension State/a.dat", 1),
++                        File("Default/History", 1),
++                        File("Default/Local Storage/b.log", 1)},
++                       &second);
++  const std::vector<std::string> a = Paths(first);
++  const std::vector<std::string> b = Paths(second);
++  ASSERT_EQ(a.size(), 3u);
++  EXPECT_EQ(a, b);
++  EXPECT_EQ(a[0], "Default/Extension State/a.dat");
++  EXPECT_EQ(a[1], "Default/History");
++  EXPECT_EQ(a[2], "Default/Local Storage/b.log");
++}
++
++TEST(CollectProfileBundle, AnEmptyWhiteListCollectsNothing) {
++  ProfileSyncConfig config;
++  config.include = {};
++  config.exclude = {};
++  ProfileBundle bundle;
++  CollectProfileBundle(config, {File("Default/History", 10)}, &bundle);
++  EXPECT_TRUE(bundle.entries.empty());
++  EXPECT_EQ(bundle.excluded, 1u);
++}
++
++TEST(ProfileSyncConfig, ParsesTheSectionTheRunnerSends) {
++  const char kBundle[] =
++      R"({"profile_sync":{"include":["*History*","*Local Storage*"],)"
++      R"("exclude":["*Cache*","*Cookies*","*Network*"],)"
++      R"("max_package_bytes":1048576}})";
++  ProfileSyncConfig config;
++  std::string error;
++  ASSERT_TRUE(ParseProfileSyncConfig(kBundle, &config, &error)) << error;
++  ASSERT_EQ(config.include.size(), 2u);
++  EXPECT_EQ(config.include[0], "*History*");
++  EXPECT_EQ(config.include[1], "*Local Storage*");
++  ASSERT_EQ(config.exclude.size(), 3u);
++  EXPECT_EQ(config.exclude[2], "*Network*");
++  EXPECT_EQ(config.max_package_bytes, 1048576u);
++}
++
++TEST(ProfileSyncConfig, TheConfigurationMayLowerTheCeilingButNotRaiseIt) {
++  const char kBundle[] =
++      R"({"profile_sync":{"include":["*History*"],"max_package_bytes":999999999}})";
++  ProfileSyncConfig config;
++  std::string error;
++  ASSERT_TRUE(ParseProfileSyncConfig(kBundle, &config, &error)) << error;
++  EXPECT_EQ(config.max_package_bytes, kProfileBundleMaxBytes);
++}
++
++TEST(ProfileSyncConfig, ABundleWithoutTheSectionIsNotACollection) {
++  const char kBundle[] = R"({"something_else":1})";
++  ProfileSyncConfig config;
++  std::string error;
++  EXPECT_FALSE(ParseProfileSyncConfig(kBundle, &config, &error));
++  EXPECT_FALSE(error.empty());
++}
++
++TEST(ProfileSyncConfig, AMalformedSectionIsRefusedNotPartiallyObeyed) {
++  const char kBundle[] = R"({"profile_sync":{"include":"not an array"}})";
++  ProfileSyncConfig config;
++  std::string error;
++  EXPECT_FALSE(ParseProfileSyncConfig(kBundle, &config, &error));
++  EXPECT_FALSE(error.empty());
++}
++
++TEST(ProfileSyncConfig, AMalformedBundleIsRefused) {
++  ProfileSyncConfig config;
++  std::string error;
++  EXPECT_FALSE(ParseProfileSyncConfig("{not json", &config, &error));
++  EXPECT_FALSE(error.empty());
++}
++
++TEST(ProfileSyncConfig, TheDefaultSectionRoundTripsThroughTheParser) {
++  // The runner sends the default when the platform does not override it.
++  // The kernel's default and the runner's default must be the same rules.
++  const ProfileSyncConfig kernel_default = DefaultProfileSyncConfig();
++  std::string json = "{\"profile_sync\":{\"include\":[";
++  for (std::size_t i = 0; i < kernel_default.include.size(); ++i) {
++    if (i != 0) {
++      json += ",";
++    }
++    json += "\"" + kernel_default.include[i] + "\"";
++  }
++  json += "],\"exclude\":[";
++  for (std::size_t i = 0; i < kernel_default.exclude.size(); ++i) {
++    if (i != 0) {
++      json += ",";
++    }
++    json += "\"" + kernel_default.exclude[i] + "\"";
++  }
++  json += "]}}";
++  ProfileSyncConfig parsed;
++  std::string error;
++  ASSERT_TRUE(ParseProfileSyncConfig(json, &parsed, &error)) << error;
++  EXPECT_EQ(parsed.include, kernel_default.include);
++  EXPECT_EQ(parsed.exclude, kernel_default.exclude);
++  EXPECT_EQ(parsed.max_package_bytes, kernel_default.max_package_bytes);
++}
++
++}  // namespace
++}  // namespace lengsuo::fp
 diff --git a/lengsuo/native/profile_catalog.cc b/lengsuo/native/profile_catalog.cc
 new file mode 100644
 index 0000000..dcde68d
