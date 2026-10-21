@@ -26,7 +26,9 @@ Usage
 
 Both arguments are paths to working copies. The script reads:
 
-* the contract               (kernel-repo/docs/kernel-wire-contract.md)
+* the contract               (kernel-repo/docs/kernel-wire-contract.md,
+                               or the out-of-repository copy the build
+                               machine keeps -- see `contract_path`)
 * the client test vectors    (client-repo/crates/lengsuo-desktop/src/kernel_pipe/tests.rs)
 * the kernel test vectors    (kernel-repo/native/kernel_pipe_test_util.h
                                or native/kernel_pipe_test.cc -- the first
@@ -37,12 +39,36 @@ It exits non-zero when the three disagree.
 from __future__ import annotations
 
 import argparse
+import os
 import pathlib
 import re
 import sys
 
 CONTRACT_REL = "docs/kernel-wire-contract.md"
 CLIENT_REL = "crates/lengsuo-desktop/src/kernel_pipe/tests.rs"
+
+# Where the wire contract lives when the repository does not ship it.
+#
+# The repository keeps `docs/` as a local-only working area, so a clone of
+# the kernel repository has no `docs/kernel-wire-contract.md` at all. The
+# contract is not that kind of document: it is the single agreement between
+# the two repositories, so it is kept outside the repository in a stable
+# directory on the build machine. Look in the repository first, then there.
+CONTRACT_DIR = os.environ.get(
+    "LENGSUO_L3B_BRIEF_DIR", "/home/ubuntu/l3b-briefs")
+
+
+def contract_path(kernel: pathlib.Path) -> pathlib.Path:
+    """Return the contract file, wherever this deployment keeps it."""
+    in_repo = kernel / CONTRACT_REL
+    if in_repo.is_file():
+        return in_repo
+    outside = pathlib.Path(CONTRACT_DIR) / pathlib.Path(CONTRACT_REL).name
+    if outside.is_file():
+        return outside
+    # Return the in-repository path so the error message names the place
+    # the caller would expect to find it.
+    return in_repo
 
 # The kernel side's vector literal is looked up by scanning the candidates
 # below, not by a single hard-coded path. Task Q split the pipe code into
@@ -209,7 +235,7 @@ def main(argv: list[str] | None = None) -> int:
 
     try:
         contract = contract_blocks(
-            (kernel / CONTRACT_REL).read_text(encoding="utf-8"))
+            contract_path(kernel).read_text(encoding="utf-8"))
         client_const = rust_constants(
             (client / CLIENT_REL).read_text(encoding="utf-8"))
         kernel_payload = find_kernel_payload(kernel, args.kernel_test)
