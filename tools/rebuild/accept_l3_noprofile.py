@@ -15,6 +15,7 @@ Usage:
 import argparse
 import http.server
 import json
+import os
 import pathlib
 import shutil
 import socket
@@ -55,6 +56,48 @@ def free_port() -> int:
     with socket.socket() as s:
         s.bind(("127.0.0.1", 0))
         return s.getsockname()[1]
+
+
+class RendererCmdlineWatcher:
+    """Records this run's renderer command lines (see accept_l3.py).
+
+    Kept in both scripts rather than a shared module: each acceptance script
+    stays runnable on its own, which is how they are invoked in CI.
+    """
+
+    def __init__(self, profile: pathlib.Path):
+        self._needle = os.fsencode(f"--user-data-dir={profile}")
+        # (pid, cmdline) pairs; the same renderer is seen on every poll.
+        self.cmdlines: list[tuple[str, bytes]] = []
+        self._seen: set[str] = set()
+        self._stop = threading.Event()
+        self._thread = threading.Thread(target=self._run, daemon=True)
+
+    def _run(self) -> None:
+        while not self._stop.is_set():
+            self._sample()
+            self._stop.wait(0.02)
+
+    def _sample(self) -> None:
+        for entry in pathlib.Path("/proc").iterdir():
+            if not entry.name.isdigit():
+                continue
+            try:
+                cmdline = (entry / "cmdline").read_bytes()
+            except OSError:
+                continue
+            if b"--type=renderer" in cmdline and self._needle in cmdline:
+                if entry.name not in self._seen:
+                    self._seen.add(entry.name)
+                    self.cmdlines.append((entry.name, cmdline))
+
+    def __enter__(self):
+        self._thread.start()
+        return self
+
+    def __exit__(self, *exc):
+        self._stop.set()
+        self._thread.join()
 
 
 class Handler(http.server.BaseHTTPRequestHandler):
@@ -101,7 +144,9 @@ def main() -> int:
     ]
     print("launching without --lengsuo-l3-wire ...")
     try:
-        done = subprocess.run(cmd, capture_output=True, text=True, timeout=120)
+        with RendererCmdlineWatcher(profile) as watcher:
+            done = subprocess.run(cmd, capture_output=True, text=True,
+                                  timeout=120)
     except subprocess.TimeoutExpired:
         print("browser timed out")
         return 2
@@ -139,6 +184,16 @@ def main() -> int:
     for name, passed, actual in checks:
         print(f"  [{'PASS' if passed else 'FAIL'}] {name}  (got {actual!r})")
         ok = ok and passed
+
+    # Same task-O contract as accept_l3.py: no L3 document, no L3 switch, and
+    # certainly none on a renderer's command line.
+    leaked = [pid for pid, cmd in watcher.cmdlines
+              if b"lengsuo-managed-l3" in cmd]
+    passed = bool(watcher.cmdlines) and not leaked
+    print(f"  [{'PASS' if passed else 'FAIL'}] renderer cmdline carries no "
+          f"lengsuo-managed-l3  ({len(watcher.cmdlines)} renderers observed, "
+          f"{len(leaked)} leaked)")
+    ok = ok and passed
     shutil.rmtree(work, ignore_errors=True)
     print("RESULT:", "ALL PASS" if ok else "FAILURES")
     return 0 if ok else 1

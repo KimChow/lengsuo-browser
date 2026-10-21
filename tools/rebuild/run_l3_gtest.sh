@@ -50,6 +50,7 @@ TARGETS=(
   "l3_wire|native/l3_wire.cc native/storage_pin.cc native/storage_consistency.cc native/cache_record.cc native/extension_pin.cc"
   "l3_runtime|native/l3_runtime.cc native/l3_wire.cc native/storage_pin.cc native/storage_consistency.cc native/cache_record.cc native/extension_pin.cc"
   "l3_bootstrap|integration/l3_bootstrap.cc native/l3_wire.cc native/storage_pin.cc native/storage_consistency.cc native/cache_record.cc native/extension_pin.cc"
+  "l3_provisioning|native/l3_wire.cc native/storage_pin.cc native/storage_consistency.cc native/cache_record.cc native/extension_pin.cc native/l3_runtime.cc"
   "cookie_mirror|native/cookie_mirror.cc native/storage_consistency.cc native/storage_pin.cc native/l3_wire.cc native/cache_record.cc native/extension_pin.cc"
 )
 
@@ -59,9 +60,11 @@ for spec in "${TARGETS[@]}"; do
   name="${spec%%|*}"
   extra="${spec#*|}"
   srcs=("$REPO/native/${name}_test.cc")
-  if [ "$name" = "l3_bootstrap" ]; then
-    srcs=("$REPO/integration/l3_bootstrap_test.cc")
-  fi
+  # Integration-level tests live next to the code they exercise.
+  case "$name" in
+    l3_bootstrap) srcs=("$REPO/integration/l3_bootstrap_test.cc") ;;
+    l3_provisioning) srcs=("$REPO/integration/l3_provisioning_impl_test.cc") ;;
+  esac
   for s in $extra; do srcs+=("$REPO/$s"); done
 
   if ! g++ "${CXXFLAGS[@]}" "${srcs[@]}" "${GTEST_SRC[@]}" -pthread \

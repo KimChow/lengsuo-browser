@@ -58,6 +58,15 @@ MAPPING = (
     ("native/cookie_mirror.cc", "lengsuo/native/cookie_mirror.cc"),
     ("integration/l3_bootstrap.h", "lengsuo/integration/l3_bootstrap.h"),
     ("integration/l3_bootstrap.cc", "lengsuo/integration/l3_bootstrap.cc"),
+    ("integration/l3_provisioning_impl.h",
+     "lengsuo/integration/l3_provisioning_impl.h"),
+    ("integration/l3_provisioning_impl.cc",
+     "lengsuo/integration/l3_provisioning_impl.cc"),
+    ("integration/l3_provisioning_impl_test.cc",
+     "lengsuo/integration/l3_provisioning_impl_test.cc"),
+    ("public/mojom/l3_provisioning.mojom",
+     "lengsuo/public/mojom/l3_provisioning.mojom"),
+    ("public/mojom/BUILD.gn", "lengsuo/public/mojom/BUILD.gn"),
     ("integration/BUILD.gn", "lengsuo/integration/BUILD.gn"),
 )
 GN_TARGETS = ("//lengsuo/integration:bootstrap", "//lengsuo/native:profile_wire")

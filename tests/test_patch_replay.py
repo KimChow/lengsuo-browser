@@ -129,6 +129,12 @@ class PatchLockTests(unittest.TestCase):
             "lengsuo/native/storage_pin.h",
             "lengsuo/integration/l3_bootstrap.cc",
             "lengsuo/integration/l3_bootstrap.h",
+            # L3 document delivery over Mojo (task O).
+            "lengsuo/integration/l3_provisioning_impl.cc",
+            "lengsuo/integration/l3_provisioning_impl.h",
+            "lengsuo/integration/l3_provisioning_impl_test.cc",
+            "lengsuo/public/mojom/BUILD.gn",
+            "lengsuo/public/mojom/l3_provisioning.mojom",
         }
         missing = sorted(required - shipped)
         self.assertEqual(missing, [], "sources never shipped by any patch")

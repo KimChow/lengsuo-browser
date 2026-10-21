@@ -73,6 +73,51 @@ def free_port() -> int:
         return s.getsockname()[1]
 
 
+class RendererCmdlineWatcher:
+    """Records renderer command lines while this browser run is alive.
+
+    Task O moved the L3 document off the command line, so the absence of
+    ``--lengsuo-managed-l3`` on a *renderer* is now a contract, not an
+    implementation detail. The profile path is the process selector: it is
+    unique to this run and Chromium copies --user-data-dir to children, so
+    another browser on the host can neither satisfy nor break the check.
+    """
+
+    def __init__(self, profile: pathlib.Path):
+        self._needle = os.fsencode(f"--user-data-dir={profile}")
+        # (pid, cmdline) pairs; the same renderer is seen on every poll.
+        self.cmdlines: list[tuple[str, bytes]] = []
+        self._seen: set[str] = set()
+        self._stop = threading.Event()
+        self._thread = threading.Thread(target=self._run, daemon=True)
+
+    def _run(self) -> None:
+        while not self._stop.is_set():
+            self._sample()
+            self._stop.wait(0.02)
+
+    def _sample(self) -> None:
+        for entry in pathlib.Path("/proc").iterdir():
+            if not entry.name.isdigit():
+                continue
+            try:
+                cmdline = (entry / "cmdline").read_bytes()
+            except OSError:
+                continue  # process exited between listing and reading
+            if b"--type=renderer" in cmdline and self._needle in cmdline:
+                if entry.name not in self._seen:
+                    self._seen.add(entry.name)
+                    self.cmdlines.append((entry.name, cmdline))
+
+    def __enter__(self):
+        self._thread.start()
+        return self
+
+    def __exit__(self, *exc):
+        self._stop.set()
+        self._thread.join()
+
+
 class Handler(http.server.BaseHTTPRequestHandler):
     def do_GET(self):  # noqa: N802
         body = PAGE.encode("utf-8")
@@ -159,7 +204,9 @@ def main() -> int:
     ]
     print("launching:", " ".join(cmd[:6]), "...")
     try:
-        done = subprocess.run(cmd, capture_output=True, text=True, timeout=120)
+        with RendererCmdlineWatcher(profile) as watcher:
+            done = subprocess.run(cmd, capture_output=True, text=True,
+                                  timeout=120)
     except subprocess.TimeoutExpired:
         print("browser timed out")
         return 2
@@ -214,6 +261,17 @@ def main() -> int:
     for name, passed, actual in checks:
         print(f"  [{'PASS' if passed else 'FAIL'}] {name}  (got {actual!r})")
         ok = ok and passed
+
+    # Task O contract: the document reaches the renderer over Mojo, so it can
+    # never show up in a renderer's argv. Failure to observe a renderer makes
+    # the check vacuous, which counts as a failure rather than a pass.
+    leaked = [pid for pid, cmd in watcher.cmdlines
+              if b"lengsuo-managed-l3" in cmd]
+    passed = bool(watcher.cmdlines) and not leaked
+    print(f"  [{'PASS' if passed else 'FAIL'}] renderer cmdline carries no "
+          f"lengsuo-managed-l3  ({len(watcher.cmdlines)} renderers observed, "
+          f"{len(leaked)} leaked)")
+    ok = ok and passed
 
     if args.keep:
         print("temp dir kept at", work)
