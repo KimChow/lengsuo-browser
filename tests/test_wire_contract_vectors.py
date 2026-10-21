@@ -225,6 +225,14 @@ class WireContractVectorTests(unittest.TestCase):
         self.assertIn("kernel-wire-contract.md", brief)
         # The old "key_len + key" spelling described a different layout.
         self.assertNotIn("u32 key_len", brief)
+        # The envelope payload's cleartext region holds six fields only.
+        # A brief that lists container_id / expires_unix there sends the
+        # client off to build a 102-byte payload while the contract's AAD
+        # (and therefore its tag) is built for 85 bytes.
+        self.assertIn("u32 nonce_len(12) | nonce | u32 ciphertext_len",
+                      brief)
+        self.assertNotIn("u32 container_id_len | container_id", brief)
+        self.assertIn("40 + 密文长度", brief)
 
     def test_session_key_rule_is_not_contradictory(self):
         """The session key must not be declared both random and derived.
