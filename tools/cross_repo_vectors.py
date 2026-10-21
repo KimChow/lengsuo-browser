@@ -28,7 +28,9 @@ Both arguments are paths to working copies. The script reads:
 
 * the contract               (kernel-repo/docs/kernel-wire-contract.md)
 * the client test vectors    (client-repo/crates/lengsuo-desktop/src/kernel_pipe/tests.rs)
-* the kernel test vectors    (kernel-repo/native/kernel_pipe_test.cc)
+* the kernel test vectors    (kernel-repo/native/kernel_pipe_test_util.h
+                               or native/kernel_pipe_test.cc -- the first
+                               candidate that carries the literal wins)
 
 It exits non-zero when the three disagree.
 """
@@ -41,7 +43,21 @@ import sys
 
 CONTRACT_REL = "docs/kernel-wire-contract.md"
 CLIENT_REL = "crates/lengsuo-desktop/src/kernel_pipe/tests.rs"
-KERNEL_REL = "native/kernel_pipe_test.cc"
+
+# The kernel side's vector literal is looked up by scanning the candidates
+# below, not by a single hard-coded path. Task Q split the pipe code into
+# five layers and moved the shared constants into a header
+# (`native/kernel_pipe_test_util.h`) because a constant that lives in a .cc
+# can only be linked into one test binary. A single-path lookup then failed
+# with "the kernel test lost the kEnvelopePayload literal" even though the
+# vector was present and byte-identical -- the tool, not the vector, was
+# broken. The first candidate that yields the literal wins, and the list is
+# scanned in this order so the most specific location comes first.
+KERNEL_CANDIDATES = (
+    "native/kernel_pipe_test_util.h",
+    "native/kernel_pipe_test.cc",
+    "native/kernel_pipe_envelope_test.cc",
+)
 
 # The layout the contract fixes: the payload's clear region carries six
 # fields, and the container id and the expiry live only inside the
@@ -132,11 +148,47 @@ def rust_constants(text: str) -> dict[str, str]:
 
 
 def cpp_payload(text: str) -> str:
-    """Extract the kernel side's hard-coded payload."""
-    match = re.search(r"const char kEnvelopePayload\[\] =\s*(.*?);", text, re.S)
+    """Extract the kernel side's hard-coded payload.
+
+    The literal is declared as a `char[]` constant. The declaration has
+    taken more than one form in this repo -- `const char` when the
+    constant lived in the test source, `inline constexpr char` when the
+    pipe code moved the shared constants into a header -- so the storage
+    class and the `constexpr` are both optional here. Requiring one exact
+    spelling made the tool report a missing vector for a vector that was
+    present and byte-identical.
+    """
+    match = re.search(
+        r"(?:inline\s+)?(?:constexpr|const)\s+char\s+kEnvelopePayload\[\]\s*="
+        r"\s*(.*?);", text, re.S)
     if not match:
         raise VectorError("the kernel test lost the kEnvelopePayload literal")
     return hex_tokens(match.group(1))
+
+
+def find_kernel_payload(kernel: pathlib.Path,
+                        override: str | None = None) -> str:
+    """Read the kernel side's payload literal from the first place it lives.
+
+    The literal is named `kEnvelopePayload` and holds the 85-byte payload
+    as a hex string. It may sit in the test source itself or in a shared
+    header, depending on how the pipe code is layered, so the lookup scans
+    the candidates rather than assuming one layout.
+    """
+    if override:
+        paths = [pathlib.Path(override)]
+    else:
+        paths = [kernel / rel for rel in KERNEL_CANDIDATES]
+    for path in paths:
+        if not path.is_file():
+            continue
+        try:
+            return cpp_payload(path.read_text(encoding="utf-8"))
+        except VectorError:
+            continue
+    raise VectorError(
+        "no kernel file among %s carries the kEnvelopePayload literal"
+        % ", ".join(str(p) for p in paths))
 
 
 def main(argv: list[str] | None = None) -> int:
@@ -147,22 +199,20 @@ def main(argv: list[str] | None = None) -> int:
                         help="path to the client repo working copy")
     parser.add_argument("--kernel-test", default=None,
                         help="path to the kernel side test file; defaults to "
-                             "<kernel>/native/kernel_pipe_test.cc. Point it at "
-                             "a card's working copy when the card has not "
-                             "been merged yet.")
+                             "scanning the known kernel vector locations under "
+                             "<kernel>/native/. Point it at a card's working "
+                             "copy when the card has not been merged yet.")
     args = parser.parse_args(argv)
 
     kernel = pathlib.Path(args.kernel)
     client = pathlib.Path(args.client)
-    kernel_test = (pathlib.Path(args.kernel_test) if args.kernel_test
-                   else kernel / KERNEL_REL)
 
     try:
         contract = contract_blocks(
             (kernel / CONTRACT_REL).read_text(encoding="utf-8"))
         client_const = rust_constants(
             (client / CLIENT_REL).read_text(encoding="utf-8"))
-        kernel_payload = cpp_payload(kernel_test.read_text(encoding="utf-8"))
+        kernel_payload = find_kernel_payload(kernel, args.kernel_test)
     except (OSError, VectorError) as error:
         print("cannot read the vectors: %s" % error, file=sys.stderr)
         return 2
