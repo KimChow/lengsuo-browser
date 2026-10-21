@@ -297,9 +297,8 @@ Chromium 树内现成的 `mojo::NamedPlatformChannel` **不能直接用**：它�
 §2.4 写「session_key = random(32B)」（候选 A）。线契约 §5 写的是
 **AES-256-GCM**（明写「⛔ 不是 8 字节 nonce」）。
 
-**已做的处置**：按**线契约**实现（它是跨仓唯一约定，AGENTS.md 的判据是
-「改协议必须先改本文档」）。`env-channel-design.md` 是更早的设计稿，本次
-**未改**（不在允许清单内）。
+**已做的处置**：按**线契约**实现（它是跨仓唯一约定，AGENTS.md 的判据是「改协议必须先改本文档」）。
+`env-channel-design.md` 是更早的设计稿，本次**未改**（不在允许清单内）。
 
 **待裁定**：是否要同步 `env-channel-design.md` 的加密描述？——纯文档，
 不影响任何字节。
@@ -312,10 +311,9 @@ Chromium 树内现成的 `mojo::NamedPlatformChannel` **不能直接用**：它�
 **冲突**：「计数」要有个地方记。线契约没规定计数器在哪、什么粒度
 （按 action 分？按原因分？）。
 
-**已做的处置**：内核侧提供 `ActionRejectReason` 枚举（8 个原因）+ 上行发送失败
-计数，**只在本进程内存里**，不落盘、不进日志正文。事件日志本身**只记 action 名
-与字节数**（线契约 §4 明写），所以「按原因分类计数」只能留在内存计数里，
-不进日志。
+**已做的处置**：内核侧提供 `ActionRejectReason` 枚举（8 个原因）+ 上行发送失败计数，
+**只在本进程内存里**，不落盘、不进日志正文。事件日志本身**只记 action 名与字节数**
+（线契约 §4 明写），所以「按原因分类计数」只能留在内存计数里，不进日志。
 
 **待裁定**：是否需要把失败计数暴露到某个可观测接口（如 Mojo 统计或
 `chrome://histograms`）？——本任务**没有**加，因为那要新增接口，超出
@@ -325,8 +323,7 @@ Chromium 树内现成的 `mojo::NamedPlatformChannel` **不能直接用**：它�
 
 **任务书原文**（主线 `1db1804` 补进 Q 段验收项）：
 
-> ⭐ **`python3 tools/check_line_limit.py` 必须 0 个 hard-limit 失败**
-> （700 行硬上限、400 行软目标）。
+> ⭐ **`python3 tools/check_line_limit.py` 必须 0 个 hard-limit 失败**（700 行硬上限、400 行软目标）。
 > ⚠️ 2026-10-21 实测：本卡首版 `native/kernel_pipe.cc` 写到 **1129 行**、
 > `native/kernel_pipe_test.cc` **829 行** ⇒ 两个 **hard-limit FAIL** ⇒ 不可合入。
 > 拆分点（按职责，拆完每份 250~400 行）：
@@ -334,11 +331,9 @@ Chromium 树内现成的 `mojo::NamedPlatformChannel` **不能直接用**：它�
 > `kernel_pipe_envelope.{h,cc}`（机器码派生 + KeyEnvelope 开/封包）。
 > ⛔ **不要把 JSON 解析和加密放同一个文件** —— 那会让测试也要拉 BoringSSL。
 
-**首版的实测**：确实 `native/kernel_pipe.cc` 1151 行、`native/kernel_pipe_test.cc`
-829 行 ⇒ 2 个 hard-limit FAIL。
+**首版的实测**：确实 `native/kernel_pipe.cc` 1151 行、`native/kernel_pipe_test.cc` 829 行 ⇒ 2 个 hard-limit FAIL。
 
-**已做的处置**：按**依赖**（不是按功能）拆成五层，每层一个 source_set、
-一个 gtest 目标：
+**已做的处置**：按**依赖**（不是按功能）拆成五层，每层一个 source_set、一个 gtest 目标：
 
 | 层 | 职责 | 依赖 |
 |---|---|---|
@@ -351,33 +346,32 @@ Chromium 树内现成的 `mojo::NamedPlatformChannel` **不能直接用**：它�
 测试同样拆开：`kernel_pipe_frame_test.cc` / `kernel_pipe_json_test.cc` /
 `kernel_pipe_keys_test.cc` / `kernel_pipe_envelope_test.cc` /
 `kernel_pipe_test.cc`（握手 + 配置），共享的固定向量常量放在
-`kernel_pipe_test_util.h`（**头文件**，因为每个测试二进制单独链接，
-常量不能放 .cc）。
+`kernel_pipe_test_util.h`（**头文件**：每个测试二进制单独链接，常量不能放 .cc）。
 
-**与任务书拆分点的差异（需追认）**：任务书把「机器码派生 + KeyEnvelope」放在
-同一层（`kernel_pipe_envelope`）。本任务拆成 `kernel_pipe_keys`（派生）与
+**与任务书拆分点的差异（需追认）**：任务书把「机器码派生 + KeyEnvelope」放在同一层
+（`kernel_pipe_envelope`）。本任务拆成 `kernel_pipe_keys`（派生）与
 `kernel_pipe_envelope`（信封）两层，理由是二者是**两件事**：
-派生是内核为自己算的（契约 §1「机器码派生」），
-信封是 runner 发来的（契约 §3.1「KeyEnvelope 载荷布局」）。
+派生是内核为自己算的（契约 §1），信封是 runner 发来的（契约 §3.1）。
 拆开后 `kernel_pipe_keys_test` 不必拉 AEAD 代码，且 400 行软目标也过了。
 
 **结果**：`python3 tools/check_line_limit.py` ⇒ **hard-limit 失败 0**；
-新增的 18 个文件**全部**在 400 行软目标以内（最大 380 行）。
-软目标告警只剩 5 个，其中 2 个是本任务之前就有的
-（`docs/l3-storage-layer.md` 550 行、`native/cache_record.cc` 587 行），
-1 个是本任务新增的（`integration/kernel_pipe_client.cc` 453 行，见 Q-K）。
+新增的 21 个文件**全部**在 400 行软目标以内（最大 380 行）。
+软目标告警只剩 5 个：4 个是本任务之前就有的（`docs/l3-storage-layer.md` 550 行、
+`docs/manual-acceptance.md` 433 行、`native/cache_record.cc` 587 行、
+`scripts/check_no_source_leak.py` 419 行），1 个是本任务新增的
+（`integration/kernel_pipe_client.cc` 453 行，见 Q-K）。
 
 ## Q-K. `integration/kernel_pipe_client.cc` 超 400 行软目标（453 行，请复核）
 
 管道客户端的 IO 那一半：端点打开、握手驱动、上行队列、发送线程、
-机器事实采集。它**必须**依赖 Chromium（socket、线程、`base::`），
-所以不能进 `native/`；而它天然要把这五件事放在一起
-（端点与收发是同一个句柄，队列与发送线程是同一个数据结构）。
+机器事实采集。它**必须**依赖 Chromium（socket、线程、`base::`），所以不能进
+`native/`；而它天然要把这五件事放在一起（端点与收发是同一个句柄，
+队列与发送线程是同一个数据结构）。
 
-**已做的处置**：453 行，**未超 700 硬上限**。本任务**没有**再拆，
-理由是再拆会把它切成「只被自己调用」的小文件——为拆而拆。
+**已做的处置**：453 行，**未超 700 硬上限**。本任务**没有**再拆，理由是再拆会把它
+切成「只被自己调用」的小文件——为拆而拆。
 
-**待裁定**：接受 453 行，还是要求继续拆（例如把「机器事实采集」独立成
+**待裁定**：接受 453 行，还是继续拆（例如把「机器事实采集」独立成
 `kernel_pipe_machine_facts.{h,cc}`）？——后者是纯搬移，不改行为。
 
 ## Q-L. Chromium 155 的 API 与本任务的预期不符（三处，均为「按树里的实际 API 写」）
@@ -395,10 +389,10 @@ Chromium 树内现成的 `mojo::NamedPlatformChannel` **不能直接用**：它�
 
 - `base::raw_ptr<T>` 是 `[chromium-rawptr]` 插件的**强制要求**
   ⇒ `SenderThread` 持 `base::raw_ptr<KernelPipeClient>`。
-- `-Wunsafe-buffer-usage` 在树内**是开的** ⇒ socket 读写用 `base::span` +
-  `subspan()`，不用裸指针算术；`memcpy` 换成 `std::copy`。
+- `-Wunsafe-buffer-usage` 在树内**是开的** ⇒ socket 读写用 `base::span` + `subspan()`，
+  不用裸指针算术；`memcpy` 换成 `std::copy`。
 - `[chromium-style] Complex constructor/destructor has an inlined body`
   会打在**显式 `= default`** 的特殊成员上 ⇒ `JsonObject` / `ActionTable` 的
   特殊成员改成「头里声明、.cc 里定义」。
 
-**待裁定**：无（三处都是「按树里的实际 API 写」，没有语义选择）。
+**待裁定**：无（三处都是「按树里的实际 API 写」，无语义选择）。
