@@ -72,3 +72,6 @@ python scripts/check_no_source_leak.py
 
 > 本规范同时内联在 `AGENTS.md` 的 `source-privacy` 段（智能体启动时自动加载），
 > 因此**不再单独维护一份 `docs/source-privacy.md`**——两份副本迟早会分叉。
+>
+> **文档不入库**：`docs/` 全部只保留在本地开发工作区（开发进展、验收记录、对照资料），
+> 不随仓库分发，也不保留在 git 历史中；见 `.gitignore`。入库的对外说明只写 README 与本文件。

@@ -26,6 +26,12 @@ import unittest
 ROOT = pathlib.Path(__file__).resolve().parents[1]
 DOCS = ROOT / "docs"
 
+# ``docs/`` 只留本地（见 .gitignore），不进仓。CI 上没有这些文件时整组跳过，
+# 不按「缺失即失败」处理——本地文档不在仓库里，本就不该由 CI 断言其存在。
+_DOCS_PRESENT = DOCS.is_dir()
+_skip_without_docs = unittest.skipUnless(
+    _DOCS_PRESENT, "docs/ 仅本地留存，仓库中不存在")
+
 # Codes that exist in more than one registry, so a bare mention is ambiguous.
 OVERLAPPING = ("60003",)
 
@@ -69,11 +75,13 @@ def _table_rows(text):
 
 
 class ErrorCodeDocsTests(unittest.TestCase):
+    @_skip_without_docs
     def test_docs_exist(self):
         for name, path in _doc_paths():
             with self.subTest(doc=name):
                 self.assertTrue(path.is_file(), "%s is missing" % name)
 
+    @_skip_without_docs
     def test_prose_mentions_name_the_owner(self):
         """A bare code in prose is a defect: readers cannot resolve it."""
         for name, path in _doc_paths():
@@ -87,6 +95,7 @@ class ErrorCodeDocsTests(unittest.TestCase):
                             "%s:%d quotes %s without naming the registry: %r"
                             % (name, number, code, line.strip()[:120]))
 
+    @_skip_without_docs
     def test_error_table_rows_name_the_owner(self):
         """In an error-code table every row must say whose code it is."""
         for name, path in _doc_paths():
@@ -100,6 +109,7 @@ class ErrorCodeDocsTests(unittest.TestCase):
                         "%s:%d has an error-code row without an owner: %r"
                         % (name, number, row[:120]))
 
+    @_skip_without_docs
     def test_shared_code_is_flagged_as_different_meaning(self):
         """The whole point: one number, two meanings, stated explicitly."""
         for name, path in _doc_paths():
@@ -110,6 +120,7 @@ class ErrorCodeDocsTests(unittest.TestCase):
                     "同号不同义" in text or "same number" in text.lower(),
                     "%s must state that 60003 has two meanings" % name)
 
+    @_skip_without_docs
     def test_required_codes_are_documented(self):
         for name, path in _doc_paths():
             text = path.read_text(encoding="utf-8")
@@ -117,6 +128,7 @@ class ErrorCodeDocsTests(unittest.TestCase):
                 with self.subTest(doc=name, code=code):
                     self.assertIn(code, text, "%s never mentions %s" % (name, code))
 
+    @_skip_without_docs
     def test_our_verification_failure_has_its_own_code(self):
         """Signature failures must not reuse a reference number."""
         text = (DOCS / "profile-spec-v1.md").read_text(encoding="utf-8")
