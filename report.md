@@ -396,3 +396,155 @@ Chromium 树内现成的 `mojo::NamedPlatformChannel` **不能直接用**：它�
   特殊成员改成「头里声明、.cc 里定义」。
 
 **待裁定**：无（三处都是「按树里的实际 API 写」，无语义选择）。
+
+---
+
+# 任务 N 报告 —— 语义冲突与待裁定项
+
+> 完整报告见 `docs/l3-reports/task-N.md`（做了什么 / 18+12 条 gtest 的覆盖面 /
+> 会话密钥由谁提供 / 验收原始输出）。
+> 本节只列**需要主理人裁定**的项：按任务书要求，遇到语义冲突停下来写
+> report.md，不自行选一条路。
+
+本卡的性质：**并入 + 接线**，不是从零实现。`native/l3_envelope.{h,cc}` 与
+`native/l3_envelope_test.cc` **原样**从 `2f0ea73` 并入（已用 `diff` 逐字节验证），
+本卡的新代码只有 `native/l3_envelope_session.{h,cc}`（接缝：密钥由调用方传入）。
+
+## N-A. ⛔ 磁盘文档用哪把钥匙：会话密钥是**只活一个会话**的，磁盘文档是**跨会话**的
+
+**这是本卡最重要的一条**，其余都是次要的。
+
+**事实**：
+
+- 契约 §1 钉死：会话密钥 32 字节、**只存内存**、进程退出即失效、
+  ⛔ 不写盘、⛔ 不进环境变量、⛔ 不进命令行、⛔ 不进日志。
+- 磁盘上的 L3 文档**跨会话**：浏览器启动时读 `--lengsuo-l3-wire=<path>`
+  指向的文件，那份文件可能是**上一次**会话封的。
+- `native/l3_envelope.h` 的信封头里**没有过期字段**，信封本身不记得自己多老。
+
+**冲突**：用会话密钥封磁盘文档 ⇒ 上一个会话封的文件，**下一个会话解不开**
+（会话密钥每次握手都换）。这与「磁盘上那份 L3 文档应该能被下次启动读到」
+直接矛盾。
+
+**已做的处置**：本卡**没有替主理人选**。本卡只保证「密钥由调用方传入」这条路
+是通的、且**没有弱密钥回退**（没有密钥就是不可用）。`native/l3_envelope_session.h`
+的注释里写明了这条边界。
+
+**待裁定**（三选一，或另定）：
+
+| 选项 | 做法 | 代价 |
+|---|---|---|
+| A. 磁盘文档用**长期文档密钥** | 另协商一把跨会话的文档密钥（`docs/env-channel-design.md` §2.4 提过这条路径），会话密钥只管管道 | 多一条密钥协商通道；文档密钥的落盘/保护方式要另定 |
+| B. 磁盘文档**每次启动重新协商** | 启动时拿会话密钥当临时钥匙，读完即弃 | 磁盘上的文件在会话结束后就没用了 ⇒ 与「受管文件」的语义不符 |
+| C. 磁盘文档**明文**，只保管道 | 承认 L3 文档的威胁模型不是「文件被拿走」 | 与任务 N 的存在理由相反 |
+
+**在这条拍板之前，磁盘上的受管文件不能真的改走信封**（改了就是 B 案的半吊子：
+能写不能读）。
+
+## N-B. ⛔ 两层信封要不要合并成一个组件
+
+**事实**（与 `report.md` Q-A 记的是同一件事，从 N 侧再记一次）：
+
+| | 本卡的 L3E1 文档信封 | 线契约 §3.1 的 KeyEnvelope |
+|---|---|---|
+| 用途 | 磁盘上 L3 文档的加密 | 管道握手时下发会话密钥 |
+| 格式 | 自定 `L3E1` 头 32 B | `nonce_len\|nonce\|ciphertext_len\|ciphertext\|tag_len\|tag` |
+| 端序 | **小端** | **大端** |
+| 密钥 | 调用方传入 32 B 主密钥，PBKDF2-HMAC-SHA256 派生 | `k_machine` 直接作 AES-256-GCM 密钥 |
+| 载荷总长 | 76 B 开销 | **85 B**（40 + 密文长度） |
+
+**已做的处置**：**不合并**。任务书原话「若你认为两者应当合并成一个组件：
+停下来写进报告，不要自己合」；而且合并要动 `native/kernel_pipe_envelope.*` ——
+那不在本卡允许清单里，且 KeyEnvelope 的字节布局是契约 §3.1 的事（Q 卡负责）。
+本卡的接缝层**刻意不 include `kernel_pipe*.h`**：磁盘格式层不该依赖今天恰好
+在传它密钥的那个传输层。两侧的长度一致性由**测试里的 `static_assert`** 钉住，
+而不是由头文件依赖钉住。
+
+**待裁定**：是否另开一张卡做「信封族」抽象（一个 `envelope/` 目录、两个格式、
+一个命名空间），还是永远保持两层。**Q-A 与 N-B 是同一条线的两端**，
+建议一起拍。
+
+## N-C. 🟡 会话密钥过期后，磁盘信封怎么办
+
+**事实**：契约要求内核「过期后拒绝使用（fail-closed）」；信封层不设有效期。
+
+**已做的处置**：信封层**不**检查有效期 —— 有效期的判断属于**密钥来源**的职责
+（管道握手的 `Expired()` / `expires_unix` 已经管这件事）。
+**待裁定**：确认这个分工（信封不管过期，来源管过期）是对的。
+
+## N-D. 🟡 迭代次数 100000：实测 8 ms/次，与注释里写的「~20 ms」有出入
+
+**事实**（构建宿主实测）：
+
+```
+iters=1000    seal=0.1 ms
+iters=100000  seal=8.1 ms
+```
+
+`native/l3_envelope.h` 的注释写的是「~20 ms」。默认档一次封 8 ms、开 8 ms。
+
+**已做的处置**：**没改默认值**（那是 `2f0ea73` 的字节，改了就不是「原样并入」）。
+**待裁定**：默认次数要不要调？—— 更高只拖慢启动，对**已经拿到密钥的人**无效；
+磁盘文档真正的强度来自密钥本身（N-A），不是 KDF 次数。
+
+## N-E. 🟡 `l3_envelope.h` 里有一句关于 `--lengsuo-managed-l3` 的过期注释
+
+**事实**：`native/l3_envelope.h` 第 12–15 行写着「`--lengsuo-managed-l3=<base64>`
+is untouched and still carries the plaintext document to the renderer as the
+transitional path」。任务 O 已经**整仓移除**了这个开关。
+
+**已做的处置**：**没改** —— 这属于「原样并入，不重写实现」的范围。
+**待裁定**：是否允许在本卡之后单独一笔「删掉过期注释」的提交
+（`native/l3_envelope.h` 在允许清单里，但改它会破坏「与 `2f0ea73` 逐字节相同」
+这个可验证的性质）。
+
+## N-F. 🟡 Chromium 工具链下两个 `.cc` 有 24 条 `-Wunsafe-buffer-usage` 告警
+
+**事实**：并入/新增的两个 `.cc` 在 **Chromium 工具链**下有 24 条
+`-Wunsafe-buffer-usage`（裸指针算术 / `memcpy` / `memcmp`）。
+任务 Q 当初也是这么踩掉的（Q-L）。**gtest 侧零告警**
+（`-Wall -Wextra -Werror -pedantic`），**真实构建零错误**。
+
+**已做的处置**：**没修**。修法是把裸指针换成 `std::span`（已实测可行：
+`std::span` 同时过 g++ C++20 与 Chromium clang C++23），但那要**重写
+`2f0ea73` 的实现**，与任务书「不要重写实现」直接冲突。
+
+**待裁定**：要不要开一笔「Chromium 工具链零告警」的重写（`std::span` 化），
+还是接受这 24 条告警（不是错误，`treat_warnings_as_errors = false`）？
+
+## N-G. 🟡 两处「不在允许清单里 ⇒ 本卡做不了」的缺口
+
+**事实**：
+
+1. `integration/l3_bootstrap.cc` / `integration/browser_bootstrap.cc` 读的是
+   `--lengsuo-l3-wire=<path>` 指向的**明文 L3W1** ⇒ **磁盘上的受管文件目前
+   仍是明文**。这两个文件不在本卡允许清单里。
+2. `integration/kernel_pipe_client.h` 的 `KernelPipeClient` 私有持有
+   `fp::KernelPipeHandshake handshake_;`，**没有公开 `session_key()` 的读口**
+   ⇒ 浏览器侧拿不到会话密钥。这个文件也不在本卡允许清单里。
+
+**已做的处置**：本卡遵守「只改该任务列出的文件」，两处都没动。
+**待裁定**：这两处接线归哪张卡？（读侧接线还卡在 N-A：没有确定用哪把钥匙，
+写了也是半吊子。）
+
+## N-H. 🟡 `tests/test_patch_replay.py` 的 required 集合没加新路径（该文件不在允许清单里）
+
+**事实**：该文件的 `required` 集合目前**不含**六个新文件。后果是
+`test_lengsuo_sources_are_shipped` 仍然绿，但**新文件没有被这条测试守着** ——
+下次有人把 `l3_envelope_session.cc` 从 0011 里删掉，测试**不会**报。
+
+**已做的处置**：本卡遵守允许清单，没有动它。
+**待裁定**：要不要在主线补一笔（往 `required` 里加六条路径
+`lengsuo/native/l3_envelope.{cc,h,test.cc}` +
+`lengsuo/native/l3_envelope_session.{cc,h,test.cc}`）？
+
+## N-I. 🟡 补丁纪律踩坑：relock 必须在 commit **之后**
+
+**事实**：第一次跑 `relock_baseline.py` 时 0011 还没提交，锁进去的是旧补丁的
+摘要 ⇒ `test_locked_digests_match` 报「lock does not match the repository
+content」。`relock_baseline.py` 取的是 `HEAD:<path>` 的 blob（提交优先），
+所以顺序必须是 ①commit ②relock ③`test_patch_replay` ④重跑
+`make_sources_patch.py`。
+
+**已做的处置**：已按正确顺序重跑并全绿。**待裁定**：无（纯流程问题，记录在此
+以免下一张卡再踩）。
