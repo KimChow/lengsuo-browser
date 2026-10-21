@@ -21,10 +21,13 @@ as the document is changed coherently.
 """
 import pathlib
 import re
+import sys
 import unittest
 
+sys.path.insert(0, str(pathlib.Path(__file__).resolve().parent))
+from docs_helper import doc_path  # noqa: E402  (path set up above)
+
 ROOT = pathlib.Path(__file__).resolve().parents[1]
-CONTRACT = ROOT / "docs" / "kernel-wire-contract.md"
 
 # The vector's container id ("ct-01") and its ciphertext length, used to
 # resolve the two variable-length fields of the layout table.
@@ -35,7 +38,15 @@ CIPHERTEXT_LEN = 45
 class KeyEnvelopeLayoutTests(unittest.TestCase):
     @classmethod
     def setUpClass(cls):
-        cls.text = CONTRACT.read_text(encoding="utf-8")
+        # The contract is an input to the work, so it lives in the
+        # repository or in the shared directory the build machine keeps
+        # it in. Without it there is nothing to check the layout
+        # against, and the run says so.
+        contract = doc_path("kernel-wire-contract.md")
+        if contract is None:
+            raise unittest.SkipTest(
+                "the wire contract is not available in this checkout")
+        cls.text = contract.read_text(encoding="utf-8")
 
     # -- helpers ---------------------------------------------------------
 

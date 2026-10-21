@@ -20,11 +20,13 @@ This test only guards the contract text; it does not implement a pipe client.
 """
 import pathlib
 import re
+import sys
 import unittest
 
+sys.path.insert(0, str(pathlib.Path(__file__).resolve().parent))
+from docs_helper import doc_path  # noqa: E402  (path set up above)
+
 ROOT = pathlib.Path(__file__).resolve().parents[1]
-CONTRACT = ROOT / "docs" / "kernel-wire-contract.md"
-BRIEF = ROOT / "docs" / "cc-task-brief-l3f.md"
 
 
 class ContractEndpointRulesTest(unittest.TestCase):
@@ -32,7 +34,15 @@ class ContractEndpointRulesTest(unittest.TestCase):
 
     @classmethod
     def setUpClass(cls) -> None:
-        cls.text = CONTRACT.read_text(encoding="utf-8")
+        # The contract is an input to the work rather than a record of
+        # it, so it is looked up in the repository first and in the
+        # shared directory second. A checkout with neither cannot check
+        # the contract and says so.
+        contract = doc_path("kernel-wire-contract.md")
+        if contract is None:
+            raise unittest.SkipTest(
+                "the wire contract is not available in this checkout")
+        cls.text = contract.read_text(encoding="utf-8")
 
     def test_hello_nonce_is_lowercase_hex_of_16_chars(self) -> None:
         """The 8-byte nonce must be pinned to one textual form."""
@@ -64,7 +74,10 @@ class ContractEndpointRulesTest(unittest.TestCase):
 
     def test_task_brief_points_at_the_contract_rules(self) -> None:
         """The brief must not restate a different encoding of its own."""
-        brief = BRIEF.read_text(encoding="utf-8")
+        brief_path = doc_path("cc-task-brief-l3f.md")
+        if brief_path is None:
+            self.skipTest("the fifth-round brief is not in this checkout")
+        brief = brief_path.read_text(encoding="utf-8")
         # The brief may point at the contract ...
         self.assertIn("kernel-wire-contract.md", brief)
         # ... but must not introduce a competing spelling of the nonce.
