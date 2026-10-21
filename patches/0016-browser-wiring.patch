@@ -1,5 +1,4 @@
 diff --git a/chrome/browser/chrome_browser_main.cc b/chrome/browser/chrome_browser_main.cc
-index cbf3b6c..272892e 100644
 --- a/chrome/browser/chrome_browser_main.cc
 +++ b/chrome/browser/chrome_browser_main.cc
 @@ -4,6 +4,9 @@
@@ -12,7 +11,7 @@ index cbf3b6c..272892e 100644
  #include <memory>
  #include <string>
  #include <tuple>
-@@ -1004,6 +1007,22 @@ void ChromeBrowserMainParts::RecordBrowserStartupTime() {
+@@ -1004,6 +1007,22 @@
  
  int ChromeBrowserMainParts::PreEarlyInitialization() {
    TRACE_EVENT0("startup", "ChromeBrowserMainParts::PreEarlyInitialization");
@@ -36,7 +35,6 @@ index cbf3b6c..272892e 100644
      chrome_extra_part->PreEarlyInitialization();
    }
 diff --git a/chrome/browser/chrome_content_browser_client.cc b/chrome/browser/chrome_content_browser_client.cc
-index 1904577..90c4991 100644
 --- a/chrome/browser/chrome_content_browser_client.cc
 +++ b/chrome/browser/chrome_content_browser_client.cc
 @@ -4,6 +4,8 @@
@@ -48,7 +46,7 @@ index 1904577..90c4991 100644
  #include <algorithm>
  #include <iterator>
  #include <map>
-@@ -2893,6 +2895,76 @@ void MaybeAppendBlinkSettingsSwitchForFieldTrial(
+@@ -2893,6 +2895,71 @@
  void ChromeContentBrowserClient::AppendExtraCommandLineSwitches(
      base::CommandLine* command_line,
      int child_process_id) {
@@ -113,19 +111,14 @@ index 1904577..90c4991 100644
 +
 +      }
 +    }
-+    // Storage-layer pins (L3). The document is re-serialized from the frozen
-+    // snapshot and base64-encoded, so the renderer receives exactly what the
-+    // browser verified. Transitional transport; see docs/fp-switch-contract.md
-+    // for the move to a managed file plus Mojo.
-+    if (const std::string l3_b64 = lengsuo::BrowserL3Base64();
-+        !l3_b64.empty() && !command_line->HasSwitch("lengsuo-managed-l3")) {
-+      command_line->AppendSwitchASCII("lengsuo-managed-l3", l3_b64);
-+    }
++    // Storage-layer pins (L3) are not appended here. The document reaches a
++    // renderer only as the answer to its Mojo request
++    // (lengsuo::mojom::L3Provisioning), so the command line never carries it.
 +  }
    crash_keys::AppendStringAnnotationsCommandLineSwitch(command_line);
  #if BUILDFLAG(IS_MAC)
    std::unique_ptr<metrics::ClientInfo> client_info =
-@@ -3285,6 +3357,8 @@ ChromeContentBrowserClient::GetQuarantineConnectionCallback() {
+@@ -3285,6 +3352,8 @@
  }
  
  std::string ChromeContentBrowserClient::GetApplicationLocale() {
@@ -134,7 +127,7 @@ index 1904577..90c4991 100644
    if (BrowserThread::CurrentlyOn(BrowserThread::IO)) {
      return GetIOThreadApplicationLocale();
    }
-@@ -3293,6 +3367,8 @@ std::string ChromeContentBrowserClient::GetApplicationLocale() {
+@@ -3293,6 +3362,8 @@
  
  std::string ChromeContentBrowserClient::GetAcceptLangs(
      content::BrowserContext* context) {
@@ -143,7 +136,7 @@ index 1904577..90c4991 100644
    Profile* profile = Profile::FromBrowserContext(context);
    return profile->GetPrefs()->GetString(language::prefs::kAcceptLanguages);
  }
-@@ -4885,6 +4961,7 @@ void ChromeContentBrowserClient::OverrideWebPreferences(
+@@ -4885,6 +4956,7 @@
    for (auto& parts : extra_parts_) {
      parts->OverrideWebPreferences(web_contents, main_frame_site, web_prefs);
    }
@@ -151,7 +144,7 @@ index 1904577..90c4991 100644
  
    web_prefs->prefers_default_scrollbar_styles =
        prefs->GetBoolean(prefs::kPrefersDefaultScrollbarStyles);
-@@ -4966,6 +5043,7 @@ bool ChromeContentBrowserClient::OverrideWebPreferencesAfterNavigation(
+@@ -4966,6 +5038,7 @@
      prefs_changed |= parts->OverrideWebPreferencesAfterNavigation(
          web_contents, main_frame_site, web_prefs);
    }
@@ -159,7 +152,7 @@ index 1904577..90c4991 100644
  
    const auto old_in_forced_colors = web_prefs->in_forced_colors;
    const auto old_is_forced_colors_disabled =
-@@ -7727,12 +7805,17 @@ std::string ChromeContentBrowserClient::GetProduct() {
+@@ -7727,12 +7800,17 @@
  }
  
  std::string ChromeContentBrowserClient::GetUserAgent() {
@@ -178,7 +171,7 @@ index 1904577..90c4991 100644
  }
  
  std::optional<gfx::ImageSkia> ChromeContentBrowserClient::GetProductLogo() {
-@@ -9093,6 +9176,8 @@ bool ChromeContentBrowserClient::IsBlobUrlPartitioningEnabled(
+@@ -9093,6 +9171,8 @@
  bool ChromeContentBrowserClient::ShouldReduceAcceptLanguage(
      content::BrowserContext* browser_context) {
    DCHECK_CURRENTLY_ON(BrowserThread::UI);
@@ -187,11 +180,58 @@ index 1904577..90c4991 100644
    const PrefService::Preference* pref =
        Profile::FromBrowserContext(browser_context)
            ->GetPrefs()
+diff --git a/chrome/browser/chrome_content_browser_client_receiver_bindings.cc b/chrome/browser/chrome_content_browser_client_receiver_bindings.cc
+--- a/chrome/browser/chrome_content_browser_client_receiver_bindings.cc
++++ b/chrome/browser/chrome_content_browser_client_receiver_bindings.cc
+@@ -54,6 +54,7 @@
+ #include "content/public/common/buildflags.h"
+ #include "extensions/buildflags/buildflags.h"
+ #include "extensions/common/extension_id.h"
++#include "lengsuo/integration/l3_provisioning_impl.h"
+ #include "media/mojo/buildflags.h"
+ #include "mojo/public/cpp/bindings/binder_map.h"
+ #include "pdf/buildflags.h"
+@@ -724,6 +725,13 @@
+ void ChromeContentBrowserClient::BindHostReceiverForRenderer(
+     content::RenderProcessHost* render_process_host,
+     mojo::GenericPendingReceiver receiver) {
++  // L3 document provisioning (task O). The renderer pulls the frozen document
++  // once, before its first StorageArea exists; this is the process-level
++  // binder every renderer reaches through RenderThread::BindHostReceiver().
++  if (lengsuo::BindL3Provisioning(receiver)) {
++    return;
++  }
++
+   if (auto host_receiver =
+           receiver.As<content_settings::mojom::ContentSettingsManager>()) {
+     content_settings::ContentSettingsManagerImpl::Create(
+diff --git a/chrome/browser/BUILD.gn b/chrome/browser/BUILD.gn
+--- a/chrome/browser/BUILD.gn
++++ b/chrome/browser/BUILD.gn
+@@ -880,6 +880,7 @@
+ 
+   deps = [
+     "//lengsuo/integration:bootstrap",
++    "//lengsuo/integration:l3_provisioning",
+     ":active_use_util",
+     ":after_startup_task_utils",
+     ":bad_message",
+diff --git a/content/renderer/BUILD.gn b/content/renderer/BUILD.gn
+--- a/content/renderer/BUILD.gn
++++ b/content/renderer/BUILD.gn
+@@ -229,6 +229,8 @@
+ 
+   deps = [
+     "//lengsuo/native:canvas_noise",
++    "//lengsuo/native:l3_runtime",
++    "//lengsuo/public/mojom:l3_provisioning_mojom",
+     "//base",
+     "//base:i18n",
+     "//build:chromecast_buildflags",
 diff --git a/content/renderer/renderer_main.cc b/content/renderer/renderer_main.cc
-index 2fd21f7..bdfbcb6 100644
 --- a/content/renderer/renderer_main.cc
 +++ b/content/renderer/renderer_main.cc
-@@ -85,10 +85,21 @@
+@@ -85,10 +85,31 @@
  #include "content/child/sandboxed_process_thread_type_handler.h"
  #endif
  
@@ -200,8 +240,18 @@ index 2fd21f7..bdfbcb6 100644
 +// anchored at the same place is reported by GNU patch as "reversed or
 +// previously applied" and then silently skipped. This anchor is untouched by
 +// the earlier patches.
-+#include "base/base64.h"
++//
++// The document arrives over Mojo (lengsuo.mojom.L3Provisioning), never over
++// the command line; the bind/remote/task-runner headers are grouped here with
++// it rather than in the alphabetic block above for the same anchoring reason.
++#include <string>
++#include <vector>
++
++#include "base/functional/bind.h"
++#include "base/task/single_thread_task_runner.h"
 +#include "lengsuo/native/l3_runtime.h"
++#include "lengsuo/public/mojom/l3_provisioning.mojom.h"
++#include "mojo/public/cpp/bindings/remote.h"
 +
  #if BUILDFLAG(MOJO_RANDOM_DELAYS_ENABLED)
  #include "mojo/public/cpp/bindings/lib/test_random_mojo_delays.h"
@@ -213,43 +263,8 @@ index 2fd21f7..bdfbcb6 100644
  namespace content {
  namespace {
  
-@@ -153,8 +164,65 @@ int RendererMain(MainFunctionParams parameters) {
-   base::CurrentProcess::GetInstance().SetProcessType(
-       base::CurrentProcessType::PROCESS_RENDERER);
+@@ -155,6 +176,30 @@
  
-+  // Storage-layer pins (L3). Transitional transport: the document rides the
-+  // command line for now; the target design is a managed file read by the
-+  // browser and forwarded over Mojo (Reference never puts fingerprint state on
-+  // the command line). A present-but-invalid document aborts the renderer: a
-+  // platform that already observed a pinned value must not see it vanish.
-+  // Freshness was enforced browser-side before forwarding, so the renderer
-+  // does not re-check age with its own clock.
-+  //
-+  // This block sits before the local "command_line" alias on purpose: patches
-+  // 0007 and 0008 both insert their own blocks right after that alias, and a
-+  // later patch anchored at the same place is reported by GNU patch as
-+  // "reversed or previously applied" and skipped. parameters.command_line is
-+  // the same object, so nothing is lost.
-+  if (parameters.command_line->HasSwitch("lengsuo-managed-l3")) {
-+    const std::string l3_b64 =
-+        parameters.command_line->GetSwitchValueASCII("lengsuo-managed-l3");
-+    if (l3_b64.empty()) return 1;
-+    // The document travels base64-encoded: it is multi-line text and must not
-+    // appear verbatim on the command line.
-+    const std::optional<std::vector<uint8_t>> decoded =
-+        base::Base64Decode(l3_b64);
-+    if (!decoded) return 1;
-+    const std::string l3_wire(decoded->begin(), decoded->end());
-+    // now_unix = 0: the browser already judged freshness against its own
-+    // clock before forwarding, so the renderer verifies the digest and the
-+    // launch consistency gate only. A real timestamp here would reject every
-+    // document as "too new", because the renderer has no clock to compare it
-+    // against.
-+    if (!lengsuo::fp::GetL3Runtime().Init(l3_wire, /*now_unix=*/0,
-+                                          /*max_age_seconds=*/0)) {
-+      return 1;
-+    }
-+  }
    const base::CommandLine& command_line = *parameters.command_line;
  
 +  // Browser passes only the frozen language, never the profile file or secrets.
@@ -279,3 +294,59 @@ index 2fd21f7..bdfbcb6 100644
  #if BUILDFLAG(IS_MAC)
    base::apple::ScopedNSAutoreleasePool* pool = parameters.autorelease_pool;
  #endif  // BUILDFLAG(IS_MAC)
+@@ -293,6 +338,55 @@
+       }
+     }
+ 
++    // Storage-layer pins (L3). The document is pulled from the browser over
++    // Mojo instead of riding the command line: no fingerprint state ever
++    // appears in the renderer's argv or in /proc/<pid>/cmdline.
++    //
++    // The pull sits after RenderThreadImpl exists (the process-level binder
++    // lives on RenderThread) and before run_loop.Run(). The first
++    // StorageArea::Create can only happen once the message loop is pumping, so
++    // the document is frozen before any storage consumer exists.
++    //
++    // Fail-closed: an empty answer means "this session has no L3 statement"
++    // and the renderer keeps native values. No answer at all (disconnect or
++    // the 5s bound) aborts the renderer, as does an answer that does not
++    // decode: a platform that already observed a pinned value must not see it
++    // vanish. Freshness was enforced browser-side before answering, so the
++    // renderer verifies the digest and launch consistency only; now_unix = 0
++    // keeps it from rejecting every document as "too new" against a clock it
++    // does not share.
++    {
++      mojo::Remote<lengsuo::mojom::L3Provisioning> l3_provisioning;
++      content::RenderThread::Get()->BindHostReceiver(
++          l3_provisioning.BindNewPipeAndPassReceiver());
++      std::vector<uint8_t> document;
++      bool answered = false;
++      base::RunLoop wait;
++      l3_provisioning.set_disconnect_handler(wait.QuitClosure());
++      l3_provisioning->GetDocument(base::BindOnce(
++          [](std::vector<uint8_t>* out, bool* answered,
++             base::RepeatingClosure quit,
++             lengsuo::mojom::L3DocumentPtr reply) {
++            *out = std::move(reply->bytes);
++            *answered = true;
++            quit.Run();
++          },
++          &document, &answered, wait.QuitClosure()));
++      base::SingleThreadTaskRunner::GetCurrentDefault()->PostDelayedTask(
++          FROM_HERE, wait.QuitClosure(), base::Seconds(5));
++      wait.Run();
++      if (!answered) {
++        return 1;
++      }
++      if (!document.empty()) {
++        const std::string l3_wire(document.begin(), document.end());
++        if (!lengsuo::fp::GetL3Runtime().Init(l3_wire, /*now_unix=*/0,
++                                              /*max_age_seconds=*/0)) {
++          return 1;
++        }
++      }
++    }
++
+     // Start the HangWatcher now that the sandbox is engaged, if it hasn't
+     // already been started.
+     if (base::HangWatcher::IsEnabled() &&
