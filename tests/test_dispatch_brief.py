@@ -6,9 +6,15 @@ brief: it then implements the wrong thing (or reports "task O not found") and
 the round is wasted. That is a text-level bug, so it is caught here without a
 Chromium checkout.
 """
+import os
 import pathlib
 import re
+import subprocess
+import sys
 import unittest
+
+sys.path.insert(0, str(pathlib.Path(__file__).resolve().parent))
+from bash_helper import find_bash  # noqa: E402  (path set up above)
 
 ROOT = pathlib.Path(__file__).resolve().parents[1]
 LAUNCHER = ROOT / "tools" / "rebuild" / "launch_l3b_short.sh"
@@ -24,42 +30,46 @@ def _launcher_text():
     return LAUNCHER.read_text(encoding="utf-8")
 
 
-def _task_to_brief():
-    """Parses the `case "$task" in ... esac` block into {task: brief path}.
+def _resolve_briefs(tasks, repo_src=None, brief_dir=None):
+    """Ask the launcher which brief each task would use.
 
-    The launcher resolves a brief in two steps: the case block picks the
-    file name, and the lookup that follows decides which directory the
-    name is read from. The mapping under test is the first step, so the
-    name is reported with the directory it is expected to resolve to
-    when the repository ships its briefs.
+    The launcher answers this itself, through the mode that only does the
+    lookup. Asking the script is what makes the test check the dispatch
+    rather than a copy of it: the mapping used to be written twice in the
+    script, and the test read whichever copy appeared first in the file.
+    That left the copy the dispatch actually uses unchecked -- changing
+    it there sent a card to the wrong brief and no test went red.
 
-    Both spellings of the assignment are accepted. The older one named
-    the whole path in the case block; the newer one names only the file
-    and lets the lookup add the directory. A test that only understood
-    one of them would report an empty mapping -- which reads as "the
-    script lost the mapping" rather than "the test stopped following
-    it", and sends the reader looking in the wrong place.
+    The repository to look in has to be named, because the launcher's
+    default points at the build machine's clone, which does not exist on
+    the machine running the test. Without it every task comes back
+    "MISSING" and the test says nothing about the mapping.
     """
-    text = _launcher_text()
-    block = re.search(r'case "\$task" in(.*?)esac', text, re.S)
-    if not block:
-        raise AssertionError("dispatch script lost its task->brief case block")
+    env = dict(os.environ)
+    env["LENGSUO_REPO_SRC"] = str(repo_src if repo_src is not None else ROOT)
+    if brief_dir is not None:
+        env["LENGSUO_L3B_BRIEF_DIR"] = str(brief_dir)
+    result = subprocess.run(
+        [find_bash(), str(LAUNCHER), "--resolve-brief", *tasks],
+        capture_output=True, text=True, check=False, timeout=120, env=env)
+    if result.returncode != 0:
+        raise AssertionError("the launcher failed to resolve briefs: %s"
+                             % result.stderr)
     mapping = {}
-    for line in block.group(1).splitlines():
-        match = re.match(
-            r'\s*([A-Z][A-Z|]*)\)\s*task_brief="\$REPO_SRC/([^"]+)"', line)
-        if not match:
-            match = re.match(
-                r'\s*([A-Z][A-Z|]*)\)\s*brief_name="([^"]+)"', line)
-            if not match:
-                continue
-            mapping.update({task: "docs/" + match.group(2)
-                            for task in match.group(1).split("|")})
+    for line in result.stdout.splitlines():
+        parts = line.split()
+        if len(parts) < 2:
             continue
-        brief = match.group(2)
-        for task in match.group(1).split("|"):
-            mapping[task] = brief
+        task, path = parts[0], parts[1]
+        if path == "MISSING":
+            continue
+        mapping[task] = pathlib.PurePosixPath(path).name
     return mapping
+
+
+def _task_to_brief():
+    """Return {task: brief file name} as the launcher resolves it."""
+    return _resolve_briefs(["O", "N", "Q", "R", "M", "I", "J", "K", "L"])
 
 
 class DispatchBriefTests(unittest.TestCase):
@@ -70,7 +80,7 @@ class DispatchBriefTests(unittest.TestCase):
         for task, brief in sorted(mapping.items()):
             with self.subTest(task=task):
                 self.assertTrue(
-                    (ROOT / brief).is_file(),
+                    (ROOT / "docs" / brief).is_file(),
                     "task %s points at missing brief %s" % (task, brief))
 
     @_skip_without_docs
@@ -88,7 +98,7 @@ class DispatchBriefTests(unittest.TestCase):
             "cc-task-brief-l3b.md",   # round two I/J/K/L (merged)
         }
         mapping = _task_to_brief()
-        reachable = {pathlib.PurePosixPath(b).name for b in mapping.values()}
+        reachable = set(mapping.values())
         shipped = {p.name for p in DOCS.glob("cc-task-brief*.md")}
         self.assertEqual(
             shipped - reachable - finished, set(),
@@ -98,15 +108,15 @@ class DispatchBriefTests(unittest.TestCase):
     def test_third_round_tasks_use_the_third_round_brief(self):
         """Guards the specific regression: M/N briefly mapped to round two."""
         mapping = _task_to_brief()
-        self.assertEqual(mapping.get("M"), "docs/cc-task-brief-l3d.md")
+        self.assertEqual(mapping.get("M"), "cc-task-brief-l3d.md")
 
     def test_fourth_round_task_does_not_fall_back(self):
         """O must not hit the default arm (round two's brief)."""
         mapping = _task_to_brief()
         self.assertIn("O", mapping)
-        self.assertEqual(mapping["O"], "docs/cc-task-brief-l3e.md")
-        self.assertNotIn(mapping["O"], ("docs/cc-task-brief-l3.md",
-                                        "docs/cc-task-brief-l3b.md"))
+        self.assertEqual(mapping["O"], "cc-task-brief-l3e.md")
+        self.assertNotIn(mapping["O"], ("cc-task-brief-l3.md",
+                                        "cc-task-brief-l3b.md"))
 
     def test_fifth_round_tasks_use_the_fifth_round_brief(self):
         """N/Q/R are the fifth round; P/S live in the client repo, not here."""
@@ -114,7 +124,7 @@ class DispatchBriefTests(unittest.TestCase):
         for task in ("N", "Q", "R"):
             with self.subTest(task=task):
                 self.assertEqual(mapping.get(task),
-                                 "docs/cc-task-brief-l3f.md")
+                                 "cc-task-brief-l3f.md")
         self.assertNotIn("P", mapping,
                          "task P belongs to the client repo line")
 
@@ -126,7 +136,7 @@ class DispatchBriefTests(unittest.TestCase):
         dispatching N against it would burn a card rebuilding it.
         """
         mapping = _task_to_brief()
-        self.assertNotEqual(mapping.get("N"), "docs/cc-task-brief-l3d.md")
+        self.assertNotEqual(mapping.get("N"), "cc-task-brief-l3d.md")
 
     @_skip_without_docs
     def test_fifth_round_brief_has_a_section_for_every_mapped_task(self):
@@ -139,7 +149,7 @@ class DispatchBriefTests(unittest.TestCase):
         mapping = _task_to_brief()
         text = (DOCS / "cc-task-brief-l3f.md").read_text(encoding="utf-8")
         for task in ("N", "Q", "R"):
-            if mapping.get(task) != "docs/cc-task-brief-l3f.md":
+            if mapping.get(task) != "cc-task-brief-l3f.md":
                 continue
             with self.subTest(task=task):
                 self.assertRegex(text, r"(?m)^## 任务 %s[：: ]" % task)

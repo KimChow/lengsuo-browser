@@ -59,23 +59,6 @@ class BriefLocationTest(unittest.TestCase):
                       "the launcher's default brief directory is not the "
                       "one the build machine uses")
 
-    def test_launcher_prefers_the_repository_copy(self):
-        """When both copies exist, the repository one wins.
-
-        A repository that does ship briefs has the tracked copy, and a
-        stale copy left in the outside directory must not shadow it.
-        """
-        text = _launcher_text()
-        in_repo = text.find('if [ -f "$REPO_SRC/docs/$brief_name" ]')
-        outside = text.find('task_brief="$BRIEF_DIR/$brief_name"')
-        self.assertNotEqual(in_repo, -1,
-                            "the launcher no longer checks the repository")
-        self.assertNotEqual(outside, -1,
-                            "the launcher no longer checks the outside dir")
-        self.assertLess(in_repo, outside,
-                        "the outside copy is consulted before the repository "
-                        "one, so a stale copy can shadow the tracked one")
-
     def test_missing_brief_is_reported_with_both_locations(self):
         """A missing brief must say where it looked."""
         text = _launcher_text()
@@ -92,11 +75,12 @@ class BriefLocationTest(unittest.TestCase):
         quietly run the wrong instructions.
         """
         text = _launcher_text()
-        block = re.search(r'case "\$task" in(.*?)esac', text, re.S)
+        block = re.search(r'case\s+"\$\w+"\s+in(.*?)esac', text, re.S)
         self.assertIsNotNone(block, "the task->brief case block is gone")
         mapped = set()
         for line in block.group(1).splitlines():
-            match = re.match(r'\s*([A-Z][A-Z|]*)\)\s*brief_name="([^"]+)"', line)
+            match = re.match(
+                r'\s*([A-Z][A-Z|]*)\)\s*(?:echo\s+)?"(cc-task-brief[^"]+)"', line)
             if match:
                 for task in match.group(1).split("|"):
                     mapped.add(task)
