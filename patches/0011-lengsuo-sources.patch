@@ -1,9 +1,9 @@
 diff --git a/lengsuo/integration/BUILD.gn b/lengsuo/integration/BUILD.gn
 new file mode 100644
-index 0000000..e6cfc65
+index 0000000..2408a56
 --- /dev/null
 +++ b/lengsuo/integration/BUILD.gn
-@@ -0,0 +1,52 @@
+@@ -0,0 +1,72 @@
 +import("//testing/test.gni")
 +
 +# Browser-only dependency. No chrome/browser dependency (avoids a cycle).
@@ -39,14 +39,34 @@ index 0000000..e6cfc65
 +  ]
 +}
 +
++# Browser side of the L3 Mojo channel (task O): answers each renderer's
++# GetDocument() from the snapshot :bootstrap froze at startup. No
++# chrome/browser dependency, so chrome/browser may depend on it freely.
++source_set("l3_provisioning") {
++  sources = [
++    "l3_provisioning_impl.cc",
++    "l3_provisioning_impl.h",
++  ]
++  public_deps = [
++    "//base",
++    "//lengsuo/native:l3_wire",
++    "//lengsuo/public/mojom:l3_provisioning_mojom",
++    "//mojo/public/cpp/bindings",
++  ]
++  deps = [ ":bootstrap" ]
++}
++
 +test("bootstrap_unittests") {
 +  testonly = true
 +  sources = [
 +    "browser_bootstrap_unittest.cc",
++    "l3_provisioning_impl_test.cc",
 +    "official_defaults_unittest.cc",
 +  ]
 +  deps = [
 +    ":bootstrap",
++    ":l3_provisioning",
++    "//lengsuo/native:l3_runtime",
 +    "//base",
 +    "//testing/gtest",
 +    "//third_party/blink/public/common",
@@ -58,14 +78,13 @@ index 0000000..e6cfc65
 +}
 diff --git a/lengsuo/integration/browser_bootstrap.cc b/lengsuo/integration/browser_bootstrap.cc
 new file mode 100644
-index 0000000..fbd1868
+index 0000000..53f118c
 --- /dev/null
 +++ b/lengsuo/integration/browser_bootstrap.cc
-@@ -0,0 +1,241 @@
+@@ -0,0 +1,231 @@
 +#include "lengsuo/integration/browser_bootstrap.h"
 +#include <string>
 +#include <vector>
-+#include "base/base64.h"
 +#include "base/time/time.h"
 +#include "lengsuo/integration/l3_bootstrap.h"
 +#include "third_party/icu/source/i18n/unicode/timezone.h"
@@ -192,16 +211,7 @@ index 0000000..fbd1868
 +  return true;
 +}
 +
-+std::string BrowserL3Base64() {
-+  const auto* config = L3State().config();
-+  if (config == nullptr) {
-+    return std::string();
-+  }
-+  // Re-serialize the frozen snapshot so the renderer receives exactly the
-+  // document the browser verified, byte for byte.
-+  const std::string wire = fp::EncodeL3Wire(*config, config->signed_unix);
-+  return base::Base64Encode(base::as_byte_span(wire));
-+}
++const fp::L3Config* BrowserL3Config() { return L3State().config(); }
 +
 +const ParsedProfile* BrowserProfile() { return State().profile(); }
 +const CatalogUaEntry* BrowserUa() { return State().ua(); }
@@ -305,10 +315,10 @@ index 0000000..fbd1868
 +}  // namespace lengsuo
 diff --git a/lengsuo/integration/browser_bootstrap.h b/lengsuo/integration/browser_bootstrap.h
 new file mode 100644
-index 0000000..3c352a7
+index 0000000..92fb14c
 --- /dev/null
 +++ b/lengsuo/integration/browser_bootstrap.h
-@@ -0,0 +1,66 @@
+@@ -0,0 +1,67 @@
 +#ifndef LENGSUO_INTEGRATION_BROWSER_BOOTSTRAP_H_
 +#define LENGSUO_INTEGRATION_BROWSER_BOOTSTRAP_H_
 +#include <cstdint>
@@ -320,6 +330,7 @@ index 0000000..3c352a7
 +namespace display { struct ScreenInfos; }
 +namespace blink { struct UserAgentMetadata; struct RendererPreferences; }
 +namespace lengsuo {
++namespace fp { struct L3Config; }
 +// ICU-recognized system zones only; does not override renderer timezone.
 +bool IsValidProfileTimezone(std::string_view zone);
 +inline constexpr char kProfileWireSwitch[] = "lengsuo-profile-wire";
@@ -345,10 +356,10 @@ index 0000000..3c352a7
 +// base::Time::ToDeltaSinceWindowsEpoch() here would count from 1601 and
 +// make every document look older than the freshness window.
 +int64_t L3ClockUnixSeconds();
-+// Base64 of the frozen L3 document, ready to hand to a renderer. Empty when
-+// no document is loaded. The encoding keeps the multi-line document off the
-+// command line verbatim.
-+std::string BrowserL3Base64();
++// The frozen L3 snapshot, or nullptr when this session has no L3 statement.
++// Read-only and immutable after startup; the Mojo provisioning interface
++// re-serializes it for each renderer that asks.
++const fp::L3Config* BrowserL3Config();
 +bool ApplyUaMetadata(const CatalogUaEntry& entry,
 +                     blink::UserAgentMetadata* metadata);
 +// Returns true only when preferences actually change.
@@ -894,6 +905,236 @@ index 0000000..c2f0b62
 +}  // namespace lengsuo
 +
 +#endif  // LENGSUO_INTEGRATION_L3_BOOTSTRAP_H_
+diff --git a/lengsuo/integration/l3_provisioning_impl.cc b/lengsuo/integration/l3_provisioning_impl.cc
+new file mode 100644
+index 0000000..8c4d8e4
+--- /dev/null
++++ b/lengsuo/integration/l3_provisioning_impl.cc
+@@ -0,0 +1,50 @@
++#include "lengsuo/integration/l3_provisioning_impl.h"
++
++#include <cstdint>
++#include <memory>
++#include <utility>
++#include <vector>
++
++#include "lengsuo/integration/browser_bootstrap.h"
++#include "lengsuo/public/mojom/l3_provisioning.mojom.h"
++#include "mojo/public/cpp/bindings/generic_pending_receiver.h"
++#include "mojo/public/cpp/bindings/pending_receiver.h"
++#include "mojo/public/cpp/bindings/self_owned_receiver.h"
++
++namespace lengsuo {
++namespace {
++
++class L3ProvisioningImpl : public mojom::L3Provisioning {
++ public:
++  L3ProvisioningImpl() : source_([] { return BrowserL3Config(); }) {}
++
++  // The answer is rebuilt from the snapshot frozen before this renderer was
++  // launched; nothing is cached per renderer, so two renderers started from
++  // the same browser always see the same bytes.
++  void GetDocument(GetDocumentCallback callback) override {
++    const std::string document = source_.GetDocument();
++    auto reply = mojom::L3Document::New();
++    reply->bytes = std::vector<uint8_t>(document.begin(), document.end());
++    std::move(callback).Run(std::move(reply));
++  }
++
++ private:
++  L3DocumentSource source_;
++};
++
++}  // namespace
++
++bool BindL3Provisioning(mojo::GenericPendingReceiver& receiver) {
++  mojo::PendingReceiver<mojom::L3Provisioning> pending =
++      receiver.As<mojom::L3Provisioning>();
++  if (!pending.is_valid()) {
++    return false;
++  }
++  // Self-owned: the browser has no per-renderer bookkeeping for this
++  // interface, and the endpoint closes with the renderer's pipe.
++  mojo::MakeSelfOwnedReceiver(std::make_unique<L3ProvisioningImpl>(),
++                              std::move(pending));
++  return true;
++}
++
++}  // namespace lengsuo
+diff --git a/lengsuo/integration/l3_provisioning_impl.h b/lengsuo/integration/l3_provisioning_impl.h
+new file mode 100644
+index 0000000..95ab68e
+--- /dev/null
++++ b/lengsuo/integration/l3_provisioning_impl.h
+@@ -0,0 +1,62 @@
++// l3_provisioning_impl - browser side of the L3 Mojo channel (task O).
++//
++// Before this file the frozen document travelled to every renderer as base64
++// on the command line, which made it readable from /proc/<pid>/cmdline,
++// chrome://version and crash dumps. It now leaves the browser only as the
++// answer to a renderer's Mojo request.
++//
++// The pure part below has no Mojo dependency and is compiled standalone by
++// tools/rebuild/run_l3_gtest.sh, so "frozen snapshot -> bytes" is covered by a
++// unit test. The binding adapter at the bottom of the .cc needs generated
++// bindings, so it is covered by the real build and the end-to-end acceptance
++// run instead (see docs/l3-reports/task-O.md).
++#ifndef LENGSUO_INTEGRATION_L3_PROVISIONING_IMPL_H_
++#define LENGSUO_INTEGRATION_L3_PROVISIONING_IMPL_H_
++
++#include <functional>
++#include <string>
++#include <utility>
++
++#include "lengsuo/native/l3_wire.h"
++
++namespace mojo {
++class GenericPendingReceiver;
++}
++
++namespace lengsuo {
++
++// Re-serializes a frozen snapshot in exactly the form the browser verified.
++// The signed timestamp is preserved: substituting "now" would hand the
++// renderer a different document than the one the browser checked.
++inline std::string EncodeL3Document(const fp::L3Config& config) {
++  return fp::EncodeL3Wire(config, config.signed_unix);
++}
++
++// What the browser answers a renderer's GetDocument() with. Empty means
++// "this session has no L3 statement" and the renderer keeps upstream storage
++// behaviour. Every call re-reads the frozen snapshot, so all renderers of one
++// session receive identical bytes.
++class L3DocumentSource {
++ public:
++  // Returns the frozen snapshot, or nullptr when none was loaded.
++  using Reader = std::function<const fp::L3Config*()>;
++
++  explicit L3DocumentSource(Reader reader) : reader_(std::move(reader)) {}
++
++  std::string GetDocument() const {
++    const fp::L3Config* config = reader_();
++    return config ? EncodeL3Document(*config) : std::string();
++  }
++
++ private:
++  Reader reader_;
++};
++
++// Binds |receiver| when it names L3Provisioning and returns true. Returns
++// false for any other interface, leaving the receiver untouched, so the
++// chrome-layer dispatcher can keep looking.
++bool BindL3Provisioning(mojo::GenericPendingReceiver& receiver);
++
++}  // namespace lengsuo
++
++#endif  // LENGSUO_INTEGRATION_L3_PROVISIONING_IMPL_H_
+diff --git a/lengsuo/integration/l3_provisioning_impl_test.cc b/lengsuo/integration/l3_provisioning_impl_test.cc
+new file mode 100644
+index 0000000..a717364
+--- /dev/null
++++ b/lengsuo/integration/l3_provisioning_impl_test.cc
+@@ -0,0 +1,100 @@
++// l3_provisioning_impl_test - what the browser answers on the L3 Mojo channel
++// (task O).
++//
++// The interesting failure is not "serialization runs": it is that the bytes
++// handed to a renderer are the document the browser verified (same signature
++// timestamp, same pin table), in the raw wire form the renderer accepts - not
++// base64, not a re-encoded variant. Documents are built with EncodeL3Wire,
++// the same encoder the acceptance run uses.
++#include "lengsuo/integration/l3_provisioning_impl.h"
++
++#include <gtest/gtest.h>
++
++#include <string>
++#include <utility>
++
++#include "lengsuo/native/l3_runtime.h"
++
++namespace lengsuo {
++namespace {
++
++constexpr int64_t kSignedAt = 1700000000;
++constexpr int64_t kMaxAge = 7 * 24 * 60 * 60;
++constexpr char kOrigin[] = "https://mms.pinduoduo.com";
++constexpr char kKey[] = "finger-key_0.1.5";
++constexpr char kValue[] = "7FcROXwfKGAKuwlRwwlBCEUPeZXjwrH5";
++
++fp::L3Config MakeConfig(int64_t signed_unix) {
++  fp::L3Config config;
++  const std::string pin_wire =
++      std::string(kOrigin) + "|local|" + kKey + "|" + kValue + "\n";
++  EXPECT_TRUE(config.pins.Parse(pin_wire));
++  config.signed_unix = signed_unix;
++  return config;
++}
++
++TEST(L3ProvisioningTest, NoSnapshotAnswersEmpty) {
++  L3DocumentSource source([] { return nullptr; });
++  EXPECT_TRUE(source.GetDocument().empty());
++}
++
++TEST(L3ProvisioningTest, SnapshotIsAnsweredInRawWireForm) {
++  const fp::L3Config config = MakeConfig(kSignedAt);
++  L3DocumentSource source([&config] { return &config; });
++
++  const std::string document = source.GetDocument();
++  // Raw L3W1, not base64: a regression to the old transport would start with
++  // an alphabet character and carry no newline.
++  EXPECT_EQ(document.rfind("L3W1\n", 0), 0u);
++  EXPECT_NE(document.find('\n'), std::string::npos);
++  EXPECT_EQ(document, fp::EncodeL3Wire(config, kSignedAt));
++}
++
++TEST(L3ProvisioningTest, RendererAcceptsTheAnswer) {
++  const fp::L3Config config = MakeConfig(kSignedAt);
++  L3DocumentSource source([&config] { return &config; });
++
++  // What renderer_main.cc does with a non-empty answer: now_unix = 0 because
++  // the browser already judged freshness.
++  fp::L3Runtime runtime;
++  ASSERT_TRUE(runtime.Init(source.GetDocument(), /*now_unix=*/0,
++                           /*max_age_seconds=*/0));
++  const std::string* pinned = runtime.PinnedValue(kOrigin, kKey);
++  ASSERT_NE(pinned, nullptr);
++  EXPECT_EQ(*pinned, kValue);
++  EXPECT_TRUE(runtime.IsLocked(kOrigin, kKey));
++}
++
++TEST(L3ProvisioningTest, SignatureTimestampIsPreserved) {
++  const fp::L3Config config = MakeConfig(kSignedAt);
++  L3DocumentSource source([&config] { return &config; });
++  const std::string document = source.GetDocument();
++
++  fp::L3Config decoded;
++  std::string error;
++  // Fresh at the timestamp the document was signed with ...
++  EXPECT_TRUE(fp::DecodeL3Wire(document, kSignedAt, kMaxAge, &decoded, &error))
++      << error;
++  EXPECT_EQ(decoded.signed_unix, kSignedAt);
++  // ... and stale one second past the window. If EncodeL3Document stamped
++  // "now" instead, this decode would fail as "too new" rather than "too old".
++  EXPECT_FALSE(fp::DecodeL3Wire(document, kSignedAt + kMaxAge + 1, kMaxAge,
++                                &decoded, &error));
++}
++
++TEST(L3ProvisioningTest, EveryRequestReReadsTheSnapshot) {
++  const fp::L3Config config = MakeConfig(kSignedAt);
++  int reads = 0;
++  L3DocumentSource source([&config, &reads] {
++    ++reads;
++    return &config;
++  });
++
++  const std::string first = source.GetDocument();
++  const std::string second = source.GetDocument();
++  EXPECT_EQ(first, second);
++  EXPECT_EQ(reads, 2);
++}
++
++}  // namespace
++}  // namespace lengsuo
 diff --git a/lengsuo/integration/official_defaults.cc b/lengsuo/integration/official_defaults.cc
 new file mode 100644
 index 0000000..fa2a132
@@ -1032,43 +1273,37 @@ index 0000000..6792c06
 +#endif  // LENGSUO_INTEGRATION_OFFICIAL_DEFAULTS_H_
 diff --git a/lengsuo/integration/official_defaults_unittest.cc b/lengsuo/integration/official_defaults_unittest.cc
 new file mode 100644
-index 0000000..43b5a60
+index 0000000..e557d52
 --- /dev/null
 +++ b/lengsuo/integration/official_defaults_unittest.cc
-@@ -0,0 +1,95 @@
+@@ -0,0 +1,85 @@
 +// Unit tests for the feature-default alignment helper.
 +//
 +// The merge must be idempotent and must never discard an operator's own
 +// --disable-features value: this runs on every startup, and clobbering a
 +// debugging flag would be a silent regression in the field.
++//
++// This file used to carry its own main() and hand-rolled pass counter, which
++// silently replaced the gtest runner of the bootstrap_unittests binary: every
++// TEST() in the other files compiled into it never executed. It is a gtest
++// TEST now, like the rest of the binary.
 +#include "lengsuo/integration/official_defaults.h"
 +
-+#include <cstdio>
 +#include <string>
 +
 +#include "base/command_line.h"
++#include "testing/gtest/include/gtest/gtest.h"
 +
 +namespace {
-+int g_passes = 0;
-+int g_failures = 0;
-+
-+void Check(bool ok, const char* expr, int line) {
-+  if (ok) {
-+    ++g_passes;
-+  } else {
-+    std::printf("FAIL line %d: %s\n", line, expr);
-+    ++g_failures;
-+  }
-+}
 +
 +bool Has(std::string_view haystack, std::string_view needle) {
 +  return haystack.find(needle) != std::string_view::npos;
 +}
 +}  // namespace
 +
-+#define CHECK(cond) Check((cond), #cond, __LINE__)
++#define CHECK(cond) EXPECT_TRUE(cond)
 +
-+int main() {
++TEST(OfficialDefaults, MergeAndApply) {
 +  using lengsuo::MergeDisabledFeatures;
 +
 +  // 1. Empty input still gets the required feature.
@@ -1126,10 +1361,6 @@ index 0000000..43b5a60
 +
 +  // 9. Null-safe: callers may pass nothing in tests.
 +  lengsuo::ApplyOfficialFeatureDefaults(nullptr);
-+
-+  std::printf("official_defaults_unittest: %d passes, %d failures\n", g_passes,
-+              g_failures);
-+  return g_failures == 0 ? 0 : 1;
 +}
 diff --git a/lengsuo/integration/profile_bootstrap_state.cc b/lengsuo/integration/profile_bootstrap_state.cc
 new file mode 100644
@@ -2530,10 +2761,10 @@ index 0000000..042ebf1
 +}  // namespace lengsuo::fp
 diff --git a/lengsuo/native/cookie_mirror.h b/lengsuo/native/cookie_mirror.h
 new file mode 100644
-index 0000000..0b0dd10
+index 0000000..2e64701
 --- /dev/null
 +++ b/lengsuo/native/cookie_mirror.h
-@@ -0,0 +1,104 @@
+@@ -0,0 +1,105 @@
 +// cookie_mirror - the cookie half of the L3 cross-store lock (task M).
 +//
 +// The L3 document declares two things that have to stay in lockstep:
@@ -2549,7 +2780,8 @@ index 0000000..0b0dd10
 +// The renderer cannot see the live jar: Blink's CookieJar talks to the
 +// network service over Mojo, so the jar lives in the browser process. The
 +// snapshot is the only cookie state a renderer can hold, and it is the very
-+// document the browser already hands down (--lengsuo-managed-l3). The Blink
++// document the renderer already pulled from the browser over Mojo (task O;
++// no fingerprint state rides the command line). The Blink
 +// interception points that would consume this class are outside this task's
 +// file scope; they are described in docs/l3-reports/task-M.md. This task
 +// delivers the policy, not the patch.
@@ -5297,3 +5529,51 @@ index 0000000..158007a
 +}
 +}  // namespace lengsuo
 +#endif
+diff --git a/lengsuo/public/mojom/BUILD.gn b/lengsuo/public/mojom/BUILD.gn
+new file mode 100644
+index 0000000..77c98b7
+--- /dev/null
++++ b/lengsuo/public/mojom/BUILD.gn
+@@ -0,0 +1,8 @@
++# L3 document provisioning (task O). The generated bindings are shared by the
++# browser side (which answers) and the renderer side (which pulls once at
++# startup).
++import("//mojo/public/tools/bindings/mojom.gni")
++
++mojom("l3_provisioning_mojom") {
++  sources = [ "l3_provisioning.mojom" ]
++}
+diff --git a/lengsuo/public/mojom/l3_provisioning.mojom b/lengsuo/public/mojom/l3_provisioning.mojom
+new file mode 100644
+index 0000000..7c23df0
+--- /dev/null
++++ b/lengsuo/public/mojom/l3_provisioning.mojom
+@@ -0,0 +1,28 @@
++// L3 document provisioning: browser -> renderer.
++//
++// The payload is opaque on purpose. Today the browser hands over the frozen
++// L3W1 document; when the encrypted envelope lands, only the payload changes
++// and this interface stays exactly as it is.
++//
++// The document must never ride the command line (chrome://version, the
++// process list and crash dumps all expose it there). Pull over Mojo keeps it
++// out of those surfaces and gives the renderer one well-defined failure mode.
++
++module lengsuo.mojom;
++
++// The opaque payload. A bare `array` is not usable as a Mojo response field
++// in this version (it is move-only and the generated responder hands it over
++// as a plain value), so the bytes travel inside a struct.
++struct L3Document {
++  array<uint8> bytes;
++};
++
++interface L3Provisioning {
++  // Frozen document bytes, or empty when this session has no L3 statement.
++  //
++  // Empty is not an error: the renderer leaves storage untouched, which is
++  // upstream behaviour. Non-empty bytes that fail the renderer's Init abort
++  // the process instead, because a platform that already observed a pinned
++  // value must never see it disappear.
++  GetDocument() => (L3Document document);
++};
