@@ -8526,10 +8526,10 @@ index 0000000..252d8cd
 +#endif  // LENGSUO_NATIVE_L3_ENVELOPE_H_
 diff --git a/lengsuo/native/l3_envelope_session.cc b/lengsuo/native/l3_envelope_session.cc
 new file mode 100644
-index 0000000..6d7879a
+index 0000000..7dbabc2
 --- /dev/null
 +++ b/lengsuo/native/l3_envelope_session.cc
-@@ -0,0 +1,75 @@
+@@ -0,0 +1,79 @@
 +#include "l3_envelope_session.h"
 +
 +#include <utility>
@@ -8555,15 +8555,19 @@ index 0000000..6d7879a
 +  // The key is the caller's, and the caller's is the only source there is.
 +  // There is no default, no derivation and no fallback: a caller that has no
 +  // key has no envelope.
++  //
++  // The length is checked here and nowhere else, because the envelope's own
++  // key constructor checks it too. A key of the wrong length is refused
++  // rather than padded or truncated.
 +  if (session_key.size() != kL3EnvelopeSessionKeyBytes) {
 +    // The message says how long the key was, never what it was.
 +    SetError(error, "l3session: bad session key length");
 +    return false;
 +  }
-+  // The key is built and moved in, so the caller's bytes are not left in a
-+  // second copy of the buffer.
 +  *out = L3EnvelopeKey(std::string(session_key));
 +  if (!out->valid()) {
++    // Unreachable while the two length checks agree; kept so a future change
++    // to either one fails closed instead of sealing under a bad key.
 +    SetError(error, "l3session: bad session key length");
 +    return false;
 +  }
@@ -8715,10 +8719,10 @@ index 0000000..9815060
 +#endif  // LENGSUO_NATIVE_L3_ENVELOPE_SESSION_H_
 diff --git a/lengsuo/native/l3_envelope_session_test.cc b/lengsuo/native/l3_envelope_session_test.cc
 new file mode 100644
-index 0000000..ebd92f7
+index 0000000..a58305a
 --- /dev/null
 +++ b/lengsuo/native/l3_envelope_session_test.cc
-@@ -0,0 +1,202 @@
+@@ -0,0 +1,217 @@
 +// l3_envelope_session_test - the seam between the pipe's session key and the
 +// L3E1 document envelope (task N).
 +//
@@ -8746,14 +8750,27 @@ index 0000000..ebd92f7
 +
 +#include <string>
 +
++#include "kernel_pipe_keys.h"
++
 +namespace lengsuo::fp {
 +namespace {
 +
-+// The session key length the pipe contract pins (contract section 3.1): the
++// The session key length the pipe contract pins (contract section 1): the
 +// runner sends 32 bytes of session key inside the KeyEnvelope. The L3E1
 +// master key is exactly that many bytes, so the two agree by construction
 +// rather than by coincidence.
-+constexpr std::size_t kSessionKeyBytes = 32;
++//
++// The check is against the pipe's own constant, not against a number
++// written here: if the pipe ever changes the length, this file fails to
++// compile instead of silently padding or truncating.
++static_assert(kKernelPipeSessionKeyBytes == kL3EnvelopeSessionKeyBytes,
++              "the pipe's session key and the envelope's master key must "
++              "have the same length");
++static_assert(kL3EnvelopeSessionKeyBytes == kL3EnvelopeKeyBytes,
++              "the seam's key length and the envelope's key length must "
++              "have the same length");
++
++constexpr std::size_t kSessionKeyBytes = kKernelPipeSessionKeyBytes;
 +
 +// A session key. It is a test fixture, not a secret.
 +std::string SessionKey(char fill) {
@@ -8773,9 +8790,11 @@ index 0000000..ebd92f7
 +// --- the mapping -----------------------------------------------------------
 +
 +TEST(L3EnvelopeSessionTest, TheSessionKeyLengthIsThePipeContractLength) {
-+  // The pipe's session key (contract section 3.1) and the L3E1 master key
++  // The pipe's session key (contract section 1) and the L3E1 master key
 +  // must be the same size, otherwise the seam could not hand one to the
-+  // other without padding or truncating.
++  // other without padding or truncating. The static_asserts above make the
++  // compile fail if the two ever drift apart; this test is the runtime
++  // half of the same statement.
 +  EXPECT_EQ(kSessionKeyBytes, kL3EnvelopeSessionKeyBytes);
 +  EXPECT_EQ(kL3EnvelopeSessionKeyBytes, kL3EnvelopeKeyBytes);
 +}
