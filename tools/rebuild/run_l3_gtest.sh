@@ -85,6 +85,7 @@ TARGETS=(
   "kernel_pipe_envelope|native/kernel_pipe_envelope.cc native/kernel_pipe_frame.cc native/kernel_pipe_keys.cc"
   "kernel_pipe|native/kernel_pipe.cc native/kernel_pipe_frame.cc native/kernel_pipe_json.cc native/kernel_pipe_keys.cc native/kernel_pipe_envelope.cc"
   "action_table|native/action_table.cc native/kernel_pipe_json.cc"
+  "profile_bundle|native/profile_bundle.cc native/kernel_pipe_json.cc"
   "l3_envelope|native/l3_envelope.cc"
   "l3_envelope_session|native/l3_envelope_session.cc native/l3_envelope.cc native/kernel_pipe_keys.cc native/kernel_pipe_frame.cc"
 )

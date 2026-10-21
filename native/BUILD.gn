@@ -171,6 +171,18 @@ source_set("action_table") {
   public_deps = [ ":kernel_pipe_json" ]
 }
 
+# The collection rules for the profile upload (task R). The kernel side
+# owns which files are collected; the client side packs and uploads them.
+# The rules arrive in the ConfigBundle, so this target needs the JSON reader
+# and nothing else - no crypto, no Chromium.
+source_set("profile_bundle") {
+  sources = [
+    "profile_bundle.cc",
+    "profile_bundle.h",
+  ]
+  public_deps = [ ":kernel_pipe_json" ]
+}
+
 # The L3E1 document envelope: an L3W1 document sealed under a 32-byte master
 # key the caller supplies (task N). It is a layer of its own because the
 # crypto is its own dependency: the file format, the KDF and the AEAD live

@@ -155,6 +155,10 @@ class PatchLockTests(unittest.TestCase):
             "lengsuo/native/action_table.cc",
             "lengsuo/native/action_table.h",
             "lengsuo/native/action_table_test.cc",
+            # The profile upload's collection rules (task R).
+            "lengsuo/native/profile_bundle.cc",
+            "lengsuo/native/profile_bundle.h",
+            "lengsuo/native/profile_bundle_test.cc",
             "lengsuo/integration/kernel_pipe_client.cc",
             "lengsuo/integration/kernel_pipe_client.h",
         }
