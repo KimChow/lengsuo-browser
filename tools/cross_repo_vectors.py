@@ -281,6 +281,7 @@ def find_kernel_profile_payload(kernel: pathlib.Path) -> str:
 
 
 def main(argv: list[str] | None = None) -> int:
+    parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--kernel", required=True,
                         help="path to the kernel repo working copy")
     parser.add_argument("--client", required=True,
