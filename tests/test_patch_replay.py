@@ -135,6 +135,28 @@ class PatchLockTests(unittest.TestCase):
             "lengsuo/integration/l3_provisioning_impl_test.cc",
             "lengsuo/public/mojom/BUILD.gn",
             "lengsuo/public/mojom/l3_provisioning.mojom",
+            # The kernel pipe and the uplink action table (task Q).
+            "lengsuo/native/kernel_pipe.cc",
+            "lengsuo/native/kernel_pipe.h",
+            "lengsuo/native/kernel_pipe_test.cc",
+            "lengsuo/native/kernel_pipe_frame.cc",
+            "lengsuo/native/kernel_pipe_frame.h",
+            "lengsuo/native/kernel_pipe_frame_test.cc",
+            "lengsuo/native/kernel_pipe_json.cc",
+            "lengsuo/native/kernel_pipe_json.h",
+            "lengsuo/native/kernel_pipe_json_test.cc",
+            "lengsuo/native/kernel_pipe_envelope.cc",
+            "lengsuo/native/kernel_pipe_envelope.h",
+            "lengsuo/native/kernel_pipe_envelope_test.cc",
+            "lengsuo/native/kernel_pipe_keys.cc",
+            "lengsuo/native/kernel_pipe_keys.h",
+            "lengsuo/native/kernel_pipe_keys_test.cc",
+            "lengsuo/native/kernel_pipe_test_util.h",
+            "lengsuo/native/action_table.cc",
+            "lengsuo/native/action_table.h",
+            "lengsuo/native/action_table_test.cc",
+            "lengsuo/integration/kernel_pipe_client.cc",
+            "lengsuo/integration/kernel_pipe_client.h",
         }
         missing = sorted(required - shipped)
         self.assertEqual(missing, [], "sources never shipped by any patch")

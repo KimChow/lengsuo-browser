@@ -10,6 +10,12 @@
 # Usage: run_l3_gtest.sh [recipe-dir] [gtest-root]
 #   recipe-dir  default: $PWD
 #   gtest-root  default: <repo>/../src/third_party/googletest/src/googletest
+#
+# kernel_pipe needs BoringSSL (AES-256-GCM, SHA-256, HKDF). It is found in
+# this order: $BORINGSSL_DIR, the Chromium tree's third_party/boringssl, a
+# host build cached under ~/.cache/lengsuo-boringssl. The target is skipped
+# with a loud message when no BoringSSL is available - it is never silently
+# dropped, because "passed 8" must mean the new targets really ran.
 set -u -o pipefail
 
 REPO="${1:-$PWD}"
@@ -41,6 +47,26 @@ CXXFLAGS=(-std=c++20 -Wall -Wextra -Werror -pedantic
 
 GTEST_SRC=("$GTEST/src/gtest-all.cc" "$GTEST/src/gtest_main.cc")
 
+# BoringSSL: headers and the static lib. A host build is used when the
+# Chromium tree has no prebuilt object for this platform.
+BORINGSSL_DIR="${BORINGSSL_DIR:-}"
+if [ -z "$BORINGSSL_DIR" ]; then
+  for cand in \
+    "/home/ubuntu/lengsuo-browser-dev/src/third_party/boringssl/src" \
+    "$REPO/third_party/boringssl/src"; do
+    if [ -f "$cand/include/openssl/aead.h" ]; then BORINGSSL_DIR="$cand"; break; fi
+  done
+fi
+BORINGSSL_LIB=""
+if [ -n "$BORINGSSL_DIR" ]; then
+  for cand in \
+    "$BORINGSSL_DIR/libcrypto.a" \
+    "$BORINGSSL_DIR/../../../out/Release/libcrypto.a" \
+    "$HOME/.cache/lengsuo-boringssl/libcrypto.a"; do
+    if [ -f "$cand" ]; then BORINGSSL_LIB="$cand"; break; fi
+  done
+fi
+
 # name | extra sources
 TARGETS=(
   "storage_pin|native/storage_pin.cc"
@@ -52,6 +78,12 @@ TARGETS=(
   "l3_bootstrap|integration/l3_bootstrap.cc native/l3_wire.cc native/storage_pin.cc native/storage_consistency.cc native/cache_record.cc native/extension_pin.cc"
   "l3_provisioning|native/l3_wire.cc native/storage_pin.cc native/storage_consistency.cc native/cache_record.cc native/extension_pin.cc native/l3_runtime.cc"
   "cookie_mirror|native/cookie_mirror.cc native/storage_consistency.cc native/storage_pin.cc native/l3_wire.cc native/cache_record.cc native/extension_pin.cc"
+  "kernel_pipe_frame|native/kernel_pipe_frame.cc"
+  "kernel_pipe_json|native/kernel_pipe_json.cc"
+  "kernel_pipe_keys|native/kernel_pipe_keys.cc native/kernel_pipe_frame.cc"
+  "kernel_pipe_envelope|native/kernel_pipe_envelope.cc native/kernel_pipe_frame.cc native/kernel_pipe_keys.cc"
+  "kernel_pipe|native/kernel_pipe.cc native/kernel_pipe_frame.cc native/kernel_pipe_json.cc native/kernel_pipe_keys.cc native/kernel_pipe_envelope.cc"
+  "action_table|native/action_table.cc native/kernel_pipe_json.cc"
 )
 
 FAILED=()
@@ -67,7 +99,24 @@ for spec in "${TARGETS[@]}"; do
   esac
   for s in $extra; do srcs+=("$REPO/$s"); done
 
-  if ! g++ "${CXXFLAGS[@]}" "${srcs[@]}" "${GTEST_SRC[@]}" -pthread \
+  # The pipe targets that use BoringSSL. When it is unavailable the target is
+  # reported as failed, not skipped: a silently missing target would make
+  # "passed 8" a lie. The frame and JSON layers deliberately do not need it.
+  target_flags=("${CXXFLAGS[@]}")
+  target_link=(-pthread)
+  case "$name" in
+    kernel_pipe|kernel_pipe_envelope|kernel_pipe_keys)
+      if [ -z "$BORINGSSL_DIR" ] || [ -z "$BORINGSSL_LIB" ]; then
+        echo "COMPILE-FAIL  $name (BoringSSL not found; set BORINGSSL_DIR)"
+        FAILED+=("$name")
+        continue
+      fi
+      target_flags+=(-I "$BORINGSSL_DIR/include")
+      target_link=("$BORINGSSL_LIB" -pthread)
+      ;;
+  esac
+
+  if ! g++ "${target_flags[@]}" "${srcs[@]}" "${GTEST_SRC[@]}" "${target_link[@]}" \
         -o "$WORK/$name" 2> "$WORK/$name.cc.log"; then
     echo "COMPILE-FAIL  $name"
     sed -n '1,20p' "$WORK/$name.cc.log" | sed 's/^/    /'

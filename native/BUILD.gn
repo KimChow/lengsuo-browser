@@ -99,3 +99,74 @@ source_set("l3_runtime") {
   ]
   public_deps = [ ":l3_wire" ]
 }
+
+# The kernel side of the runner <-> kernel pipe, in four layers. The split is
+# by dependency, not by convenience: the frame codec and the JSON reader must
+# be testable without a crypto library, so they are separate source sets.
+#
+#   kernel_pipe_frame      the 8-byte header and the frame codec
+#   kernel_pipe_json       the shallow JSON reader
+#   kernel_pipe_keys       the machine-code derivation (BoringSSL)
+#   kernel_pipe_envelope   the KeyEnvelope (BoringSSL)
+#   kernel_pipe            the handshake and the frozen config bundle
+#
+# All of them are pure logic - no Chromium types - so they compile standalone
+# for the gtest targets as well.
+source_set("kernel_pipe_frame") {
+  sources = [
+    "kernel_pipe_frame.cc",
+    "kernel_pipe_frame.h",
+  ]
+}
+
+source_set("kernel_pipe_json") {
+  sources = [
+    "kernel_pipe_json.cc",
+    "kernel_pipe_json.h",
+  ]
+}
+
+source_set("kernel_pipe_keys") {
+  sources = [
+    "kernel_pipe_keys.cc",
+    "kernel_pipe_keys.h",
+  ]
+  public_deps = [ ":kernel_pipe_frame" ]
+  deps = [ "//third_party/boringssl" ]
+}
+
+source_set("kernel_pipe_envelope") {
+  sources = [
+    "kernel_pipe_envelope.cc",
+    "kernel_pipe_envelope.h",
+  ]
+  public_deps = [
+    ":kernel_pipe_frame",
+    ":kernel_pipe_keys",
+  ]
+  deps = [ "//third_party/boringssl" ]
+}
+
+source_set("kernel_pipe") {
+  sources = [
+    "kernel_pipe.cc",
+    "kernel_pipe.h",
+  ]
+  public_deps = [
+    ":kernel_pipe_envelope",
+    ":kernel_pipe_frame",
+    ":kernel_pipe_json",
+    ":kernel_pipe_keys",
+  ]
+  deps = [ "//third_party/boringssl" ]
+}
+
+# The uplink action table: an action name and the structural validator for its
+# payload. One table, no new interface per action.
+source_set("action_table") {
+  sources = [
+    "action_table.cc",
+    "action_table.h",
+  ]
+  public_deps = [ ":kernel_pipe_json" ]
+}
