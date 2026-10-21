@@ -101,6 +101,67 @@ class KeyEnvelopeLayoutTests(unittest.TestCase):
 
     # -- the guards ------------------------------------------------------
 
+    def test_every_hex_token_has_an_even_length(self):
+        """No hex token may end mid-byte.
+
+        A hex run of odd length cannot be split into whole bytes. If a
+        line break lands inside a byte, a reader that parses the block
+        line by line silently drops the trailing nibble and ends up with
+        a value one nibble short -- which is how a 45-byte ciphertext
+        turns into a 44-byte one and the two repos stop agreeing.
+
+        The document once had exactly that: the 45-byte ciphertext was
+        written as two runs of 63 and 27 hex characters. Both sides read
+        it per line and got 44 bytes.
+        """
+        lines = self.text.splitlines()
+        for prefix in ("密文 =", "tag  =", "AAD  =", "载荷 =", "明文 ="):
+            start = next((i for i, line in enumerate(lines)
+                          if line.strip().startswith(prefix)), None)
+            self.assertIsNotNone(start, "contract lost the %r block" % prefix)
+            for index in range(start, len(lines)):
+                line = lines[index]
+                if index > start:
+                    if not line.strip() or not line[:1].isspace():
+                        break  # a new label line ends the block
+                    if not re.fullmatch(r"[0-9a-fA-F\s]+", line):
+                        break
+                value = line.split("=", 1)[1] if "=" in line else line
+                for token in value.split():
+                    if not re.fullmatch(r"[0-9a-fA-F]+", token):
+                        break  # prose starts here; stop before it
+                    self.assertEqual(
+                        len(token) % 2, 0,
+                        "%r: hex token %r has an odd length (%d) -- a "
+                        "line break lands mid-byte, so a per-line reader "
+                        "loses a nibble"
+                        % (prefix.strip(), token, len(token)),
+                    )
+
+    def test_ciphertext_is_forty_five_bytes(self):
+        """The ciphertext length must survive the document's own layout."""
+        section = self._section("#### KeyEnvelope 固定测试向量", "## 4.")
+        lines = section.splitlines()
+        start = next((i for i, line in enumerate(lines)
+                      if line.strip().startswith("密文 =")), None)
+        self.assertIsNotNone(start, "contract lost the ciphertext block")
+        tokens = []
+        for index in range(start, len(lines)):
+            line = lines[index]
+            if index > start:
+                if not line.strip() or not line[:1].isspace():
+                    break
+                if not re.fullmatch(r"[0-9a-fA-F\s]+", line):
+                    break
+            value = line.split("=", 1)[1] if "=" in line else line
+            for token in value.split():
+                if not re.fullmatch(r"[0-9a-fA-F]+", token):
+                    break
+                tokens.append(token)
+        joined = "".join(tokens)
+        self.assertEqual(len(joined) // 2, CIPHERTEXT_LEN,
+                         "the ciphertext must be %d bytes" % CIPHERTEXT_LEN)
+
     def test_layout_table_matches_the_aad_length(self):
         """The field table's total must equal the AAD's length field.
 
