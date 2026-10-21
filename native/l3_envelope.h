@@ -10,9 +10,12 @@
 //
 //   * the on-disk managed file (`--lengsuo-l3-wire=<path>`) holds an
 //     *envelope*, not a plaintext L3W1 document;
-//   * the command line keeps its shape - it still carries only a path;
-//   * `--lengsuo-managed-l3=<base64>` is untouched and still carries the
-//     plaintext document to the renderer as the transitional path.
+//   * the command line carries only a path, never the document.
+//
+// The switch that used to carry the document as plaintext base64 on the
+// command line is gone: the document reaches the renderer over Mojo
+// (lengsuo.mojom.L3Provisioning) instead. Nothing on this path encodes the
+// document as base64 any more.
 //
 // Envelope layout (all integers little-endian, all offsets byte counts):
 //
