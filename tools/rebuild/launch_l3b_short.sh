@@ -67,13 +67,23 @@ for task in $TASKS; do
             continue
         }
     else
-        if [ -n "$(git -C "$work/repo" status --porcelain 2>/dev/null)" ]; then
-            git -C "$work/repo" add -A >/dev/null 2>&1
-            git -C "$work/repo" -c user.email=wip@local -c user.name=wip \
-                commit -q -m "wip: auto-stash before resync" >/dev/null 2>&1
+        # Re-sync the working copy to the latest main.
+        #
+        # The resync used to be inline here, and it destroyed the work it
+        # was supposed to preserve: it committed the dirty state and then
+        # ran `reset --hard origin/main`, which discarded that commit and
+        # deleted untracked files outright. Task N's working copy holds
+        # its three envelope source files as untracked files on purpose
+        # (they are the card's input, not its output), so the resync would
+        # have deleted them and the card would have had nothing to merge.
+        #
+        # The resync now lives in its own script so it can be tested
+        # directly; see tools/rebuild/resync_card_repo.sh.
+        if ! bash "$REPO_SRC/tools/rebuild/resync_card_repo.sh" \
+            "$work/repo" main; then
+            echo "resync failed for $task" >&2
+            continue
         fi
-        git -C "$work/repo" fetch -q origin main && \
-            git -C "$work/repo" reset -q --hard origin/main
     fi
 
     # Short prompt: point at the brief, name the task, state the hard rules.
