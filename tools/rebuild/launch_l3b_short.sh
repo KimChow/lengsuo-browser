@@ -31,6 +31,40 @@ BRIEF="${LENGSUO_L3B_BRIEF:-}"
 # repository does ship briefs), then the out-of-repository directory.
 BRIEF_DIR="${LENGSUO_L3B_BRIEF_DIR:-/home/ubuntu/l3b-briefs}"
 
+# The task -> brief mapping, in one place.
+#
+# It used to be written twice -- once for --resolve-brief and once for the
+# dispatch itself -- and the test read whichever copy came first in the
+# file. That left the copy the dispatch actually uses unchecked: changing
+# it there sent a card to the wrong brief, and no test went red. Two
+# copies of the same rule is one copy too many.
+#
+# The mapping lives in its own function so that every caller gets the
+# same answer, and so that a test can ask the script what it would do
+# instead of reading its source and guessing.
+brief_for_task() {
+    case "$1" in
+        O)   echo "cc-task-brief-l3e.md" ;;
+        N|Q|R) echo "cc-task-brief-l3f.md" ;;
+        M)   echo "cc-task-brief-l3d.md" ;;
+        *)   echo "cc-task-brief-l3b.md" ;;
+    esac
+}
+
+# The path a task's brief is read from, or nothing if it is not there.
+#
+# The repository copy wins: a repository that ships briefs has the
+# tracked one, and a stale copy left in the outside directory must not
+# shadow it.
+brief_path_for_task() {
+    _name=$(brief_for_task "$1")
+    if [ -f "$REPO_SRC/docs/$_name" ]; then
+        printf "%s\n" "$REPO_SRC/docs/$_name"
+    elif [ -f "$BRIEF_DIR/$_name" ]; then
+        printf "%s\n" "$BRIEF_DIR/$_name"
+    fi
+}
+
 case "${1:-}" in
 --status)
     for d in "$ROOT"/*/; do
@@ -52,23 +86,17 @@ case "${1:-}" in
     #
     # This answers "which file does the dispatch actually read?" without
     # cloning the repository or starting a session, so it is safe to run
-    # anywhere and it is how the lookup is tested.
+    # anywhere and it is how the lookup is tested. It asks the same
+    # function the dispatch asks, so the two cannot disagree.
     shift
     for task in ${*:-I J}; do
-        brief_name=""
-        case "$task" in
-            O)   brief_name="cc-task-brief-l3e.md" ;;
-            N|Q|R) brief_name="cc-task-brief-l3f.md" ;;
-            M)   brief_name="cc-task-brief-l3d.md" ;;
-            *)   brief_name="cc-task-brief-l3b.md" ;;
-        esac
-        if [ -f "$REPO_SRC/docs/$brief_name" ]; then
-            printf "%s %s\n" "$task" "$REPO_SRC/docs/$brief_name"
-        elif [ -f "$BRIEF_DIR/$brief_name" ]; then
-            printf "%s %s\n" "$task" "$BRIEF_DIR/$brief_name"
+        _path=$(brief_path_for_task "$task")
+        if [ -n "$_path" ]; then
+            printf "%s %s\n" "$task" "$_path"
         else
             printf "%s MISSING %s %s\n" "$task" \
-                "$REPO_SRC/docs/$brief_name" "$BRIEF_DIR/$brief_name"
+                "$REPO_SRC/docs/$(brief_for_task "$task")" \
+                "$BRIEF_DIR/$(brief_for_task "$task")"
         fi
     done
     exit 0
@@ -84,27 +112,44 @@ fi
 
 for task in $TASKS; do
     work="$ROOT/$task"
+    # Refuse to start a second session for a card that is already running.
+    #
+    # Two sessions on one working copy do not queue: they edit the same
+    # files at the same time, and whichever finishes second overwrites
+    # the other's work. The client line has a guard for this (the card
+    # guard refuses a task whose state is busy); the kernel line had
+    # none, so a re-dispatch was one command away.
+    if [ -s "$work/session.pid" ]; then
+        _pid=$(cat "$work/session.pid" 2>/dev/null || echo "-")
+        if [ "$_pid" != "-" ] && kill -0 "$_pid" 2>/dev/null; then
+            echo "$task is already running (pid=$_pid); not dispatching again" >&2
+            echo "(stop it first, or use a different task letter)" >&2
+            continue
+        fi
+    fi
     mkdir -p "$work"
     # Pick the brief for this task unless one was forced from the outside.
     task_brief="$BRIEF"
     if [ -z "$task_brief" ]; then
-        case "$task" in
-            O)   brief_name="cc-task-brief-l3e.md" ;;
-            N|Q|R) brief_name="cc-task-brief-l3f.md" ;;
-            M)   brief_name="cc-task-brief-l3d.md" ;;
-            *)   brief_name="cc-task-brief-l3b.md" ;;
-        esac
         # Repository copy first, then the out-of-repository directory.
-        # See BRIEF_DIR above for why the second one exists.
-        if [ -f "$REPO_SRC/docs/$brief_name" ]; then
-            task_brief="$REPO_SRC/docs/$brief_name"
-        else
-            task_brief="$BRIEF_DIR/$brief_name"
-        fi
+        # See brief_path_for_task and BRIEF_DIR above for why the second
+        # one exists.
+        task_brief=$(brief_path_for_task "$task")
     fi
-    if [ ! -f "$task_brief" ]; then
-        echo "brief not found: $task_brief" >&2
+    if [ -z "$task_brief" ] || [ ! -f "$task_brief" ]; then
+        echo "brief not found for $task" >&2
         echo "(looked in the repository's docs/ and in $BRIEF_DIR)" >&2
+        exit 1
+    fi
+    # The brief has to have a section for this task.
+    #
+    # The mapping says which file a task reads; the file says what the
+    # task is. A brief whose section is missing or renamed sends the
+    # card off to read another round's instructions, and the card does
+    # not notice -- it reads a plausible document and implements the
+    # wrong thing. Checking here turns that into a refusal to dispatch.
+    if ! grep -qE "^## 任务 $task[：: ]" "$task_brief"; then
+        echo "brief $task_brief has no section for task $task; not dispatching" >&2
         exit 1
     fi
     if [ ! -d "$work/repo/.git" ]; then
