@@ -2130,10 +2130,10 @@ index 0000000..3bd62d6
 +#endif
 diff --git a/lengsuo/native/BUILD.gn b/lengsuo/native/BUILD.gn
 new file mode 100644
-index 0000000..8e2f3f8
+index 0000000..2e5a514
 --- /dev/null
 +++ b/lengsuo/native/BUILD.gn
-@@ -0,0 +1,201 @@
+@@ -0,0 +1,202 @@
 +# Decoder source sets. Chromium integration evidence lives in VERIFICATION.md.
 +source_set("profile_wire") {
 +  sources = [
@@ -2332,8 +2332,9 @@ index 0000000..8e2f3f8
 +    "l3_envelope_session.cc",
 +    "l3_envelope_session.h",
 +  ]
++  # The BoringSSL dependency comes with :l3_envelope - this layer calls into
++  # it, it does not reach for the crypto itself.
 +  public_deps = [ ":l3_envelope" ]
-+  deps = [ "//third_party/boringssl" ]
 +}
 diff --git a/lengsuo/native/action_table.cc b/lengsuo/native/action_table.cc
 new file mode 100644

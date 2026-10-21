@@ -196,6 +196,7 @@ source_set("l3_envelope_session") {
     "l3_envelope_session.cc",
     "l3_envelope_session.h",
   ]
+  # The BoringSSL dependency comes with :l3_envelope - this layer calls into
+  # it, it does not reach for the crypto itself.
   public_deps = [ ":l3_envelope" ]
-  deps = [ "//third_party/boringssl" ]
 }
