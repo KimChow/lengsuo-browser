@@ -346,5 +346,77 @@ class CrossRepoCardTest(unittest.TestCase):
                          "the M0 section does not forbid choosing a route")
 
 
+class SessionPathTest(unittest.TestCase):
+    """The session has to find the agent binary it starts.
+
+    Why this exists
+    ---------------
+    The card is started with `setsid -f bash run.sh`. That shell is
+    neither a login nor an interactive shell, so it reads no profile
+    and takes its PATH from the environment the dispatcher happened to
+    have. On the build machine the agent binary lives in the user's own
+    bin directory, which is not on that PATH -- so the session died
+    immediately with "claude: No such file or directory", and the
+    dispatcher still reported "started".
+
+    The card therefore has to carry its own PATH. The client line's
+    runner does the same thing, and the failure mode is the reason: a
+    card that cannot start leaves a worktree and a state file behind
+    and looks like it was dispatched.
+    """
+
+    def test_the_runner_script_sets_a_path(self):
+        """The run script must put the agent's directory on the PATH."""
+        text = _launcher_text()
+        run = re.search(r"cat > \"\$work/run\.sh\" <<RUNNER\n(.*?)\nRUNNER",
+                        text, re.S)
+        self.assertIsNotNone(run, "the launcher no longer writes run.sh")
+        script = run.group(1)
+        self.assertRegex(script, r"PATH=",
+                         "the run script does not set a PATH")
+
+    def test_the_path_includes_the_agent_directory(self):
+        """The agent binary lives in the user's own bin directory.
+
+        The run script names the variable; the variable carries the
+        directory. Both halves are checked: a script that sets PATH to
+        something else, or a variable that forgets the directory, both
+        leave the session without the binary.
+        """
+        text = _launcher_text()
+        run = re.search(r"cat > \"\$work/run\.sh\" <<RUNNER\n(.*?)\nRUNNER",
+                        text, re.S)
+        self.assertIsNotNone(run, "the launcher no longer writes run.sh")
+        script = run.group(1)
+        match = re.search(r'PATH="\$\{?([A-Z_][A-Z0-9_]*)', script)
+        self.assertIsNotNone(match,
+                             "the run script does not name the variable "
+                             "that holds the PATH")
+        variable = match.group(1)
+        definition = re.search(
+            r'^%s="\$\{[^}]*:-([^"]*)\}"' % variable, text, re.M)
+        self.assertIsNotNone(definition,
+                             "the PATH variable %s has no default" % variable)
+        self.assertIn(".local/bin", definition.group(1),
+                      "the default PATH does not include the directory "
+                      "the agent binary lives in")
+
+    def test_the_path_is_set_for_the_agent_invocation(self):
+        """The PATH has to be in effect when the agent is started.
+
+        Setting PATH in a separate line and then starting the agent
+        through `env` without it would leave the agent on the old PATH,
+        so the check has to be that the same command carries it.
+        """
+        text = _launcher_text()
+        run = re.search(r"cat > \"\$work/run\.sh\" <<RUNNER\n(.*?)\nRUNNER",
+                        text, re.S)
+        self.assertIsNotNone(run, "the launcher no longer writes run.sh")
+        script = run.group(1)
+        self.assertRegex(script, r"env\s+[^\n]*PATH=",
+                         "the agent is started without the PATH in its "
+                         "own environment")
+
+
 if __name__ == "__main__":
     unittest.main()

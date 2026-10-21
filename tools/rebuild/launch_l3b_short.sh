@@ -14,6 +14,20 @@ set -u
 GATEWAY="${LENGSUO_GATEWAY:-http://192.168.1.151:18080}"
 MODEL="${LENGSUO_CC_MODEL:-auto}"
 ROOT="${LENGSUO_L3B_ROOT:-/home/ubuntu/l3b-tasks}"
+
+# The PATH the card's session runs with.
+#
+# The session is started with `setsid -f bash run.sh`, and that shell is
+# neither a login nor an interactive one: it reads no profile, so it takes
+# the PATH of whatever started it. The agent binary is installed in the
+# user's own bin directory, which the dispatcher's PATH does not have --
+# so the session died at once with "claude: No such file or directory",
+# while the dispatcher still reported "started". A card that cannot start
+# leaves a worktree and a state file behind and looks like it was
+# dispatched, which is how a whole round can pass without a card running.
+#
+# The same PATH is used by the client line's runner.
+AGENT_PATH="${LENGSUO_AGENT_PATH:-/home/ubuntu/.local/bin:/home/ubuntu/bin:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin}"
 REPO_SRC="${LENGSUO_REPO_SRC:-/home/ubuntu/lengsuo-browser-dev/recipe}"
 # The brief is selected by the task name: the third round (M/N) has its own
 # brief, the second round (I/J/K/L) keeps the original one.
@@ -185,7 +199,14 @@ for task in $TASKS; do
     cat > "$work/run.sh" <<RUNNER
 #!/bin/bash
 echo \$\$ > "$work/session.pid"
-exec env ANTHROPIC_BASE_URL="$GATEWAY" ANTHROPIC_MODEL="$MODEL" \\
+# The agent binary lives in the user's own bin directory. The session is
+# started with \`setsid -f bash\`, and that shell is neither a login nor an
+# interactive one: it reads no profile, so it inherits whatever PATH the
+# dispatcher had. Without this line the session died instantly with
+# "claude: No such file or directory" and the dispatcher still said
+# "started". The client line's runner sets the same PATH for the same
+# reason.
+exec env PATH="$AGENT_PATH" ANTHROPIC_BASE_URL="$GATEWAY" ANTHROPIC_MODEL="$MODEL" \\
     claude --permission-mode acceptEdits -p "\$(cat "$work/prompt.txt")"
 RUNNER
     chmod +x "$work/run.sh"
