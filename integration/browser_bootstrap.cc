@@ -1,7 +1,6 @@
 #include "lengsuo/integration/browser_bootstrap.h"
 #include <string>
 #include <vector>
-#include "base/base64.h"
 #include "base/time/time.h"
 #include "lengsuo/integration/l3_bootstrap.h"
 #include "third_party/icu/source/i18n/unicode/timezone.h"
@@ -128,16 +127,7 @@ bool InitializeBrowserL3(const base::CommandLine& command) {
   return true;
 }
 
-std::string BrowserL3Base64() {
-  const auto* config = L3State().config();
-  if (config == nullptr) {
-    return std::string();
-  }
-  // Re-serialize the frozen snapshot so the renderer receives exactly the
-  // document the browser verified, byte for byte.
-  const std::string wire = fp::EncodeL3Wire(*config, config->signed_unix);
-  return base::Base64Encode(base::as_byte_span(wire));
-}
+const fp::L3Config* BrowserL3Config() { return L3State().config(); }
 
 const ParsedProfile* BrowserProfile() { return State().profile(); }
 const CatalogUaEntry* BrowserUa() { return State().ua(); }

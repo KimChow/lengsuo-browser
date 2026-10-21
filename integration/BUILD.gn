@@ -33,14 +33,34 @@ source_set("bootstrap") {
   ]
 }
 
+# Browser side of the L3 Mojo channel (task O): answers each renderer's
+# GetDocument() from the snapshot :bootstrap froze at startup. No
+# chrome/browser dependency, so chrome/browser may depend on it freely.
+source_set("l3_provisioning") {
+  sources = [
+    "l3_provisioning_impl.cc",
+    "l3_provisioning_impl.h",
+  ]
+  public_deps = [
+    "//base",
+    "//lengsuo/native:l3_wire",
+    "//lengsuo/public/mojom:l3_provisioning_mojom",
+    "//mojo/public/cpp/bindings",
+  ]
+  deps = [ ":bootstrap" ]
+}
+
 test("bootstrap_unittests") {
   testonly = true
   sources = [
     "browser_bootstrap_unittest.cc",
+    "l3_provisioning_impl_test.cc",
     "official_defaults_unittest.cc",
   ]
   deps = [
     ":bootstrap",
+    ":l3_provisioning",
+    "//lengsuo/native:l3_runtime",
     "//base",
     "//testing/gtest",
     "//third_party/blink/public/common",

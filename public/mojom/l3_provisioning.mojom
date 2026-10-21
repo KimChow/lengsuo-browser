@@ -1,0 +1,28 @@
+// L3 document provisioning: browser -> renderer.
+//
+// The payload is opaque on purpose. Today the browser hands over the frozen
+// L3W1 document; when the encrypted envelope lands, only the payload changes
+// and this interface stays exactly as it is.
+//
+// The document must never ride the command line (chrome://version, the
+// process list and crash dumps all expose it there). Pull over Mojo keeps it
+// out of those surfaces and gives the renderer one well-defined failure mode.
+
+module lengsuo.mojom;
+
+// The opaque payload. A bare `array` is not usable as a Mojo response field
+// in this version (it is move-only and the generated responder hands it over
+// as a plain value), so the bytes travel inside a struct.
+struct L3Document {
+  array<uint8> bytes;
+};
+
+interface L3Provisioning {
+  // Frozen document bytes, or empty when this session has no L3 statement.
+  //
+  // Empty is not an error: the renderer leaves storage untouched, which is
+  // upstream behaviour. Non-empty bytes that fail the renderer's Init abort
+  // the process instead, because a platform that already observed a pinned
+  // value must never see it disappear.
+  GetDocument() => (L3Document document);
+};

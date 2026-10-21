@@ -9,6 +9,7 @@ namespace blink::web_pref { struct WebPreferences; }
 namespace display { struct ScreenInfos; }
 namespace blink { struct UserAgentMetadata; struct RendererPreferences; }
 namespace lengsuo {
+namespace fp { struct L3Config; }
 // ICU-recognized system zones only; does not override renderer timezone.
 bool IsValidProfileTimezone(std::string_view zone);
 inline constexpr char kProfileWireSwitch[] = "lengsuo-profile-wire";
@@ -34,10 +35,10 @@ bool InitializeBrowserL3(const base::CommandLine& command);
 // base::Time::ToDeltaSinceWindowsEpoch() here would count from 1601 and
 // make every document look older than the freshness window.
 int64_t L3ClockUnixSeconds();
-// Base64 of the frozen L3 document, ready to hand to a renderer. Empty when
-// no document is loaded. The encoding keeps the multi-line document off the
-// command line verbatim.
-std::string BrowserL3Base64();
+// The frozen L3 snapshot, or nullptr when this session has no L3 statement.
+// Read-only and immutable after startup; the Mojo provisioning interface
+// re-serializes it for each renderer that asks.
+const fp::L3Config* BrowserL3Config();
 bool ApplyUaMetadata(const CatalogUaEntry& entry,
                      blink::UserAgentMetadata* metadata);
 // Returns true only when preferences actually change.

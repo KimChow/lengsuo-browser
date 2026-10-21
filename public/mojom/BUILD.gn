@@ -1,0 +1,8 @@
+# L3 document provisioning (task O). The generated bindings are shared by the
+# browser side (which answers) and the renderer side (which pulls once at
+# startup).
+import("//mojo/public/tools/bindings/mojom.gni")
+
+mojom("l3_provisioning_mojom") {
+  sources = [ "l3_provisioning.mojom" ]
+}
