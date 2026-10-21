@@ -199,6 +199,51 @@ class WireContractVectorTests(unittest.TestCase):
             with self.subTest(needed=needed):
                 self.assertIn(needed, self.text)
 
+    def test_briefs_do_not_contradict_the_contract(self):
+        """The briefs must not restate a different byte layout.
+
+        The fifth-round brief carried its own summary table with a 9-byte
+        frame header and an 8-byte GCM nonce while the contract (and both
+        repos' fixed test vectors) used an 8-byte header and a 12-byte
+        nonce. Two sources of truth means the sides pick different ones.
+        """
+        brief = (ROOT / "docs" / "cc-task-brief-l3f.md").read_text(
+            encoding="utf-8")
+        # The old 9-byte header spelling must be gone.
+        self.assertNotIn("[u32 len][u8 type][u32 flags]", brief)
+        # The old 8-byte GCM nonce rule must be gone from the brief.
+        self.assertNotIn("nonce = 帧头里的 8B 随机数", brief)
+        # The brief must point at the contract as the single source.
+        self.assertIn("kernel-wire-contract.md", brief)
+
+    def test_client_brief_matches_the_contract(self):
+        """The client-side brief must use the same bytes as the contract."""
+        brief = (ROOT / "docs" / "task-briefs" /
+                 "client-p1-kernel-pipe-core.txt").read_text(encoding="utf-8")
+        # 12-byte GCM nonce, and it must say where the vectors live.
+        self.assertIn("12 字节", brief)
+        self.assertIn("kernel-wire-contract.md", brief)
+        # The old "key_len + key" spelling described a different layout.
+        self.assertNotIn("u32 key_len", brief)
+
+    def test_session_key_rule_is_not_contradictory(self):
+        """The session key must not be declared both random and derived.
+
+        The contract used to say "32 bytes, randomly generated (CSPRNG)"
+        and, two lines below, "= HKDF(k_machine, nonce, info)". Those are
+        different keys; the second one had already been used as the
+        fixture for the fixed vectors.
+        """
+        section = self.text.split("**会话密钥**", 1)[-1].split("**机器码派生**",
+                                                              1)[0]
+        self.assertIn("待主理人拍板", section)
+        # The unresolved choice must be spelled out as a choice, with both
+        # candidates, rather than asserted twice in different words.
+        self.assertIn("CSPRNG", section)
+        self.assertIn("HKDF", section)
+        # And it must state that the wire format is unaffected.
+        self.assertIn("不影响线上字节", section)
+
     def test_no_duplicate_vector_tables(self):
         """Two different vector tables would let the sides pick either one."""
         headers = re.findall(r"`([0-9a-f]{2}(?: [0-9a-f]{2}){7})`", self.lower)
