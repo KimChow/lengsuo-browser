@@ -18,6 +18,18 @@ REPO_SRC="${LENGSUO_REPO_SRC:-/home/ubuntu/lengsuo-browser-dev/recipe}"
 # The brief is selected by the task name: the third round (M/N) has its own
 # brief, the second round (I/J/K/L) keeps the original one.
 BRIEF="${LENGSUO_L3B_BRIEF:-}"
+# Where the task briefs live when they are not in the repository.
+#
+# The repository keeps `docs/` as a local-only working area (it holds
+# development notes, acceptance records and reference material), so a
+# fresh clone of the recipe on the build machine has no `docs/` at all.
+# The briefs and the wire contract are not that kind of document: they are
+# inputs to the dispatch itself, so they are kept outside the repository
+# in a stable directory that survives `git reset --hard`.
+#
+# Lookup order: the repository copy first (it is the tracked one when a
+# repository does ship briefs), then the out-of-repository directory.
+BRIEF_DIR="${LENGSUO_L3B_BRIEF_DIR:-/home/ubuntu/l3b-briefs}"
 
 case "${1:-}" in
 --status)
@@ -32,6 +44,32 @@ case "${1:-}" in
         printf "%-3s pid=%-8s alive=%-4s report=%-4s log=%sB\n" \
             "$name" "$pid" "$alive" "$report" \
             "$(wc -c < "$d/session.log" 2>/dev/null || echo 0)"
+    done
+    exit 0
+    ;;
+--resolve-brief)
+    # Print the brief each task would use, and nothing else.
+    #
+    # This answers "which file does the dispatch actually read?" without
+    # cloning the repository or starting a session, so it is safe to run
+    # anywhere and it is how the lookup is tested.
+    shift
+    for task in ${*:-I J}; do
+        brief_name=""
+        case "$task" in
+            O)   brief_name="cc-task-brief-l3e.md" ;;
+            N|Q|R) brief_name="cc-task-brief-l3f.md" ;;
+            M)   brief_name="cc-task-brief-l3d.md" ;;
+            *)   brief_name="cc-task-brief-l3b.md" ;;
+        esac
+        if [ -f "$REPO_SRC/docs/$brief_name" ]; then
+            printf "%s %s\n" "$task" "$REPO_SRC/docs/$brief_name"
+        elif [ -f "$BRIEF_DIR/$brief_name" ]; then
+            printf "%s %s\n" "$task" "$BRIEF_DIR/$brief_name"
+        else
+            printf "%s MISSING %s %s\n" "$task" \
+                "$REPO_SRC/docs/$brief_name" "$BRIEF_DIR/$brief_name"
+        fi
     done
     exit 0
     ;;
@@ -51,14 +89,22 @@ for task in $TASKS; do
     task_brief="$BRIEF"
     if [ -z "$task_brief" ]; then
         case "$task" in
-            O)   task_brief="$REPO_SRC/docs/cc-task-brief-l3e.md" ;;
-            N|Q|R) task_brief="$REPO_SRC/docs/cc-task-brief-l3f.md" ;;
-            M)   task_brief="$REPO_SRC/docs/cc-task-brief-l3d.md" ;;
-            *)   task_brief="$REPO_SRC/docs/cc-task-brief-l3b.md" ;;
+            O)   brief_name="cc-task-brief-l3e.md" ;;
+            N|Q|R) brief_name="cc-task-brief-l3f.md" ;;
+            M)   brief_name="cc-task-brief-l3d.md" ;;
+            *)   brief_name="cc-task-brief-l3b.md" ;;
         esac
+        # Repository copy first, then the out-of-repository directory.
+        # See BRIEF_DIR above for why the second one exists.
+        if [ -f "$REPO_SRC/docs/$brief_name" ]; then
+            task_brief="$REPO_SRC/docs/$brief_name"
+        else
+            task_brief="$BRIEF_DIR/$brief_name"
+        fi
     fi
     if [ ! -f "$task_brief" ]; then
         echo "brief not found: $task_brief" >&2
+        echo "(looked in the repository's docs/ and in $BRIEF_DIR)" >&2
         exit 1
     fi
     if [ ! -d "$work/repo/.git" ]; then
