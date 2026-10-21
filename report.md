@@ -548,3 +548,76 @@ content」。`relock_baseline.py` 取的是 `HEAD:<path>` 的 blob（提交优�
 
 **已做的处置**：已按正确顺序重跑并全绿。**待裁定**：无（纯流程问题，记录在此
 以免下一张卡再踩）。
+
+---
+
+# 任务 R 报告（内核侧）—— 语义冲突与待裁定项
+
+> 本段由**派卡方**在 2026-10-22 05:0x 收敛 R 卡时补写
+> （R 卡的会话在 2026-10-22 03:1x 前后结束，**没有留下 report.md**，
+> 但它的三个提交 `6d0367a`/`1c46014`/`c96e4d3` 已通过全部闸门并合入主线）。
+
+## R-A. ✅ 内核侧已合入，闸门自复跑全绿（2026-10-22 05:0x）
+
+| 闸门 | 结果 |
+|---|---|
+| `run_l3_gtest.sh` | **18 目标 / 0 失败**（基线 17 + 新增 `profile_bundle` 18 用例）|
+| `python3 -m unittest discover -s tests`（47 上）| **210 绿 / 30 跳过 / 零 error**（13.9 秒）|
+| `check_no_source_leak.py --skip-history` | **OK**（禁词 14 个）|
+| `check_line_limit.py` | hard-limit **0**（5 条软目标 WARN，全是既有文件）|
+| `make_sources_patch.py --check` | **patch 0011 matches the repository sources** |
+| `python3 -m unittest tests.test_patch_replay` | **9 用例全绿** |
+| 跨仓固定向量互验（47 上实跑两仓真实文件）| **逐字节一致**（密文 45B / tag 16B / AAD 16B / 载荷 85B）|
+| base64 纪律补核 | 树内 `chrome_content_browser_client.cc` 与 `renderer_main.cc` **零 Base64**；`lengsuo-managed-l3` **全树零命中** |
+| overlay + 14 个补丁重放 | **78 文件 overlay + 14 补丁 0 失败**；`gn gen` rc=0（36018 targets）|
+| 真编译 | 见 `docs/env-channel-tasklist.md` 状态列 |
+
+**内核侧交付的三个不可让步的规则**（已由 18 条 gtest 守住）：
+① 默认集合 = 白名单减黑名单 **+ History**（拍板 1B）；
+② 取不到的文件**跳过并计数**，不让整份收集失败；
+③ `Cookies` / `Network` 是**地板**不是偏好——配置是远端输入，写进白名单也不带出去。
+
+## R-B. 🟡 内核侧**不产出**契约 §4.5 那个 JSON 清单 —— 这是有意的，不是缺口
+
+**事实**：契约 §4.5 把清单钉成 JSON `{"files":[{"path","size","kind"}]}`，
+并说「**内核侧产出**，客户端侧据此打包」。
+但内核侧 `native/profile_bundle.{h,cc}` 的公开接口只有四个函数：
+
+```
+ProfileSyncConfig DefaultProfileSyncConfig();
+bool ParseProfileSyncConfig(std::string_view bundle_json, ...);
+bool MatchGlob(std::string_view pattern, std::string_view text);
+void CollectProfileBundle(const ProfileSyncConfig&, const std::vector<ProfileFile>&, ProfileBundle*);
+```
+
+⇒ **内核侧产出的是「收集结果」这个 C++ 结构（`ProfileBundle`），
+不是 JSON**；JSON 的封装在客户端侧（`zip_writer.rs` 的 `ProfileManifest::parse`）。
+
+**为什么这样不算冲突**：客户端侧**也要自己扫目录**算一份清单（`scan_profile`），
+而契约 §4.5.1 明说「**两边各算一份清单** ⇒ 只有把路径形状与排序规则钉死，
+两边算出的清单才逐项相同」。
+⇒ **JSON 清单是「形状」的载体**，两侧各自算自己的那份；
+真正必须逐字节相同的是**路径形状 + 排序规则**，这两条已由契约 §4.5 钉死。
+
+**已核实的两处跨仓一致性**（派卡方实测，不是推断）：
+- `MatchGlob`（内核 C++）与 `match_glob`（客户端 Rust）**算法逐行同构**
+  （`*` 记住位置、逐字节回溯、`?` 匹配一个字节、尾部 `*` 跳过）⇒ 同输入同输出。
+- `kProfileBundleMaxBytes`（内核）与 `MAX_PACKAGE_BYTES`（客户端）**都是 32 MiB**。
+
+⛔ **但两边没有共享的「同一份输入 ⇒ 同一份清单」的固定向量**
+（契约 §4.5 还没像 §3.1 那样给出清单的固定测试向量）
+⇒ **跨仓互验目前只验了「算法同构 + 形状钉死」，没验「逐字节相同」**。
+⇒ 建议：下一轮给契约 §4.5 补一组清单固定向量（输入路径列表 + 期望输出清单 JSON），
+两侧各跑一遍 ⇒ 这才是 R 的跨仓验收手段（对齐 P/Q 用固定向量的做法）。
+
+## R-C. ⛔ 客户端侧未完成（**R 卡整体还没交卷**）
+
+R 是**两仓**的卡。内核侧已合入，**客户端侧仍未交卷**：
+- 第一次派发：`error_max_turns`（201 轮耗尽 / $23.5），
+  **零次真编译**（13 次 `cargo` 调用全是 `grep`/`sed` 读 `zip` crate 源码），
+  落地 `upload.rs` 841 行 + `zip_writer.rs` 467 行；
+- 派卡方已复现其 **3 个编译错误**（`zip_writer` 模块未声明 / `read_patterns` 的
+  `Option` 与 `&Value` 混用 / `Err` 分支末尾多一个分号），
+  并把 `zip 9.0.5` 的 API 结论、拆文件方案、通道①的处置写进任务书 §7 后重派。
+
+⇒ **R 卡的跨仓验收（清单逐字节相同 + `ConfigBundle` 帧固定向量）要等客户端侧交卷才能做。**
