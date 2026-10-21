@@ -1,17 +1,19 @@
 diff --git a/chrome/browser/chrome_browser_main.cc b/chrome/browser/chrome_browser_main.cc
+index cbf3b6c..6bc3b09 100644
 --- a/chrome/browser/chrome_browser_main.cc
 +++ b/chrome/browser/chrome_browser_main.cc
-@@ -4,6 +4,9 @@
+@@ -4,6 +4,10 @@
  
  #include "chrome/browser/chrome_browser_main.h"
  
 +#include "lengsuo/integration/browser_bootstrap.h"
++#include "lengsuo/integration/kernel_pipe_client.h"
 +#include "lengsuo/integration/official_defaults.h"
 +
  #include <memory>
  #include <string>
  #include <tuple>
-@@ -1004,6 +1007,22 @@
+@@ -1004,6 +1008,45 @@ void ChromeBrowserMainParts::RecordBrowserStartupTime() {
  
  int ChromeBrowserMainParts::PreEarlyInitialization() {
    TRACE_EVENT0("startup", "ChromeBrowserMainParts::PreEarlyInitialization");
@@ -31,6 +33,29 @@ diff --git a/chrome/browser/chrome_browser_main.cc b/chrome/browser/chrome_brows
 +    LOG(ERROR) << "Lengsuo L3 bootstrap rejected";
 +    return CHROME_RESULT_CODE_INVALID_CMDLINE_URL;
 +  }
++
++  // The runner <-> kernel pipe (task Q). The command line carries the pipe
++  // name and nothing else; the session key arrives over the pipe and never
++  // touches the command line, the environment or the disk.
++  //
++  // Fail-closed: a pipe that was requested but does not open, or a handshake
++  // that does not authenticate, aborts startup. There is no "continue
++  // without a session key" - a browser that runs with the wrong
++  // configuration is worse than a browser that refuses to start.
++  {
++    const std::string pipe_name =
++        lengsuo::KernelPipeClient::PipeNameFromCommandLine(
++            *base::CommandLine::ForCurrentProcess());
++    if (!pipe_name.empty()) {
++      const lengsuo::fp::MachineFacts facts = lengsuo::CollectMachineFacts();
++      const int64_t now_unix = base::Time::Now().ToTimeT();
++      if (!lengsuo::KernelPipeClient::Initialize(pipe_name, facts, now_unix)) {
++        LOG(ERROR) << "Lengsuo kernel pipe handshake rejected";
++        return CHROME_RESULT_CODE_INVALID_CMDLINE_URL;
++      }
++    }
++  }
++
    for (auto& chrome_extra_part : chrome_extra_parts_) {
      chrome_extra_part->PreEarlyInitialization();
    }
@@ -206,12 +231,15 @@ diff --git a/chrome/browser/chrome_content_browser_client_receiver_bindings.cc b
            receiver.As<content_settings::mojom::ContentSettingsManager>()) {
      content_settings::ContentSettingsManagerImpl::Create(
 diff --git a/chrome/browser/BUILD.gn b/chrome/browser/BUILD.gn
+index b58905d..600de8f 100644
 --- a/chrome/browser/BUILD.gn
 +++ b/chrome/browser/BUILD.gn
-@@ -880,6 +880,7 @@
+@@ -879,6 +879,9 @@ source_set("core") {
+   }
  
    deps = [
-     "//lengsuo/integration:bootstrap",
++    "//lengsuo/integration:bootstrap",
++    "//lengsuo/integration:kernel_pipe_client",
 +    "//lengsuo/integration:l3_provisioning",
      ":active_use_util",
      ":after_startup_task_utils",

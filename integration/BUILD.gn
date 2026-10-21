@@ -70,3 +70,20 @@ test("bootstrap_unittests") {
     "//base/test:test_support",
   ]
 }
+
+# The browser's half of the runner <-> kernel pipe (task Q). It owns the
+# endpoint, the handshake and the uplink queue; the pure half (frame codec,
+# handshake state machine, config freeze) is in //lengsuo/native:kernel_pipe.
+#
+# No chrome/browser dependency, so chrome/browser may depend on it freely.
+source_set("kernel_pipe_client") {
+  sources = [
+    "kernel_pipe_client.cc",
+    "kernel_pipe_client.h",
+  ]
+  public_deps = [
+    "//base",
+    "//lengsuo/native:action_table",
+    "//lengsuo/native:kernel_pipe",
+  ]
+}
