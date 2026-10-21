@@ -71,9 +71,7 @@ class DispatchBriefTests(unittest.TestCase):
     def test_third_round_tasks_use_the_third_round_brief(self):
         """Guards the specific regression: M/N briefly mapped to round two."""
         mapping = _task_to_brief()
-        for task in ("M", "N"):
-            with self.subTest(task=task):
-                self.assertEqual(mapping.get(task), "docs/cc-task-brief-l3d.md")
+        self.assertEqual(mapping.get("M"), "docs/cc-task-brief-l3d.md")
 
     def test_fourth_round_task_does_not_fall_back(self):
         """O must not hit the default arm (round two's brief)."""
@@ -84,13 +82,39 @@ class DispatchBriefTests(unittest.TestCase):
                                         "docs/cc-task-brief-l3b.md"))
 
     def test_fifth_round_tasks_use_the_fifth_round_brief(self):
-        """Q/R are the fifth round; P/S live in the client repo, not here."""
+        """N/Q/R are the fifth round; P/S live in the client repo, not here."""
         mapping = _task_to_brief()
-        for task in ("Q", "R"):
+        for task in ("N", "Q", "R"):
             with self.subTest(task=task):
-                self.assertEqual(mapping.get(task), "docs/cc-task-brief-l3f.md")
+                self.assertEqual(mapping.get(task),
+                                 "docs/cc-task-brief-l3f.md")
         self.assertNotIn("P", mapping,
                          "task P belongs to the client repo line")
+
+    def test_n_does_not_point_at_the_third_round_brief(self):
+        """N moved to the fifth round; the third round would redo finished work.
+
+        Round three's brief asks for the envelope to be written from
+        scratch. That work is already done (18 gtest, commit 2f0ea73), so
+        dispatching N against it would burn a card rebuilding it.
+        """
+        mapping = _task_to_brief()
+        self.assertNotEqual(mapping.get("N"), "docs/cc-task-brief-l3d.md")
+
+    def test_fifth_round_brief_has_a_section_for_every_mapped_task(self):
+        """Each task the script can dispatch needs its own section.
+
+        A brief without the task's section sends the card off to read
+        another round's instructions -- the exact failure the mapping
+        above is meant to prevent.
+        """
+        mapping = _task_to_brief()
+        text = (DOCS / "cc-task-brief-l3f.md").read_text(encoding="utf-8")
+        for task in ("N", "Q", "R"):
+            if mapping.get(task) != "docs/cc-task-brief-l3f.md":
+                continue
+            with self.subTest(task=task):
+                self.assertRegex(text, r"(?m)^## 任务 %s[：: ]" % task)
 
     def test_wire_contract_exists(self):
         """P and Q are two repos; the shared contract must live in the repo."""
