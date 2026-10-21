@@ -72,9 +72,19 @@ class WireContractVectorTests(unittest.TestCase):
         # them uppercase, the computed values are lowercase, and the bytes
         # are identical either way.
         cls.lower = cls.text.lower()
+        # Long vectors are wrapped across lines in the document for
+        # readability, so byte sequences are searched in a whitespace-free
+        # copy. Whitespace carries no meaning inside a hex vector.
+        cls.stripped = re.sub(r"\s+", "", cls.lower)
 
     def _assert_doc_has(self, needle, why):
         self.assertIn(needle.lower(), self.lower,
+                      "contract is missing %s (%s); the vector text and the "
+                      "computed value must agree" % (needle, why))
+
+    def _assert_doc_has_bytes(self, needle, why):
+        """Same as _assert_doc_has, but ignores line wrapping."""
+        self.assertIn(needle.lower(), self.stripped,
                       "contract is missing %s (%s); the vector text and the "
                       "computed value must agree" % (needle, why))
 
@@ -105,6 +115,51 @@ class WireContractVectorTests(unittest.TestCase):
         self._assert_doc_has(MACHINE_CODE, "machine_code digest")
         self._assert_doc_has(K_MACHINE.hex(), "k_machine digest")
         self._assert_doc_has(SESSION_KEY.hex(), "session_key digest")
+
+    def test_key_envelope_vector_is_pinned(self):
+        """The KeyEnvelope payload bytes must appear verbatim.
+
+        The envelope is the one frame whose payload is not JSON, so both
+        sides have to agree on every byte of it. The AAD is pinned too:
+        dropping the hello nonce from it would silently weaken the
+        handshake replay protection while still decrypting fine.
+        """
+        plaintext = (SESSION_KEY + b"ct-01" +
+                     (1700000000).to_bytes(8, "big"))
+        self._assert_doc_has_bytes(plaintext.hex(), "KeyEnvelope plaintext")
+        # payload_len 85 -> frame header len field
+        self._assert_doc_has_bytes("00000055", "KeyEnvelope frame length")
+        # AAD = frame header (8B) + hello nonce (8B)
+        aad = (85).to_bytes(4, "big") + bytes([0x02, 0, 0, 0]) + NONCE
+        self._assert_doc_has_bytes(aad.hex(), "KeyEnvelope AAD")
+        self._assert_doc_has_bytes(
+            "883b152f810fc5d4870a1399e7c26b425e51204749370b39ee25cb05d5f8598",
+            "KeyEnvelope ciphertext")
+        self._assert_doc_has_bytes(
+            "c52e718cbe6281f0b8bbb40c153757ad", "KeyEnvelope tag")
+
+    def test_gcm_nonce_is_twelve_bytes(self):
+        """8-byte nonces are rejected by the aes-gcm crate on both sides."""
+        # Scope the check to the nonce row of the encryption table. §5 also
+        # mentions the Hello nonce (8 bytes) in the AAD row, so a section-wide
+        # "8 字节" search would be wrong. The declared size is the bolded
+        # one; the parenthetical "⛔ 不是 8 字节" is prose about it.
+        section = self.text.split("## 5. 加密", 1)[-1].split("## 6.", 1)[0]
+        row = next((line for line in section.splitlines()
+                    if line.strip().startswith("| nonce")), "")
+        self.assertTrue(row, "encryption table lost its nonce row")
+        self.assertIn("**12 字节**", row)
+        self.assertNotIn("**8 字节**", row)
+
+    def test_aad_must_cover_the_hello_nonce(self):
+        """Replay protection depends on the hello nonce being in the AAD."""
+        self.assertIn("AAD", self.text)
+        self.assertIn("hello", self.lower)
+
+    def test_integer_fields_are_big_endian_everywhere(self):
+        """KeyEnvelope internals must state the byte order explicitly."""
+        self.assertIn("u32 大端", self.text)
+        self.assertIn("u64 大端", self.text)
 
     def test_nonce_and_info_are_pinned(self):
         """The HKDF salt and info must be stated, or the vector is useless."""
