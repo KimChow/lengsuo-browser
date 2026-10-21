@@ -1,0 +1,158 @@
+"""Checks that the wire contract still contains the fixed test vectors.
+
+Why this exists
+---------------
+`docs/kernel-wire-contract.md` promises that the kernel repo and the client
+repo align on "the same set of fixed test vectors". Before this test the
+document described the vectors in prose but shipped no literal bytes, so each
+side invented its own and the cross-repo comparison could never pass.
+
+The document is the only agreement between two independently built repos, so
+its vectors have to be pinned by an executable check rather than by review.
+This test recomputes every vector from the rules stated in the document and
+asserts the document contains the resulting bytes. It does not implement a
+frame codec -- that is the cards' job -- it only guards the contract text.
+
+If the protocol changes, update the document and this test together, and
+update both repos in the same batch (contract section 7).
+"""
+import hashlib
+import hmac
+import pathlib
+import re
+import unittest
+
+ROOT = pathlib.Path(__file__).resolve().parents[1]
+CONTRACT = ROOT / "docs" / "kernel-wire-contract.md"
+
+MAX_FRAME = 8 * 1024 * 1024
+FILL = 0x5A
+FRAME_TYPE = 0x03
+
+
+def _header(payload_len, frame_type=FRAME_TYPE, reserved=0):
+    """The 8-byte frame header: big-endian len, type, 3 reserved bytes."""
+    return (payload_len.to_bytes(4, "big") + bytes([frame_type]) +
+            reserved.to_bytes(3, "big"))
+
+
+def _hex(bytes_):
+    return " ".join("%02x" % b for b in bytes_)
+
+
+def _hkdf_sha256(ikm, salt, info, length=32):
+    prk = hmac.new(salt, ikm, hashlib.sha256).digest()
+    out = b""
+    block = b""
+    counter = 1
+    while len(out) < length:
+        block = hmac.new(prk, block + info + bytes([counter]),
+                         hashlib.sha256).digest()
+        out += block
+        counter += 1
+    return out[:length]
+
+
+MACHINE_JSON = (
+    '{"os":"linux","cpuid":"cpuid-test","hddid":"hddid-test",'
+    '"computername":"host-test"}'
+)
+MACHINE_CODE = hashlib.sha256(MACHINE_JSON.encode("utf-16-le")).hexdigest()
+K_MACHINE = hashlib.sha256(MACHINE_CODE.encode("ascii")).digest()
+NONCE = bytes.fromhex("0102030405060708")
+INFO = b"lengsuo-kernel-session-v1"
+SESSION_KEY = _hkdf_sha256(K_MACHINE, NONCE, INFO, 32)
+
+
+class WireContractVectorTests(unittest.TestCase):
+    @classmethod
+    def setUpClass(cls):
+        cls.text = CONTRACT.read_text(encoding="utf-8")
+        # Hex bytes are compared case-insensitively: the document may spell
+        # them uppercase, the computed values are lowercase, and the bytes
+        # are identical either way.
+        cls.lower = cls.text.lower()
+
+    def _assert_doc_has(self, needle, why):
+        self.assertIn(needle.lower(), self.lower,
+                      "contract is missing %s (%s); the vector text and the "
+                      "computed value must agree" % (needle, why))
+
+    def test_legal_frame_headers_are_pinned(self):
+        """Every legal frame's 8-byte header must appear verbatim."""
+        for length in (0, 1, 3, 255, 65535, MAX_FRAME):
+            header = _hex(_header(length))
+            with self.subTest(length=length):
+                self._assert_doc_has(
+                    header,
+                    "legal frame header for len=%d" % length)
+
+    def test_illegal_frame_bytes_are_pinned(self):
+        """Every rejection case must appear verbatim."""
+        cases = {
+            "len over the limit": _hex(_header(MAX_FRAME + 1)),
+            "reserved not zero": _hex(_header(1, reserved=1)) + " 5a",
+            "unknown type": _hex(_header(1, frame_type=0x07)) + " 5a",
+            "truncated header": _hex(_header(1)[:7]),
+            "truncated payload": _hex(_header(3)[:9]),
+        }
+        for why, needle in cases.items():
+            with self.subTest(case=why):
+                self._assert_doc_has(needle, why)
+
+    def test_key_derivation_vectors_are_pinned(self):
+        """machine_code / k_machine / session_key must appear verbatim."""
+        self._assert_doc_has(MACHINE_CODE, "machine_code digest")
+        self._assert_doc_has(K_MACHINE.hex(), "k_machine digest")
+        self._assert_doc_has(SESSION_KEY.hex(), "session_key digest")
+
+    def test_nonce_and_info_are_pinned(self):
+        """The HKDF salt and info must be stated, or the vector is useless."""
+        self._assert_doc_has("01 02 03 04 05 06 07 08", "nonce")
+        self._assert_doc_has("lengsuo-kernel-session-v1", "HKDF info")
+
+    def test_len_is_big_endian_in_the_pinned_bytes(self):
+        """A little-endian implementation would produce 01 00 00 00.
+
+        The contract claims big-endian. Assert the pinned bytes really are
+        big-endian, so a silent edit to little-endian cannot pass unnoticed.
+        """
+        self.assertIn("00 00 00 01 03 00 00 00", self.lower)
+        self.assertNotIn("01 00 00 00 03 00 00 00", self.lower)
+
+    def test_machine_code_json_shape_is_pinned(self):
+        """The four fields and their order are part of the contract."""
+        for field in ("os", "cpuid", "hddid", "computername"):
+            with self.subTest(field=field):
+                self.assertIn('"%s"' % field, self.text)
+        # The order in the pinned JSON is fixed; the digest depends on it.
+        positions = [self.text.index('"%s"' % f)
+                     for f in ("os", "cpuid", "hddid", "computername")]
+        self.assertEqual(positions, sorted(positions),
+                         "machine_code field order changed")
+
+    def test_max_frame_constant_is_8_mib(self):
+        """The documented limit must match the limit the rules state."""
+        self.assertIn("8 MiB", self.text)
+        # 8388608 == 0x00800000 -> the header of the largest legal frame.
+        self.assertIn(_hex(_header(MAX_FRAME)), self.text)
+        self.assertEqual(MAX_FRAME, 0x00800000)
+
+    def test_contract_states_the_vector_rules(self):
+        """The rules the vectors encode must be stated in prose too."""
+        for needed in ("大端", "reserved", "8 MiB", "填充字节"):
+            with self.subTest(needed=needed):
+                self.assertIn(needed, self.text)
+
+    def test_no_duplicate_vector_tables(self):
+        """Two different vector tables would let the sides pick either one."""
+        headers = re.findall(r"`([0-9a-f]{2}(?: [0-9a-f]{2}){7})`", self.lower)
+        self.assertTrue(headers, "no frame header bytes found in the contract")
+        # Each legal header should be stated once; a duplicate means the
+        # document grew a second, competing table.
+        self.assertEqual(len(headers), len(set(headers)),
+                         "contract states the same frame header twice")
+
+
+if __name__ == "__main__":
+    unittest.main()
