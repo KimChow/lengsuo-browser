@@ -52,6 +52,7 @@ for task in $TASKS; do
     if [ -z "$task_brief" ]; then
         case "$task" in
             O)   task_brief="$REPO_SRC/docs/cc-task-brief-l3e.md" ;;
+            Q|R) task_brief="$REPO_SRC/docs/cc-task-brief-l3f.md" ;;
             M|N) task_brief="$REPO_SRC/docs/cc-task-brief-l3d.md" ;;
             *)   task_brief="$REPO_SRC/docs/cc-task-brief-l3b.md" ;;
         esac

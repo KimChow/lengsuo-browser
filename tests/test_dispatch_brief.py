@@ -83,6 +83,25 @@ class DispatchBriefTests(unittest.TestCase):
         self.assertNotIn(mapping["O"], ("docs/cc-task-brief-l3.md",
                                         "docs/cc-task-brief-l3b.md"))
 
+    def test_fifth_round_tasks_use_the_fifth_round_brief(self):
+        """Q/R are the fifth round; P/S live in the client repo, not here."""
+        mapping = _task_to_brief()
+        for task in ("Q", "R"):
+            with self.subTest(task=task):
+                self.assertEqual(mapping.get(task), "docs/cc-task-brief-l3f.md")
+        self.assertNotIn("P", mapping,
+                         "task P belongs to the client repo line")
+
+    def test_wire_contract_exists(self):
+        """P and Q are two repos; the shared contract must live in the repo."""
+        contract = ROOT / "docs" / "kernel-wire-contract.md"
+        self.assertTrue(contract.is_file())
+        text = contract.read_text(encoding="utf-8")
+        for needed in ("--lengsuo-kernel-pipe", "Hello", "KeyEnvelope",
+                       "0x81", "CanvasSample", "大端"):
+            with self.subTest(needed=needed):
+                self.assertIn(needed, text)
+
     def test_round_four_brief_names_its_task(self):
         """The brief itself must state the task letter the prompt will ask for."""
         brief = (DOCS / "cc-task-brief-l3e.md").read_text(encoding="utf-8")
