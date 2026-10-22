@@ -1,15 +1,3 @@
-diff --git a/content/renderer/BUILD.gn b/content/renderer/BUILD.gn
-index 6a40348748..66022beadb 100644
---- a/content/renderer/BUILD.gn
-+++ b/content/renderer/BUILD.gn
-@@ -228,6 +228,7 @@ target(link_target_type, "renderer") {
-   ]
- 
-   deps = [
-+    "//lengsuo/native:canvas_noise",
-     "//base",
-     "//base:i18n",
-     "//build:chromecast_buildflags",
 diff --git a/third_party/blink/renderer/core/BUILD.gn b/third_party/blink/renderer/core/BUILD.gn
 index 383115087f..6dad2cb479 100644
 --- a/third_party/blink/renderer/core/BUILD.gn
