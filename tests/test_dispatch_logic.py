@@ -291,11 +291,18 @@ class CrossRepoCardTest(unittest.TestCase):
 
     def test_the_cross_repo_card_resolves_to_its_brief(self):
         """The letter must be in the mapping, or it falls back to
-        another round's brief."""
+        another round's brief.
+
+        The M0 section was moved out of the fifth-round brief (l3f hit
+        the 700-line hard limit) into its own brief, l3h. The mapping
+        moved with it, so M0 resolves to l3h now. Resolving to l3f would
+        mean the card reads a brief whose M0 section is a stale copy of
+        the one that was moved out.
+        """
         result = _run_resolve(["M0"])
         self.assertEqual(result.returncode, 0, result.stderr)
-        self.assertIn("cc-task-brief-l3f.md", result.stdout,
-                      "M0 does not resolve to the fifth-round brief: %r"
+        self.assertIn("cc-task-brief-l3h.md", result.stdout,
+                      "M0 does not resolve to the sixth-round brief: %r"
                       % result.stdout)
         self.assertNotIn("cc-task-brief-l3b.md", result.stdout,
                          "M0 fell back to another round's brief: %r"
@@ -313,25 +320,30 @@ class CrossRepoCardTest(unittest.TestCase):
         only the second location has the file -- reading the repository
         path directly would report a missing brief where there is one.
         """
-        brief = doc_path("cc-task-brief-l3f.md")
+        brief = doc_path("cc-task-brief-l3h.md")
         self.assertIsNotNone(brief,
-                             "the fifth-round brief is missing: %s" % brief)
+                             "the sixth-round brief is missing: %s" % brief)
         text = brief.read_text(encoding="utf-8")
         self.assertRegex(text, r"(?m)^## 任务 M0[：: ]",
                          "the brief has no section for the M0 card")
 
-    def test_the_card_may_not_carry_a_chosen_route(self):
-        """The card must not decide which repo changes.
+    def test_the_brief_records_the_route_the_principal_picked(self):
+        """The brief must record the route, and only that one.
 
-        The route is the principal's call: it decides which repo owns
-        the machine-code rules. A brief that already picks one turns a
-        decision into a fait accompli, and the other route's work never
-        happens. The brief has to state the two routes and leave the
-        choice open.
+        This test used to assert the opposite: that the brief may not
+        name a route, because the route was the principal's call and an
+        open brief kept the decision open. The principal has since ruled
+        (4A, 2026-10-22) and the brief now states the ruling.
+
+        What still matters is that the brief names BOTH routes and marks
+        the rejected one as rejected. A brief that quietly dropped 4B
+        would leave no trace that the alternative was considered and
+        declined, and a reader could not tell the difference between
+        "4B was considered and rejected" and "4B was never on the table".
         """
-        brief = doc_path("cc-task-brief-l3f.md")
+        brief = doc_path("cc-task-brief-l3h.md")
         self.assertIsNotNone(brief,
-                             "the fifth-round brief is missing: %s" % brief)
+                             "the sixth-round brief is missing: %s" % brief)
         text = brief.read_text(encoding="utf-8")
         start = text.index("## 任务 M0")
         section = text[start:]
@@ -342,8 +354,10 @@ class CrossRepoCardTest(unittest.TestCase):
                       "the M0 section does not name the first route")
         self.assertIn("4B", section,
                       "the M0 section does not name the second route")
-        self.assertRegex(section, r"不许自己选|不许自行拍板|未拍板则本卡不启动",
-                         "the M0 section does not forbid choosing a route")
+        self.assertRegex(section, r"已选|已拍板",
+                         "the M0 section does not record the ruling")
+        self.assertRegex(section, r"已否决",
+                         "the M0 section does not mark the rejected route")
 
 
 class SessionPathTest(unittest.TestCase):
