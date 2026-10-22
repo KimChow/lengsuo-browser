@@ -42,10 +42,6 @@
       "sha256": "06d566377206c7dea6e5a9c1ceba0398cb953c311399f7ea74efdcc05b5c18c8"
     },
     {
-      "path": "patches/0010-webgl-params.patch",
-      "sha256": "aa1078b3812b6aea0bfb5998816288cfc6f90d6577d6c1215d64d485b865d2cb"
-    },
-    {
       "path": "patches/0011-lengsuo-sources.patch",
       "sha256": "898282681bcd3334ee173f4411c95f0e896aac4dfa3cf4fccf7cf6bc018b262c"
     },
