@@ -372,6 +372,31 @@ def check_history(repo: Path, terms: list[str]) -> list[str]:
     return problems
 
 
+def is_private_docs_repo(repo: Path) -> bool:
+    """这个仓是不是 docs 私有仓（GitLab `kim/lengsuo-docs-*`）。
+
+    2026-10-22 主理人裁定：docs 是私有仓 ⇒ 脱敏不强制 ⇒ 门禁不适用。
+    判据是**远端仓库名**（`lengsuo-docs-` 前缀），不是本地目录名：
+    目录名可以被改，远端名不会。
+
+    判不出来的仓（没有远端、或远端不是 docs 仓）⇒ 照常检查，
+    宁可多查一次，也不要因为判据失效而漏掉代码仓里的泄漏。
+    """
+    try:
+        remotes = run_git(repo, "remote", "-v")
+    except Exception:
+        return False
+    for line in remotes.splitlines():
+        # 形如 "origin\thttps://…/kim/lengsuo-docs-browser.git (fetch)"
+        url = line.split("\t", 1)[-1].split(" ", 1)[0]
+        name = url.rstrip("/").rsplit("/", 1)[-1]
+        if name.endswith(".git"):
+            name = name[:-4]
+        if name.startswith("lengsuo-docs-"):
+            return True
+    return False
+
+
 def main() -> int:
     parser = argparse.ArgumentParser(description="检查参考来源标识泄漏")
     parser.add_argument("--repo", default=".", help="仓库路径（默认当前目录）")
@@ -379,12 +404,24 @@ def main() -> int:
     parser.add_argument(
         "--skip-history", action="store_true", help="跳过 git 历史检查"
     )
+    parser.add_argument(
+        "--force",
+        action="store_true",
+        help="即使是 docs 私有仓也强制检查（默认按裁定跳过）",
+    )
     args = parser.parse_args()
 
     repo = Path(args.repo).resolve()
     if not (repo / ".git").exists():
         print("FAIL: %s 不是 git 仓库" % repo, file=sys.stderr)
         return 2
+
+    if not args.force and is_private_docs_repo(repo):
+        print(
+            "SKIP: %s 是 docs 私有仓 ⇒ 脱敏不强制（2026-10-22 主理人裁定），不检查。"
+            % repo.name
+        )
+        return 0
 
     terms = load_terms(args.terms)
     if not terms:

@@ -104,6 +104,54 @@ class CheckerFixture:
         self._tmp.cleanup()
 
 
+class PrivateDocsRepoTests(unittest.TestCase):
+    """A private docs repo is exempt from the desensitization rule.
+
+    Ruling of 2026-10-22: the docs repositories are private, so the
+    product names do not have to be scrubbed there. The checker must
+    therefore skip them -- but only when the *remote* says so. A local
+    directory name is not evidence: a code repo could be called "docs"
+    and would still be scanned.
+    """
+
+    def _fixture_with_remote(self, remote: str) -> pathlib.Path:
+        tmp = tempfile.TemporaryDirectory()
+        root = pathlib.Path(tmp.name)
+        subprocess.run(["git", "init", "-q", str(root)], check=True)
+        (root / "a.md").write_text("plain content\n", encoding="utf-8")
+        subprocess.run(["git", "-C", str(root), "add", "a.md"], check=True)
+        subprocess.run(
+            ["git", "-C", str(root), "remote", "add", "origin", remote],
+            check=True,
+        )
+        self.addCleanup(tmp.cleanup)
+        return root
+
+    def test_private_docs_remote_is_skipped(self) -> None:
+        root = self._fixture_with_remote(
+            "https://gitlab.example.com/kim/lengsuo-docs-browser.git"
+        )
+        proc = run_checker(root, "--skip-history")
+        self.assertEqual(proc.returncode, 0, proc.stderr)
+        self.assertIn("SKIP", proc.stdout)
+
+    def test_code_repo_is_still_checked(self) -> None:
+        """The exemption must not leak to the code repositories."""
+        root = self._fixture_with_remote(
+            "https://github.com/KimChow/lengsuo-browser.git"
+        )
+        proc = run_checker(root, "--skip-history")
+        self.assertNotIn("SKIP", proc.stdout)
+
+    def test_force_overrides_the_exemption(self) -> None:
+        """--force still checks a private docs repo, for a deliberate audit."""
+        root = self._fixture_with_remote(
+            "https://gitlab.example.com/kim/lengsuo-docs-browser.git"
+        )
+        proc = run_checker(root, "--skip-history", "--force")
+        self.assertNotIn("SKIP", proc.stdout)
+
+
 class StructuralPatternTests(unittest.TestCase):
     """The structural patterns are the last line of defence."""
 
