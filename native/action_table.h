@@ -35,10 +35,17 @@ inline constexpr char kActionCanvasSample[] = "CanvasSample";
 inline constexpr char kActionWebGLSample[] = "WebGLSample";
 inline constexpr char kActionPageEvent[] = "PageEvent";
 inline constexpr char kActionHeartbeat[] = "Heartbeat";
+inline constexpr char kActionResponseMonitor[] = "ResponseMonitor";
 
 // The field that carries the bitmap. The table checks for it by name so a
 // payload cannot smuggle one past the check under a different spelling.
 inline constexpr char kActionDataUrlField[] = "data_url";
+
+// The field that carries a response body. It is an optional field of the
+// ResponseMonitor schema: whether it is there at all is the collector's
+// decision (the rule asks for it), not the table's. The table only says the
+// field, when present, is a string.
+inline constexpr char kActionBodyField[] = "body";
 
 // The largest payload the table will look at. A payload beyond this is
 // dropped and counted rather than parsed: an unbounded payload is a way to

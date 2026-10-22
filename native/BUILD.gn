@@ -212,3 +212,47 @@ source_set("l3_envelope_session") {
   # it, it does not reach for the crypto itself.
   public_deps = [ ":l3_envelope" ]
 }
+
+# The response monitor's rules: what to watch, how much of it, and how to
+# read the configuration that says so (task T1). Pure logic - no Chromium, no
+# crypto - so it can be tested on its own.
+source_set("resp_monitor_config") {
+  sources = [
+    "resp_monitor_config.cc",
+    "resp_monitor_config.h",
+  ]
+  public_deps = [ ":kernel_pipe_json" ]
+}
+
+# The response monitor's body capture: a tee that copies the first bytes of a
+# response without touching the response (task T1).
+source_set("resp_monitor_body") {
+  sources = [
+    "resp_monitor_body.cc",
+    "resp_monitor_body.h",
+  ]
+}
+
+# The response monitor's matching and counting: which response belongs to
+# which rule, and how many times a rule may say something about one URL
+# (task T1).
+source_set("resp_monitor") {
+  sources = [
+    "resp_monitor.cc",
+    "resp_monitor.h",
+  ]
+  public_deps = [
+    ":kernel_pipe_json",
+    ":resp_monitor_config",
+  ]
+}
+
+# The response monitor's report: the JSON that goes out on the uplink
+# (task T1). It names the uplink action, so it depends on the action table.
+source_set("resp_monitor_report") {
+  sources = [
+    "resp_monitor_report.cc",
+    "resp_monitor_report.h",
+  ]
+  public_deps = [ ":action_table" ]
+}

@@ -88,6 +88,10 @@ TARGETS=(
   "profile_bundle|native/profile_bundle.cc native/kernel_pipe_json.cc"
   "l3_envelope|native/l3_envelope.cc"
   "l3_envelope_session|native/l3_envelope_session.cc native/l3_envelope.cc native/kernel_pipe_keys.cc native/kernel_pipe_frame.cc"
+  "resp_monitor_config|native/resp_monitor_config.cc native/kernel_pipe_json.cc"
+  "resp_monitor_body|native/resp_monitor_body.cc"
+  "resp_monitor|native/resp_monitor.cc native/resp_monitor_config.cc native/kernel_pipe_json.cc"
+  "resp_monitor_report|native/resp_monitor_report.cc native/action_table.cc native/kernel_pipe_json.cc"
 )
 
 FAILED=()
