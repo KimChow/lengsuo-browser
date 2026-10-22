@@ -129,6 +129,19 @@ class DispatchBriefTests(unittest.TestCase):
         self.assertNotIn("P", mapping,
                          "task P belongs to the client repo line")
 
+    def test_m0_uses_its_own_brief(self):
+        """M0 was split out of the fifth round's brief.
+
+        The machine-code brief grew past the 700-line hard limit, so M0
+        moved to its own file. If the mapping were left pointing at the
+        fifth round, M0 would read a brief that no longer contains its
+        section -- and the dispatcher's own section check would refuse
+        the card, so the round would never start.
+        """
+        mapping = _task_to_brief()
+        self.assertEqual(mapping.get("M0"), "cc-task-brief-l3h.md")
+        self.assertNotEqual(mapping.get("M0"), "cc-task-brief-l3f.md")
+
     def test_sixth_round_tasks_use_the_sixth_round_brief(self):
         """T1/T2/T3 are the sixth round (value governance + response
         monitoring + access-policy kernel base).
