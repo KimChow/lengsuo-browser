@@ -161,6 +161,17 @@ source_set("kernel_pipe") {
   deps = [ "//third_party/boringssl" ]
 }
 
+# The collection rules for the machine facts (task M0). The rules are pure:
+# given the candidates, they say which one wins. That is what makes them
+# testable without a machine, and it is why the collector that talks to the
+# device lives in integration/kernel_pipe_client.cc instead of here.
+source_set("machine_facts") {
+  sources = [
+    "machine_facts.cc",
+    "machine_facts.h",
+  ]
+}
+
 # The uplink action table: an action name and the structural validator for its
 # payload. One table, no new interface per action.
 source_set("action_table") {

@@ -16,6 +16,7 @@
 | **Q** | `docs/l3-reports/task-Q-conflicts.md` | `docs/l3-reports/task-Q.md` |
 | **N** | `docs/l3-reports/task-N-conflicts.md` | `docs/l3-reports/task-N.md` |
 | **R** | `docs/l3-reports/task-R-conflicts.md` | （本卡无卡侧报告，见 R-C） |
+| **M0** | `docs/l3-reports/task-M0-conflicts.md` | `docs/l3-reports/task-M0.md` |
 
 > `docs/` 只留本地、不入库 ⇒ 这些报告不随仓库分发，也不在 git 历史里。
 
@@ -29,6 +30,7 @@
 | N-B | 两层信封要不要合并 | 落盘 L3E1 与管道 §3.1 的信封字节序/KDF/AAD/布局全不同 |
 | R-C | 客户端侧 R 卡未交卷 | 内核侧已合入，客户端侧当时仍未交卷（后续已补，见 R-E） |
 | R-D | 内核侧 `profile_bundle` 无调用者 | 该 `source_set` 是叶子节点 ⇒ 有 19 条 gtest 但**不进 chrome 二进制** |
+| **M-A** | **客户端侧 M0 卡未交卷** | 内核侧已交卷 ⇒ **「跨仓逐字节相同」这一条尚未验证**（互验工具已就位，客户端一发布就是活守卫）|
 
 ### 🟡 待复核
 
@@ -57,6 +59,16 @@
 | N-H | `tests/test_patch_replay.py` 的 required 集合没加新路径 |
 | N-I | 补丁纪律踩坑：relock 必须在 commit **之后** |
 | R-B | 内核侧**不产出**契约 §4.5 那个 JSON 清单 —— 这是有意的，不是缺口 |
+| **M-B** | **超出允许清单的改动**（新增 4 个源文件 + 2 个 BUILD.gn + overlay + 补丁 + gtest 脚本），需追认 |
+| **M-C** | `computername` 两侧**不完全同源**（内核 `gethostname()` vs 客户端 `HOSTNAME` 环境变量→`/etc/hostname`）⇒ 容器里或不经 shell 启动时两侧会不一致 |
+| **M-D** | 基线里 3 条 `test_dispatch_logic` 用例已过期（任务书已拆到 l3h、路线已拍板 4A，用例没跟上）—— 属派卡侧，本卡只报告不改 |
+| **M-E** | `integration/kernel_pipe_client.cc` 现在 **570 行**（Q 卡时 453），超 400 软目标（未超 700 硬上限）|
+| **M-F** | 客户端侧 `collect_hddid()` 有一个内核侧**没有**的 `SYSTEMDRIVE`/`DISKNUMBER` 兜底 ⇒ 扫不到序列号的机器上两侧必然不同，且兜底采的是盘符 |
+| **M-G** | **Windows 多盘选哪一块没写**（R1 只覆盖了 POSIX）：内核只读 `PhysicalDrive0`，客户端若扫 `PhysicalDriveN` 再排序，两侧会选到不同的盘 |
+| **M-H** | `cpuid` 的 `__cpuid` 折叠必须与 `base::CPU` 逐字节相同，而**取值规则向量组证不了**（表里是硬编码假值）⇒ 需一次真机交叉核对 |
+| **M-I** | `os` 在三平台之外两侧不一致（内核 `""` vs 客户端 `std::env::consts::OS` = `"freebsd"`）|
+| **M-J** | **macOS 的 `hddid` 格客户端任务书里根本没有**；内核侧无可移植来源 ⇒ 只能是空串（另找 `IOKit` 来源是新卡的量级）|
+| **M-L** | `run_l3_gtest.sh` 的仓库路径参数**必须用绝对路径**（传 `.` 会让 `l3_bootstrap`/`l3_provisioning` 因软链环编译失败）—— 既有行为，基线同样挂 |
 
 ### ✅ 已裁定（留档，不必再议）
 
@@ -68,6 +80,7 @@
 | R-A | 内核侧已合入，闸门自复跑全绿 | 见 `docs/l3-reports/task-R-conflicts.md` R-A |
 | R-E | 真编译 + accept 全绿，客户端侧也已合入 | 同上 R-E |
 | R-F | R 的跨仓向量已成常驻守卫 | 同上 R-F |
+| M-K | 机器码取值的两条细则已核对无误：POSIX 的排序规则两侧都是逐字节序；`os` 不带版本号 | 见 `docs/l3-reports/task-M0-conflicts.md` M-K |
 
 ## 已并入主线的裁定（不在本文件）
 
