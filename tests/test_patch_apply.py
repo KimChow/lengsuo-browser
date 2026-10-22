@@ -25,6 +25,38 @@ CREATE_PATCH = """--- /dev/null
 +new fixture file
 """
 
+# Adds a deps entry to a build file. The next patch quotes that entry.
+ADD_DEP_PATCH = """--- a/content/renderer.gni
++++ b/content/renderer.gni
+@@ -1,3 +1,4 @@
+ deps = [
++  "//lengsuo/native:canvas_noise",
+   "//base",
+ ]
+"""
+
+# Depends on ADD_DEP_PATCH: its context is the line that patch inserts, which
+# is the shape 0016-browser-wiring has against 0007-canvas-readback.
+DEPEND_ON_ADDED_DEP_PATCH = """--- a/content/renderer.gni
++++ b/content/renderer.gni
+@@ -1,4 +1,5 @@
+ deps = [
+   "//lengsuo/native:canvas_noise",
+   "//base",
++  "//lengsuo/native:l3_runtime",
+ ]
+"""
+
+# Quotes context that no earlier patch creates, so it always refuses.
+IMPOSSIBLE_PATCH = """--- a/content/renderer.gni
++++ b/content/renderer.gni
+@@ -1,3 +1,4 @@
+ deps = [
+   "//base",
++  "//lengsuo/native:l3_runtime",
+ ]
+"""
+
 
 @unittest.skipUnless(os.name == "posix", "Git apply fixtures run on POSIX")
 class PatchApplyTests(unittest.TestCase):
@@ -111,6 +143,94 @@ class PatchApplyTests(unittest.TestCase):
                          ["already-applied", "already-applied"])
         planned = self.run_tool()
         self.assertEqual(planned["status"], "applied")
+
+    def test_a_patch_may_quote_a_line_an_earlier_patch_added(self):
+        """The series is cumulative, so the second patch may depend on the first.
+
+        The real series depends on itself: 0016-browser-wiring quotes the
+        canvas_noise dep that 0007-canvas-readback adds to
+        content/renderer/BUILD.gn. A run that checks each patch against the
+        pristine tree rejects 0016 on a clean checkout, which is exactly the
+        state a fresh build starts from -- so the whole build stops before
+        ninja ever runs.
+
+        This fixture reproduces the shape: 0001 adds a deps line, 0002 quotes
+        that line as its context.
+        """
+        self.write_patch("0001-fixture-modify.patch", ADD_DEP_PATCH)
+        self.write_patch("0002-fixture-create.patch", DEPEND_ON_ADDED_DEP_PATCH)
+        self.lock["patches"] = [
+            {"path": "patches/0001-fixture-modify.patch",
+             "sha256": self.digest("0001-fixture-modify.patch")},
+            {"path": "patches/0002-fixture-create.patch",
+             "sha256": self.digest("0002-fixture-create.patch")},
+        ]
+        (self.source / "content").mkdir()
+        (self.source / "content/renderer.gni").write_text(
+            "deps = [\n  \"//base\",\n]\n")
+        self.git("add", ".")
+        self.git("commit", "-qm", "fixture renderer gni")
+        self.git("tag", "-f", "155.0.1.2")
+        self.lock["chromium_revision"] = self.git("rev-parse", "HEAD").strip()
+        self.lock["deps_sha256"] = hashlib.sha256(
+            (self.source / "DEPS").read_bytes()).hexdigest()
+        self.lock["patches"][0]["sha256"] = self.digest(
+            "0001-fixture-modify.patch")
+        self.lock["patches"][1]["sha256"] = self.digest(
+            "0002-fixture-create.patch")
+
+        planned = self.run_tool()
+        self.assertEqual(planned["status"], "planned", planned.get("error"))
+        self.assertEqual([p["action"] for p in planned["patches"]],
+                         ["check-passed", "check-passed"])
+        # A plan-only run must leave the tree as it found it.
+        self.assertEqual((self.source / "content/renderer.gni").read_text(),
+                         "deps = [\n  \"//base\",\n]\n")
+
+        applied = self.run_tool(True)
+        self.assertEqual(applied["status"], "applied", applied.get("error"))
+        self.assertEqual((self.source / "content/renderer.gni").read_text(),
+                         "deps = [\n  \"//lengsuo/native:canvas_noise\",\n"
+                         "  \"//base\",\n  \"//lengsuo/native:l3_runtime\",\n]\n")
+
+    def test_a_series_that_stops_early_leaves_no_edits_behind(self):
+        """A patch that refuses must not leave the earlier ones applied.
+
+        patch_apply applies the series to find out whether it applies, so a
+        patch that fails half way through has already edited the tree. Those
+        edits have to be undone, or the next stage builds from a tree that is
+        neither pristine nor the reviewed series.
+        """
+        self.write_patch("0001-fixture-modify.patch", ADD_DEP_PATCH)
+        self.write_patch("0002-fixture-create.patch", IMPOSSIBLE_PATCH)
+        self.lock["patches"] = [
+            {"path": "patches/0001-fixture-modify.patch",
+             "sha256": self.digest("0001-fixture-modify.patch")},
+            {"path": "patches/0002-fixture-create.patch",
+             "sha256": self.digest("0002-fixture-create.patch")},
+        ]
+        (self.source / "content").mkdir()
+        (self.source / "content/renderer.gni").write_text(
+            "deps = [\n  \"//base\",\n]\n")
+        self.git("add", ".")
+        self.git("commit", "-qm", "fixture renderer gni")
+        self.git("tag", "-f", "155.0.1.2")
+
+        self.lock["chromium_revision"] = self.git("rev-parse", "HEAD").strip()
+        self.lock["deps_sha256"] = hashlib.sha256(
+            (self.source / "DEPS").read_bytes()).hexdigest()
+        self.lock["patches"] = [
+            {"path": "patches/0001-fixture-modify.patch",
+             "sha256": self.digest("0001-fixture-modify.patch")},
+            {"path": "patches/0002-fixture-create.patch",
+             "sha256": self.digest("0002-fixture-create.patch")},
+        ]
+
+        result = self.run_tool(True)
+        self.assertEqual(result["status"], "failed")
+        self.assertIn("0002-fixture-create.patch", result["error"])
+        self.assertEqual((self.source / "content/renderer.gni").read_text(),
+                         "deps = [\n  \"//base\",\n]\n")
 
     def test_empty_patch_list_rejected(self):
         self.lock["patches"] = []

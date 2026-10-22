@@ -56,6 +56,33 @@ def _apply_stream(source, data, reverse=False, check_only=False):
     return result.returncode
 
 
+def _roll_back(source, untracked_before):
+    """Return the tree to HEAD after a partially applied series.
+
+    A plan-only run has to apply the series to find out whether it applies,
+    and a failed series stops part way through. Both leave edits behind that
+    the caller did not ask for, so both are undone here.
+
+    Two kinds of edit have to be undone, not one: the series edits tracked
+    files, and it also creates new files (0007 onward create the lengsuo
+    overlay). `git checkout -- .` restores the first kind only, so the second
+    kind is undone by name -- and only the names that were not already
+    untracked before the series ran, so nothing the caller left lying around
+    is ever removed.
+    """
+    _git(source, "checkout", "--", ".")
+    created = _untracked_paths(source) - untracked_before
+    if created:
+        _git(source, "clean", "-fdq", "--", *sorted(created))
+
+
+def _untracked_paths(source):
+    """The untracked paths in the tree, relative to its root."""
+    out = _git(source, "ls-files", "--others", "--exclude-standard", "-z")
+    return {chunk for chunk in out.decode("utf-8", "surrogateescape").split("\0")
+            if chunk}
+
+
 def execute(source, repository, lock, apply=False):
     receipt = {"schema_version": 1, "mode": "apply" if apply else "plan",
                "status": "failed", "patches": [],
@@ -92,21 +119,36 @@ def execute(source, repository, lock, apply=False):
                 or _git(source, "diff", "--cached", "--name-only").decode().strip()):
             raise PatchApplyError(
                 "Source tree must be clean of tracked changes before applying patches")
-        for name in declared:
-            if _apply_stream(source, _read_patch(repository, name),
-                             check_only=True) != 0:
-                raise PatchApplyError(f"Patch does not apply cleanly: {name}")
-        if apply:
+        # The series is cumulative: a later patch may quote a line an earlier
+        # one added, so each patch has to be checked against the tree as the
+        # earlier ones left it. Checking every patch against the pristine tree
+        # instead rejects any dependent series -- 0016 quotes the canvas_noise
+        # dep that 0007 adds to content/renderer/BUILD.gn, so it can never pass
+        # a per-patch check on a clean tree.
+        #
+        # So the series is applied for real, and rolled back if any patch
+        # refuses. A plan-only run still has to touch the tree to find out
+        # whether the series applies, which is why it rolls back too: the
+        # caller gets the same tree back either way.
+        applied = []
+        untracked_before = _untracked_paths(source)
+        try:
             for name in declared:
                 if _apply_stream(source, _read_patch(repository, name)) != 0:
-                    raise PatchApplyError(f"Patch application failed: {name}")
-                receipt["patches"].append({"path": f"patches/{name}",
-                                           "action": "applied"})
+                    raise PatchApplyError(
+                        f"Patch does not apply cleanly: {name}")
+                applied.append(name)
+        except PatchApplyError:
+            _roll_back(source, untracked_before)
+            raise
+        receipt["patches"] = [
+            {"path": f"patches/{name}",
+             "action": "applied" if apply else "check-passed"}
+            for name in applied]
+        if apply:
             receipt["upstream_tree_modified"] = True
         else:
-            receipt["patches"] = [{"path": f"patches/{name}",
-                                   "action": "check-passed"}
-                                  for name in declared]
+            _roll_back(source, untracked_before)
         receipt["status"] = "applied" if apply else "planned"
     except (PatchApplyError, BaselineError, OSError, ValueError,
             UnicodeError) as error:
