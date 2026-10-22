@@ -31,7 +31,7 @@
     },
     {
       "path": "patches/0008-fp-overrides.patch",
-      "sha256": "f09c7a5155d5b9d29d93e9382015931fc34d97cda40da00bea9c49940ea38180"
+      "sha256": "6d16be9698e9015538920bac71814f986ca8bb98a04677a867d93f6eb51d76d9"
     },
     {
       "path": "patches/0008-profile-timezone.patch",
