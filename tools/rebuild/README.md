@@ -12,7 +12,11 @@ tools/rebuild/build_chrome.sh all
 ```
 
 环境变量：`LENGSUO_ROOT`（默认 `/home/ubuntu/lengsuo-browser-dev`）、
-`LENGSUO_PROXY`（默认 `http://127.0.0.1:18080`）。
+`LENGSUO_PROXY`（默认 `http://192.168.1.151:7897`，即本机 Clash）。
+
+> ⛔ `LENGSUO_PROXY` **不得**指向 `18080`。18080 是 LLM 网关
+> （codex-as-api），把它当 HTTP 代理会让本 shell 里启动的 claude /
+> Claude Agent SDK 全部 500。两个脚本都有硬闸，指向 18080 直接 `exit 2`。
 
 ## 基线
 
@@ -23,12 +27,48 @@ HEAD 不等于该 revision 的树上动手。
 ## 网络
 
 该机没有直连 `chromium.googlesource.com` 与 `storage.googleapis.com` 的路由
-（TLS 被中断），必须走代理。当前做法是 SSH 反向隧道，把本机 Clash 的 7897
-映射到目标机 127.0.0.1:18080：
+（TLS 被中断），必须走代理。出网代理用本机 Clash：
 
 ```bash
-ssh -N -R 18080:127.0.0.1:7897 <host>
+# 47 上已配好 git global，二者一致
+git config --global http.proxy http://192.168.1.151:7897
 ```
+
+代理**逐条指定**，不导出到脚本顶层：
+
+- `git -c http.proxy="$PROXY" clone/fetch`（拉 googlesource）
+- `curl -x "$PROXY"`（探活）
+- `git -c http.proxy= -c https.proxy=`（显式置空，走直连的 github.com）
+
+### ⛔ 为什么不能 `export http_proxy=...`
+
+代理 env 一旦 export 到脚本顶层，**本 shell 里之后启动的任何进程都会继承**，
+包括 claude 与 Claude Agent SDK。它们会把 `ANTHROPIC_BASE_URL` 当成要发给代理的
+绝对 URL，按 RFC 9112 的 absolute-form 写请求行：
+
+```
+POST http://127.0.0.1:18080/v1/messages?beta=true HTTP/1.1
+```
+
+网关只认 origin-form（`POST /v1/messages`），absolute-form 会落到 codex 兜底
+分支，`codexUrl()` 拼出 `http://127.0.0.1:<port>http://127.0.0.1:18080/...`
+⇒ `ERR_INVALID_URL` ⇒ 客户端收到 **500 `Invalid URL`**。
+
+网关日志里会看到 `http://localhosthttp//127.0.0.1:18080/...` —— 那是网关日志
+前缀 `http://localhost` 与 absolute-form URL 拼接后的**显示假象**，不是配置被写坏；
+真正的错误信息是 `Invalid URL`。
+
+所以脚本用 `with_proxy()` 把代理变量**收在单个子 shell 内**：
+
+```bash
+with_proxy() { http_proxy="$PROXY" https_proxy="$PROXY" "$@"; }
+```
+
+父 shell 与之后的命令都不受影响。
+
+> 旧做法是 SSH 反向隧道 `ssh -N -R 18080:127.0.0.1:7897 <host>`，把 18080
+> 兼作隧道端口与代理端口。这条路已废弃：**18080 现在是 LLM 网关端口**，
+> 隧道一旦与网关同机就必然撞车。
 
 `github.com` 可直连，所以 recipe 仓的拉取刻意绕过代理。
 

@@ -24,10 +24,33 @@ REV=0e66b94549a8bd85f03fbdf189b752d6e7b63c32
 SRC_URL=https://chromium.googlesource.com/chromium/src.git
 DEPOT_URL=https://chromium.googlesource.com/chromium/tools/depot_tools.git
 
-# git and gclient both honour these; the tunnel is the only route to
-# googlesource from this host, so fail fast instead of silently going direct.
-PROXY=${LENGSUO_PROXY:-http://127.0.0.1:18080}
-export http_proxy=$PROXY https_proxy=$PROXY
+# 代理只给「确实需要出网的那几条命令」用，**不导出 http_proxy/https_proxy**。
+#
+# ⛔ 绝不能把 LLM 网关端口（18080）当代理：本机 18080 是 codex-as-api 网关，
+#    一旦 export 出去，本 shell 里启动的 claude / Claude Agent SDK 会把它当
+#    HTTP 代理，按 RFC 9112 的 absolute-form 发请求行（整条 URL 放进 request
+#    line）。网关不认这种形式 ⇒ 落到 codex 兜底分支 ⇒ codexUrl() 拼出
+#    `http://127.0.0.1:<port>http://127.0.0.1:18080/...` ⇒ ERR_INVALID_URL ⇒
+#    客户端收到 500 Invalid URL。表现是「网关日志里出现
+#    http://localhosthttp//127.0.0.1:18080」——那是网关日志前缀
+#    `http://localhost` 与 absolute-form URL 拼接后的显示假象，不是配置被写坏。
+#
+# 逐条指定代理（git -c http.proxy= / curl -x）即可出网，且不污染任何子进程
+# 环境变量。47 的 git global 已配 http.proxy=http://192.168.1.151:7897，
+# 与此默认值一致。
+PROXY=${LENGSUO_PROXY:-http://192.168.1.151:7897}
+
+# ⛔ 硬闸：代理**不得**指向 LLM 网关端口。18080 上是 codex-as-api 网关，
+#    把它当 HTTP 代理会让本 shell 里启动的 claude 全部 500（见上）。
+#    与其等到几百条请求失败后才从网关日志里倒推，不如在这里直接拒绝启动。
+case "$PROXY" in
+    *:18080|*:18080/*|*://127.0.0.1:18080*|*://localhost:18080*)
+        echo "FATAL: PROXY=$PROXY 指向 LLM 网关端口 18080，会导致 claude 全部 500。" >&2
+        echo "       出网代理请用 Clash（192.168.1.151:7897）或自建隧道端口，勿用 18080。" >&2
+        exit 2
+        ;;
+esac
+
 export GIT_TERMINAL_PROMPT=0
 export DEPOT_TOOLS_UPDATE=0
 export GIT_CONFIG_COUNT=3
@@ -39,6 +62,16 @@ mkdir -p "$REVIEWS" "$ROOT"
 exec >>"$LOG" 2>&1
 
 say() { echo "[$(date -u +%H:%M:%S)] $*"; }
+
+# 在**当前 shell 的子进程内**临时注入代理变量，然后执行后面的命令。
+# 作用域只覆盖这条命令及其子进程，父 shell 与之后的任何命令都不受影响。
+#
+# ⚠ 这是本脚本唯一允许出现代理 env 的地方。绝不能 `export http_proxy=...`
+#   到脚本顶层：那样本 shell 里之后启动的 claude / Claude Agent SDK 会继承，
+#   把 18080（LLM 网关）当 HTTP 代理 ⇒ absolute-form 请求行 ⇒ 网关 500。
+with_proxy() {
+    http_proxy="$PROXY" https_proxy="$PROXY" "$@"
+}
 
 receipt_ok() { [ -f "$REVIEWS/$1.exit.json" ] && grep -q '"exit_code": 0' "$REVIEWS/$1.exit.json" 2>/dev/null; }
 receipt() { printf '{"exit_code": %s, "stage": "%s", "finished": %s}\n' "$2" "$1" "$(date +%s)" > "$REVIEWS/$1.exit.json"; }
@@ -134,7 +167,13 @@ EOF
     # bootstrap_python3, which the gn wrapper later needs. It also has to run
     # from $ROOT, where .gclient lives — running elsewhere reports
     # "client not configured".
-    ( cd "$ROOT" && PATH="$DEPS:$PATH" "$DEPS/gclient" sync \
+    #
+    # ⚠ 代理**只在这个子 shell 里**生效（with_proxy）：gclient 自己不发 http，
+    #   是它派生的 git 子进程要出网，所以必须用 env 传代理，不能只靠
+    #   `git -c http.proxy=`。而代理 env 一旦 export 到父 shell，本 shell 里
+    #   之后启动的 claude / Claude Agent SDK 就会继承它 ⇒ 把 18080 当代理 ⇒
+    #   网关 500 Invalid URL。所以作用域必须收死在子 shell 内。
+    ( cd "$ROOT" && PATH="$DEPS:$PATH" with_proxy "$DEPS/gclient" sync \
         --nohooks --noprehooks --no-history --jobs 4 \
         --revision "src@$REV" \
         --output-json "$REVIEWS/chromium-deps-solutions.json" )
@@ -149,7 +188,7 @@ stage_hooks() {
     if receipt_ok chromium_hooks; then say "already ran"; return 0; fi
     # Same as sync: gclient resolves .gclient from the working directory, and
     # runhooks additionally needs the src solution it was configured with.
-    ( cd "$ROOT" && PATH="$DEPS:$PATH" "$DEPS/gclient" runhooks )
+    ( cd "$ROOT" && PATH="$DEPS:$PATH" with_proxy "$DEPS/gclient" runhooks )
     local rc=$?
     receipt chromium_hooks $rc
     say "hooks rc=$rc"
