@@ -36,6 +36,7 @@ transcription slip would enter -- and a slip there looks exactly like a
 protocol disagreement.
 """
 import importlib.util
+import hashlib
 import os
 import pathlib
 import tempfile
@@ -238,3 +239,101 @@ class ProfileConfigBundleVectorTest(unittest.TestCase):
         payload = tool.find_kernel_profile_payload(self.kernel)
         self.assertNotIn("key", payload.lower())
         self.assertNotIn("data_url", payload.lower())
+
+
+class MachineCodeVectorTest(unittest.TestCase):
+    """The machine-code derivation must be guarded across the two repos.
+
+    Why this exists
+    ---------------
+    The wire contract pins three derived values: `machine_code`, `k_machine`
+    and `session_key`. Both repos hardcode all three and assert that their
+    own derivation produces them -- the kernel in
+    `native/kernel_pipe_keys_test.cc`, the client in
+    `crates/.../kernel_pipe/tests.rs`.
+
+    Each side checking itself is not enough, and that is the trap task R
+    fell into with the ConfigBundle payload: two copies of one constant,
+    each asserted only against its own output, with nothing comparing the
+    copies. Change the JSON key order on one side and both sides stay
+    green while the two sides no longer agree on the wire.
+
+    So the check below compares the two sides' literals directly, and the
+    contract's own text is the third side of the comparison: a value that
+    drifts in one repo is caught even if the other two still agree with
+    each other.
+    """
+
+    def setUp(self):
+        self.kernel = ROOT
+        self.client = pathlib.Path(
+            os.environ.get("LENGSUO_DESKTOP_REPO",
+                            "/home/ubuntu/lengsuo-desktop-dev/repo"))
+
+    def test_the_kernel_side_ships_the_machine_code_constants(self):
+        """The kernel's copy of the three values must be findable."""
+        values = tool.find_kernel_machine_code(self.kernel)
+        for name in ("machine_code", "k_machine", "session_key"):
+            self.assertIn(name, values)
+            self.assertEqual(len(values[name]), 64, name)
+
+    def test_the_client_side_ships_the_machine_code_constants(self):
+        """The client must hardcode the identical values."""
+        client = self.client / tool.CLIENT_REL
+        if not client.is_file():
+            self.skipTest("the client repo is not available on this host")
+        values = tool.rust_machine_code(client.read_text(encoding="utf-8"))
+        for name in ("machine_code", "k_machine", "session_key"):
+            self.assertIn(name, values)
+            self.assertEqual(len(values[name]), 64, name)
+
+    def test_the_two_sides_agree_byte_for_byte(self):
+        """The whole point: the two repos must derive the same bytes."""
+        client = self.client / tool.CLIENT_REL
+        if not client.is_file():
+            self.skipTest("the client repo is not available on this host")
+        kernel_values = tool.find_kernel_machine_code(self.kernel)
+        client_values = tool.rust_machine_code(
+            client.read_text(encoding="utf-8"))
+        for name in ("machine_code", "k_machine", "session_key"):
+            self.assertEqual(kernel_values[name], client_values[name],
+                             "the two repos' %s differs" % name)
+
+    def test_the_contract_pins_the_same_values(self):
+        """The contract is the third side: both repos must match it."""
+        contract = tool.contract_path(self.kernel)
+        if not contract.is_file():
+            self.skipTest("the wire contract is not available on this host")
+        text = contract.read_text(encoding="utf-8")
+        values = tool.contract_machine_code(text)
+        kernel_values = tool.find_kernel_machine_code(self.kernel)
+        for name in ("machine_code", "k_machine", "session_key"):
+            self.assertEqual(values[name], kernel_values[name],
+                             "the contract's %s differs from the kernel's"
+                             % name)
+
+    def test_a_missing_side_is_reported(self):
+        """A constant that cannot be read must raise, not silently pass."""
+        with self.assertRaises(tool.VectorError):
+            tool.rust_machine_code("pub(crate) const NOTHING: &str = \"\";")
+
+    def test_the_machine_code_is_derived_from_the_pinned_json(self):
+        """The values must follow from the contract's JSON, not be magic.
+
+        The contract derives `machine_code` from a fixed JSON, and
+        `k_machine` from that digest's ASCII bytes. Recomputing them here
+        catches a constant that was edited on one side only, which the
+        literal comparison alone would report as a mismatch without
+        saying which side moved.
+        """
+        contract = tool.contract_path(self.kernel)
+        if not contract.is_file():
+            self.skipTest("the wire contract is not available on this host")
+        values = tool.contract_machine_code(
+            contract.read_text(encoding="utf-8"))
+        machine_json = tool.contract_machine_json(
+            contract.read_text(encoding="utf-8"))
+        digest = hashlib.sha256(machine_json.encode("utf-16-le")).hexdigest()
+        self.assertEqual(values["machine_code"], digest)
+        k_machine = hashlib.sha256(digest.encode("ascii")).hexdigest()
+        self.assertEqual(values["k_machine"], k_machine)

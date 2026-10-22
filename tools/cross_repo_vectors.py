@@ -280,6 +280,136 @@ def find_kernel_profile_payload(kernel: pathlib.Path) -> str:
     return cpp_profile_payload(path.read_text(encoding="utf-8"))
 
 
+# The three derived values the wire contract pins, and the name each side
+# gives the constant that holds it.
+#
+# These are the values the handshake is keyed on: the machine code fixes the
+# JSON shape and the key order, `k_machine` is the digest of that code's
+# ASCII bytes, and the session key is the HKDF output. A change to any of
+# them on one side only is a silent wire break, and each side's own test
+# cannot see it -- each asserts its own output against its own copy of the
+# constant, so the two copies drift apart while both stay green.
+#
+# The kernel side spells them `kMachineCode`, `kMachineKeyHex` and
+# `kSessionKeyHex`; the client spells them `MACHINE_CODE`, `K_MACHINE_HEX`
+# and `SESSION_KEY_HEX`. The names are listed here so the readers below
+# stay independent of either spelling.
+MACHINE_CODE_NAMES = (
+    ("machine_code", "kMachineCode", "MACHINE_CODE"),
+    ("k_machine", "kMachineKeyHex", "K_MACHINE_HEX"),
+    ("session_key", "kSessionKeyHex", "SESSION_KEY_HEX"),
+)
+
+
+def _kernel_machine_code(text: str) -> dict[str, str]:
+    """Extract the kernel side's three derived values.
+
+    The kernel declares them as `char[]` constants, the same way it
+    declares the envelope payload, and the declaration has taken both the
+    `const char` and the `inline constexpr char` forms. The storage class
+    and the `constexpr` are therefore both optional here.
+    """
+    out: dict[str, str] = {}
+    for name, kernel_name, _ in MACHINE_CODE_NAMES:
+        match = re.search(
+            r"(?:inline\s+)?(?:constexpr|const)\s+char\s+%s\[\]\s*=\s*"
+            r'"([0-9a-fA-F]+)";' % kernel_name, text)
+        if not match:
+            raise VectorError("the kernel test lost the %r literal"
+                              % kernel_name)
+        out[name] = match.group(1).lower()
+    return out
+
+
+def find_kernel_machine_code(kernel: pathlib.Path) -> dict[str, str]:
+    """Read the kernel side's three derived values.
+
+    The literals live in the shared test header, next to the envelope
+    payload, so the lookup scans the same candidates.
+    """
+    paths = [kernel / rel for rel in KERNEL_CANDIDATES]
+    for path in paths:
+        if not path.is_file():
+            continue
+        try:
+            return _kernel_machine_code(path.read_text(encoding="utf-8"))
+        except VectorError:
+            continue
+    raise VectorError(
+        "no kernel file among %s carries the machine-code literals"
+        % ", ".join(str(p) for p in paths))
+
+
+def rust_machine_code(text: str) -> dict[str, str]:
+    """Extract the client side's three derived values.
+
+    The client declares them as `&str` constants, each on its own line
+    with the value in a plain string literal.
+    """
+    out: dict[str, str] = {}
+    for name, _, client_name in MACHINE_CODE_NAMES:
+        match = re.search(
+            r'const\s+%s\s*:\s*&str\s*=\s*"([0-9a-fA-F]+)";' % client_name,
+            text)
+        if not match:
+            raise VectorError("the client lost the %r constant" % client_name)
+        out[name] = match.group(1).lower()
+    return out
+
+
+def contract_machine_code(text: str) -> dict[str, str]:
+    """Extract the three derived values from the contract document.
+
+    The contract states each value as a label line followed by a line that
+    carries the value after an equals sign:
+
+        machine_code = SHA256(UTF-16LE(上述 JSON)) 的十六进制小写
+                     = 216feaf8...
+
+    so the value is found by reading the line after the label, not by
+    matching the label and the value in one pattern. The values are read
+    from the derivation section only, so a value that happens to appear in
+    the prose elsewhere cannot be mistaken for the pinned one.
+    """
+    if "密钥派生固定测试向量" not in text:
+        raise VectorError("the contract lost its derivation-vector section")
+    body = text.split("密钥派生固定测试向量", 1)[1]
+    lines = body.splitlines()
+    out: dict[str, str] = {}
+    for name in ("machine_code", "k_machine", "session_key"):
+        start = next((i for i, line in enumerate(lines)
+                      if line.strip().startswith(name)), None)
+        if start is None:
+            raise VectorError("the contract lost the %r value" % name)
+        value = None
+        for line in lines[start + 1:start + 3]:
+            match = re.fullmatch(r"\s*=\s*([0-9a-fA-F]{64})\s*", line)
+            if match:
+                value = match.group(1).lower()
+                break
+        if value is None:
+            raise VectorError("the contract lost the %r value" % name)
+        out[name] = value
+    return out
+
+
+def contract_machine_json(text: str) -> str:
+    """Extract the machine-code JSON the contract derives from.
+
+    The JSON is the one line in the derivation section that starts with a
+    brace, so it is read as a whole line rather than parsed out of the
+    prose around it.
+    """
+    if "密钥派生固定测试向量" not in text:
+        raise VectorError("the contract lost its derivation-vector section")
+    body = text.split("密钥派生固定测试向量", 1)[1]
+    for line in body.splitlines():
+        stripped = line.strip()
+        if stripped.startswith("{") and stripped.endswith("}"):
+            return stripped
+    raise VectorError("the contract lost the machine-code JSON")
+
+
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--kernel", required=True,
@@ -369,10 +499,41 @@ def main(argv: list[str] | None = None) -> int:
             print("    %-9s %s" % ("client", client_profile))
             print("    %-9s %s" % ("kernel", kernel_profile))
 
+    # The three derived values the handshake is keyed on. Both repos
+    # hardcode them and each asserts its own output against its own copy,
+    # so nothing catches a copy that drifts -- which is the trap task R
+    # fell into with the ConfigBundle payload. The contract is the third
+    # side of the comparison: a value that moves in one repo shows up even
+    # when the other two still agree with each other.
+    #
+    # A missing side is reported, not skipped: an absent check would look
+    # exactly like a passing one.
+    print()
+    try:
+        kernel_machine = find_kernel_machine_code(kernel)
+        client_machine = rust_machine_code(
+            (client / CLIENT_REL).read_text(encoding="utf-8"))
+        contract_machine = contract_machine_code(
+            contract_path(kernel).read_text(encoding="utf-8"))
+    except (OSError, VectorError) as error:
+        print("machine code           %s" % error)
+        ok = False
+    else:
+        for name, _, _ in MACHINE_CODE_NAMES:
+            values = (contract_machine[name], client_machine[name],
+                      kernel_machine[name])
+            agree = len(set(values)) == 1
+            print("%-22s %-18s %s" % (name, "64 B",
+                                      "OK" if agree else "MISMATCH"))
+            if not agree:
+                ok = False
+                for label, value in zip(("contract", "client", "kernel"),
+                                        values):
+                    print("    %-9s %s" % (label, value))
+
     print()
     print("cross-repo vectors agree:" , "YES" if ok else "NO")
     return 0 if ok else 1
-
 
 if __name__ == "__main__":
     sys.exit(main())
