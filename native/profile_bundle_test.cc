@@ -74,23 +74,42 @@ TEST(ProfileSyncConfig, DefaultCarriesTheRulingLists) {
 }
 
 TEST(MatchGlob, MatchesThePatternsTheListsUse) {
+  // ⭐ These are the contract's glob fixed vectors (section 4.6.3),
+  // copied one for one. The client repo asserts the same list in
+  // `kernel_pipe/profile_rules.rs`, and
+  // `tools/cross_repo_rules.py` compares the two sides against the
+  // contract, so a vector dropped or added on one side is caught.
   EXPECT_TRUE(MatchGlob("*Local Storage*", "Default/Local Storage/leveldb/0001.log"));
   EXPECT_TRUE(MatchGlob("*Local Storage*", "Local Storage"));
   EXPECT_TRUE(MatchGlob("*History*", "Default/History"));
+  // The one vector that exposes a case-insensitive matcher. Without
+  // it a matcher that stopped comparing case would keep every one of
+  // these assertions green while computing a different manifest from
+  // the client's.
+  EXPECT_FALSE(MatchGlob("*History*", "Default/history"));
   EXPECT_TRUE(MatchGlob("*Extension State*", "Default/Extension State/1.dat"));
   EXPECT_TRUE(MatchGlob("*Cache*", "Default/Cache/data_0"));
+  // The two floor patterns, so the floor itself is pinned by a vector
+  // and not only by the code that reads it.
+  EXPECT_TRUE(MatchGlob("*Cookies*", "Default/Cookies"));
+  EXPECT_TRUE(MatchGlob("*Network*", "Default/Network/Cookies"));
   // A pattern without a star matches only itself.
   EXPECT_TRUE(MatchGlob("History", "History"));
   EXPECT_FALSE(MatchGlob("History", "Default/History"));
   // '?' matches exactly one byte.
   EXPECT_TRUE(MatchGlob("file?.dat", "file1.dat"));
   EXPECT_FALSE(MatchGlob("file?.dat", "file12.dat"));
+  EXPECT_TRUE(MatchGlob("a?c", "abc"));
+  EXPECT_FALSE(MatchGlob("a?c", "ac"));
   // An empty pattern matches only an empty text.
   EXPECT_TRUE(MatchGlob("", ""));
   EXPECT_FALSE(MatchGlob("", "x"));
   // '*' matches any run of bytes, the empty one included.
   EXPECT_TRUE(MatchGlob("*", ""));
   EXPECT_TRUE(MatchGlob("*", "anything"));
+  // '*' spans '/', so it eats a byte run and not a path segment.
+  EXPECT_TRUE(MatchGlob("*.log", "a/b.log"));
+  EXPECT_TRUE(MatchGlob("*History*", "Default/History/x"));
 }
 
 TEST(CollectProfileBundle, DefaultSetContainsHistory) {

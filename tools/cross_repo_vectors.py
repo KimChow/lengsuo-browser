@@ -153,6 +153,20 @@ def _frame_tool():
     return module
 
 
+def _rules_tool():
+    """Load the rules-layer check, which lives next to this file.
+
+    Same reason as the frame layer: this file is already near the size
+    limit, and the module is loaded by path because `tools/` is not a
+    package and this file is loaded by path from the tests.
+    """
+    path = pathlib.Path(__file__).resolve().parent / "cross_repo_rules.py"
+    spec = importlib.util.spec_from_file_location("cross_repo_rules", path)
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    return module
+
+
 def hex_tokens(text: str) -> str:
     """Return the hex blob in `text` as lowercase byte pairs.
 
@@ -587,6 +601,34 @@ def main(argv: list[str] | None = None) -> int:
         ok = False
     else:
         for check in frame_checks:
+            print("%-22s %-18s %s" % (check.label, "",
+                                      "OK" if check.ok else "MISMATCH"))
+            if not check.ok:
+                ok = False
+                for name, value in check.values.items():
+                    print("    %-9s %s" % (name, value))
+
+    # The profile sync rules layer: the config section name, the package
+    # ceiling, the two patterns that never leave the machine, and the
+    # glob fixed vectors. Both repos hardcode their own copy of each --
+    # the kernel in `native/profile_bundle.*`, the client in
+    # `.../kernel_pipe/profile_rules.rs` -- and each side only checks its
+    # own copy against its own output. The same trap, one layer further
+    # down, and this layer is the privacy floor: "Cookies and Network
+    # Cache never leave the machine" is two separate promises if the two
+    # copies of the floor patterns differ.
+    #
+    # A missing side is reported, not skipped: an absent check looks
+    # exactly like a passing one.
+    print()
+    rules_tool = _rules_tool()
+    try:
+        rules_checks = rules_tool.compare_rules(kernel, client)
+    except (OSError, rules_tool.RuleVectorError) as error:
+        print("rules layer            %s" % error)
+        ok = False
+    else:
+        for check in rules_checks:
             print("%-22s %-18s %s" % (check.label, "",
                                       "OK" if check.ok else "MISMATCH"))
             if not check.ok:
