@@ -88,6 +88,9 @@ TARGETS=(
   "profile_bundle|native/profile_bundle.cc native/kernel_pipe_json.cc"
   "l3_envelope|native/l3_envelope.cc"
   "l3_envelope_session|native/l3_envelope_session.cc native/l3_envelope.cc native/kernel_pipe_keys.cc native/kernel_pipe_frame.cc"
+  "fp_sampling|native/fp_sampling.cc native/canvas_noise.cc"
+  "fp_converge|native/fp_converge.cc native/fp_sampling.cc native/canvas_noise.cc"
+  "fp_target|native/fp_target.cc native/fp_target_match.cc native/fp_sampling.cc native/canvas_noise.cc native/kernel_pipe_json.cc native/profile_bundle.cc"
 )
 
 FAILED=()
