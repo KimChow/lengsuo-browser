@@ -19,6 +19,20 @@ This script performs that check against the real files, so a contract
 edit that breaks the reading convention is caught before the two repos
 disagree on the wire. It is read-only: it never writes to either repo.
 
+What it compares
+----------------
+The envelope's own bytes (ciphertext, tag, AAD, payload), the runner's
+ConfigBundle payload, and the three derived values the handshake is keyed
+on: `machine_code`, `k_machine` and `session_key`.
+
+The last group was added after the same trap was found twice. Each repo
+hardcodes all three and asserts that its own derivation produces them, so
+each side checks itself -- but nothing compared the two copies. Change the
+JSON key order on one side and both sides stay green while they no longer
+agree on the wire. The contract is read as a third side of the comparison,
+so a value that moves in one repo is caught even when the other two still
+agree with each other.
+
 Usage
 -----
     python3 tools/cross_repo_vectors.py --kernel <kernel-repo> \\
@@ -34,7 +48,9 @@ Both arguments are paths to working copies. The script reads:
                                or native/kernel_pipe_test.cc -- the first
                                candidate that carries the literal wins)
 
-It exits non-zero when the three disagree.
+It exits non-zero when the three disagree. A side that cannot be read at
+all is reported as an error, never skipped: an absent check looks exactly
+like a passing one.
 """
 from __future__ import annotations
 
