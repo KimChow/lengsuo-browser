@@ -68,8 +68,13 @@ def _resolve_briefs(tasks, repo_src=None, brief_dir=None):
 
 
 def _task_to_brief():
-    """Return {task: brief file name} as the launcher resolves it."""
-    return _resolve_briefs(["O", "N", "Q", "R", "M", "I", "J", "K", "L",
+    """Return {task: brief file name} as the launcher resolves it.
+
+    Every task the script can dispatch has to be listed here. A task
+    missing from this list is not checked at all: the mapping tests would
+    pass while the dispatcher quietly sent that card to an older brief.
+    """
+    return _resolve_briefs(["O", "N", "Q", "R", "M", "M0", "I", "J", "K", "L",
                             "T1", "T2", "T3"])
 
 
