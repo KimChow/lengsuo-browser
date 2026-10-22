@@ -55,6 +55,7 @@ like a passing one.
 from __future__ import annotations
 
 import argparse
+import importlib.util
 import os
 import pathlib
 import re
@@ -62,6 +63,12 @@ import sys
 
 CONTRACT_REL = "docs/kernel-wire-contract.md"
 CLIENT_REL = "crates/lengsuo-desktop/src/kernel_pipe/tests.rs"
+
+# Identifies this module to the frame-layer check, which lives in
+# `cross_repo_frames.py` and reuses `contract_path` from here. The two
+# checks must read the contract through one lookup, or they could
+# disagree about which document they are checking.
+TOOL_NAME = "cross_repo_vectors"
 
 # The client repo's home for task R's cross-repo vectors. The ConfigBundle
 # payload lives in its own file because it is a wire vector, not a test
@@ -130,6 +137,20 @@ CLEAR_REGION_FORBIDDEN = ("63742d3031", "000000006553f100")
 
 class VectorError(Exception):
     """The vector could not be read at all."""
+
+
+def _frame_tool():
+    """Load the frame-layer check, which lives next to this file.
+
+    It is a separate module because this one is already near the size
+    limit, and it is loaded by path rather than by name because `tools/`
+    is not a package and this file is loaded by path from the tests.
+    """
+    path = pathlib.Path(__file__).resolve().parent / "cross_repo_frames.py"
+    spec = importlib.util.spec_from_file_location("cross_repo_frames", path)
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    return module
 
 
 def hex_tokens(text: str) -> str:
@@ -547,9 +568,34 @@ def main(argv: list[str] | None = None) -> int:
                                         values):
                     print("    %-9s %s" % (label, value))
 
+    # The frame layer: the header layout, the payload ceiling, the
+    # protocol version, the frame type codes and the fixed legal/illegal
+    # frame vectors. Both repos hardcode their own copy of each, and
+    # each side only checks its own copy against its own output -- the
+    # same trap task R fell into with the ConfigBundle payload, one
+    # layer down. So the frame layer gets the same treatment: three-way
+    # comparison with the contract as the third side.
+    #
+    # A missing side is reported, not skipped: an absent check looks
+    # exactly like a passing one.
+    print()
+    frame_tool = _frame_tool()
+    try:
+        frame_checks = frame_tool.compare_frames(kernel, client)
+    except (OSError, frame_tool.FrameVectorError) as error:
+        print("frame layer            %s" % error)
+        ok = False
+    else:
+        for check in frame_checks:
+            print("%-22s %-18s %s" % (check.label, "",
+                                      "OK" if check.ok else "MISMATCH"))
+            if not check.ok:
+                ok = False
+                for name, value in check.values.items():
+                    print("    %-9s %s" % (name, value))
+
     print()
     print("cross-repo vectors agree:" , "YES" if ok else "NO")
     return 0 if ok else 1
-
 if __name__ == "__main__":
     sys.exit(main())
