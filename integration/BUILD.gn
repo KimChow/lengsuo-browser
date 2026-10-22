@@ -85,5 +85,9 @@ source_set("kernel_pipe_client") {
     "//base",
     "//lengsuo/native:action_table",
     "//lengsuo/native:kernel_pipe",
+    # The machine-fact collection rules (task M0): the platform tag and the
+    # storage-serial selection are pure functions, so the collector in
+    # kernel_pipe_client.cc only has to read the machine.
+    "//lengsuo/native:machine_facts",
   ]
 }

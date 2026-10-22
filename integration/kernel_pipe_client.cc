@@ -4,22 +4,28 @@
 #include <string.h>
 
 #include <algorithm>
+#include <array>
+#include <cstdint>
 #include <utility>
+#include <vector>
 
 #include "base/containers/span.h"
 #include "base/cpu.h"
+#include "base/files/file_path.h"
+#include "base/files/file_util.h"
 #include "base/logging.h"
 #include "base/rand_util.h"
 #include "base/strings/strcat.h"
 #include "base/strings/string_number_conversions.h"
 #include "base/strings/utf_string_conversions.h"
-#include "base/system/sys_info.h"
 #include "base/time/time.h"
 #include "lengsuo/native/action_table.h"
+#include "lengsuo/native/machine_facts.h"
 
 #if BUILDFLAG(IS_WIN)
 #include <windows.h>
 #else
+#include <dirent.h>
 #include <sys/socket.h>
 #include <sys/stat.h>
 #include <sys/sysinfo.h>
@@ -49,44 +55,156 @@ std::string HostName() {
 #endif
 }
 
-// A stable identifier for the boot volume.
-//
-// The value is the volume's serial number where the platform exposes one,
-// and the device number plus the filesystem type where it does not. Either
-// way it identifies the machine's storage, which is what the fourth fact is
-// for: it is a machine binding, not a fingerprint.
-//
-// A machine with no readable volume identifier gets an empty value rather
-// than a made-up one. The machine code then differs from the runner's
-// expectation and the handshake fails, which is the fail-closed outcome;
-// inventing a value would be worse, because it would let a machine that was
-// never bound to this key open the envelope.
-std::string VolumeIdentifier() {
+// Which platform this build is for. The tag is the platform *kind*, not its
+// version: a patch release must not change the machine code, or every key
+// already bound stops opening.
+fp::Platform BuildPlatform() {
 #if BUILDFLAG(IS_WIN)
+  return fp::Platform::kWindows;
+#elif BUILDFLAG(IS_MAC)
+  return fp::Platform::kMacos;
+#elif BUILDFLAG(IS_LINUX)
+  return fp::Platform::kLinux;
+#else
+  return fp::Platform::kOther;
+#endif
+}
+
+#if BUILDFLAG(IS_WIN)
+
+// The storage device's serial number, on Windows.
+//
+// This is the two-pass query the storage driver needs:
+//
+//   1. ask with the 12-byte STORAGE_PROPERTY_QUERY and a 16-byte output
+//      buffer. The driver does not answer ERROR_INSUFFICIENT_BUFFER; it
+//      answers *success* and writes the real descriptor size into the
+//      header's Size field.
+//   2. allocate that many bytes, ask again, and read the serial at
+//      buf + SerialNumberOffset.
+//
+// The three things the old code got wrong, each of which is a separate
+// step here:
+//
+//   * it passed no input buffer, so the driver refused the call with
+//     ERROR_BAD_LENGTH (24). The input is a STORAGE_PROPERTY_QUERY, and it
+//     must be 12 bytes: the struct ends in AdditionalParameters[1], and an
+//     8-byte form is refused the same way.
+//   * it passed a 36-byte output buffer while the real descriptor is 396
+//     bytes, so the serial offset (90) pointed past the end.
+//   * it read SerialNumberOffset as a pointer. It is a byte offset into
+//     the buffer.
+//
+// The driver pads the serial with leading spaces, so the value is trimmed.
+std::string WindowsStorageSerial() {
+  static_assert(sizeof(STORAGE_PROPERTY_QUERY) == 12,
+                "the storage query must be 12 bytes; the driver rejects "
+                "an 8-byte form with ERROR_BAD_LENGTH");
+  static_assert(offsetof(STORAGE_DEVICE_DESCRIPTOR, Size) == 4,
+                "the Size field is not where the reader expects it");
+  static_assert(offsetof(STORAGE_DEVICE_DESCRIPTOR, SerialNumberOffset) == 24,
+                "the SerialNumberOffset field is not where the reader "
+                "expects it");
+
   const wchar_t kRoot[] = L"\\\\.\\PhysicalDrive0";
   HANDLE handle = ::CreateFileW(kRoot, 0, FILE_SHARE_READ | FILE_SHARE_WRITE,
                                 nullptr, OPEN_EXISTING, 0, nullptr);
   if (handle == INVALID_HANDLE_VALUE) {
     return "";
   }
-  STORAGE_DEVICE_DESCRIPTOR descriptor = {};
+
+  STORAGE_PROPERTY_QUERY query = {};
+  query.PropertyId = StorageDeviceProperty;
+  query.QueryType = PropertyStandardQuery;
+  query.AdditionalParameters[0] = 0;
+
+  // The first pass: a header-sized buffer, to learn the descriptor's size.
+  std::array<std::uint8_t, 16> header = {};
   DWORD returned = 0;
-  const bool got = ::DeviceIoControl(
-      handle, IOCTL_STORAGE_QUERY_PROPERTY, nullptr, 0, &descriptor,
-      sizeof(descriptor), &returned, nullptr);
+  bool got = ::DeviceIoControl(handle, IOCTL_STORAGE_QUERY_PROPERTY, &query,
+                               sizeof(query), header.data(),
+                               static_cast<DWORD>(header.size()), &returned,
+                               nullptr);
+  std::uint32_t descriptor_size = 0;
+  if (!got ||
+      !fp::ParseStorageDescriptorSize(header.data(), header.size(),
+                                       &descriptor_size) ||
+      descriptor_size < sizeof(STORAGE_DEVICE_DESCRIPTOR)) {
+    ::CloseHandle(handle);
+    return "";
+  }
+
+  // The second pass: a buffer of the size the driver named.
+  std::vector<std::uint8_t> descriptor(descriptor_size);
+  got = ::DeviceIoControl(handle, IOCTL_STORAGE_QUERY_PROPERTY, &query,
+                          sizeof(query), descriptor.data(),
+                          static_cast<DWORD>(descriptor.size()), &returned,
+                          nullptr);
   ::CloseHandle(handle);
   if (!got) {
     return "";
   }
-  return std::string(reinterpret_cast<const char*>(descriptor.SerialNumberOffset));
+  return fp::ParseStorageDescriptorSerial(descriptor.data(),
+                                           descriptor.size());
+}
+
 #else
-  // stat() on the root of the boot filesystem gives the device number, which
-  // is stable across reboots on the same machine.
-  struct stat info;
-  if (stat("/", &info) != 0) {
-    return "";
+
+// The storage device's serial numbers, on POSIX.
+//
+// The rule is the client's, word for word: scan every block device's
+// serial file, trim, drop the empty ones, sort, take the first. The sort
+// is what makes a multi-disk machine agree across the two repositories:
+// the directory order is not the same on both sides, so "the first one that
+// answers" would pick two different disks.
+//
+// Every entry under /sys/block is tried, whatever its type: the entries
+// are symlinks into sysfs, and a type filter would miss them.
+std::vector<std::string> PosixStorageSerials() {
+  std::vector<std::string> serials;
+  DIR* directory = ::opendir("/sys/block");
+  if (directory == nullptr) {
+    return serials;
   }
-  return base::NumberToString(static_cast<int64_t>(info.st_dev));
+  while (const struct dirent* entry = ::readdir(directory)) {
+    const std::string name(entry->d_name);
+    if (name == "." || name == "..") {
+      continue;
+    }
+    const base::FilePath path(
+        base::FilePath("/sys/block")
+            .AppendASCII(name.c_str())
+            .AppendASCII("/device/serial"));
+    std::string serial;
+    if (!base::ReadFileToString(path, &serial)) {
+      continue;
+    }
+    serials.push_back(std::move(serial));
+  }
+  ::closedir(directory);
+  return serials;
+}
+
+#endif  // BUILDFLAG(IS_WIN)
+
+// The storage device's serial number: the fourth fact.
+//
+// It is the machine's storage identity, not a fingerprint and not a volume
+// handle. The old Linux value was st_dev, the device number of the boot
+// filesystem: that changes when the machine is re-imaged or repartitioned,
+// so it is not a machine binding (and the client side never produced it
+// anyway, so the two sides could not have agreed).
+//
+// A machine with no readable serial gets an empty value rather than a
+// made-up one. The machine code then differs from the runner's expectation
+// and the handshake fails, which is the fail-closed outcome; inventing a
+// value would be worse, because it would let a machine that was never bound
+// to this key open the envelope.
+std::string StorageIdentifier() {
+#if BUILDFLAG(IS_WIN)
+  return WindowsStorageSerial();
+#else
+  return fp::SelectStorageSerial(PosixStorageSerials());
 #endif
 }
 
@@ -95,8 +213,7 @@ std::string VolumeIdentifier() {
 fp::MachineFacts CollectMachineFacts() {
   fp::MachineFacts facts;
 
-  facts.os = base::SysInfo::OperatingSystemName() + " " +
-              base::SysInfo::OperatingSystemVersion();
+  facts.os = fp::PlatformOsTag(BuildPlatform());
 
   const base::CPU& cpu = base::CPU::GetInstanceNoAllocation();
   facts.cpuid = base::StrCat({cpu.vendor_name(), "/",
@@ -104,7 +221,7 @@ fp::MachineFacts CollectMachineFacts() {
                                base::NumberToString(cpu.model()), "/",
                                base::NumberToString(cpu.stepping())});
 
-  facts.hddid = VolumeIdentifier();
+  facts.hddid = StorageIdentifier();
   facts.computername = HostName();
   return facts;
 }

@@ -86,6 +86,7 @@ TARGETS=(
   "kernel_pipe|native/kernel_pipe.cc native/kernel_pipe_frame.cc native/kernel_pipe_json.cc native/kernel_pipe_keys.cc native/kernel_pipe_envelope.cc"
   "action_table|native/action_table.cc native/kernel_pipe_json.cc"
   "profile_bundle|native/profile_bundle.cc native/kernel_pipe_json.cc"
+  "machine_facts|native/machine_facts.cc native/kernel_pipe_keys.cc native/kernel_pipe_frame.cc"
   "l3_envelope|native/l3_envelope.cc"
   "l3_envelope_session|native/l3_envelope_session.cc native/l3_envelope.cc native/kernel_pipe_keys.cc native/kernel_pipe_frame.cc"
 )
@@ -110,7 +111,7 @@ for spec in "${TARGETS[@]}"; do
   target_flags=("${CXXFLAGS[@]}")
   target_link=(-pthread)
   case "$name" in
-    kernel_pipe|kernel_pipe_envelope|kernel_pipe_keys|l3_envelope|l3_envelope_session)
+    kernel_pipe|kernel_pipe_envelope|kernel_pipe_keys|l3_envelope|l3_envelope_session|machine_facts)
       if [ -z "$BORINGSSL_DIR" ] || [ -z "$BORINGSSL_LIB" ]; then
         echo "COMPILE-FAIL  $name (BoringSSL not found; set BORINGSSL_DIR)"
         FAILED+=("$name")

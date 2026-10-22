@@ -23,6 +23,39 @@
 namespace lengsuo::fp {
 
 // The four machine facts the contract fixes, in the contract's key order.
+// The four machine facts the contract fixes, in the contract's key order.
+//
+// ⭐ What each field holds is a rule both repositories implement (task M0).
+// The table below is the same table, word for word, as the one in the
+// client repo's task book; the collection rules themselves live in
+// machine_facts.h (the pure part) and in
+// integration/kernel_pipe_client.cc (the part that talks to the machine).
+//
+//   field          Windows                        POSIX
+//   -------------  ----------------------------  --------------------------------
+//   os             "windows"                      "linux" / "macos"
+//                  (a constant; no version)       (a constant; no version)
+//   cpuid          base::CPU vendor/family/       base::CPU vendor/family/
+//                  model/stepping, slash joined   model/stepping, slash joined
+//   hddid          the serial number of           scan
+//                  \\.\PhysicalDrive0, trimmed    /sys/block/*/device/serial,
+//                  (two-pass storage query)       trimmed, sorted, first
+//   computername   GetComputerNameW               gethostname()
+//
+// Three rules hold for every cell:
+//
+//   * a version never appears in a value. A patch release would change the
+//     machine code, and every key already bound would stop opening.
+//   * a value that cannot be obtained is the empty string, never an
+//     invented one. The two sides then disagree, the handshake fails, and
+//     that is the intended way to fail.
+//   * the value is the machine's identity, not a fingerprint of the
+//     session: it does not change when the browser is updated, and it is
+//     the same for every process on the machine.
+//
+// The macOS hddid cell is empty on both sides: macOS exposes no portable
+// per-disk serial to an unprivileged reader, and neither side gets to
+// invent one. See docs/l3-reports/task-M0.md.
 struct MachineFacts {
   std::string os;
   std::string cpuid;

@@ -1,9 +1,9 @@
 diff --git a/lengsuo/integration/BUILD.gn b/lengsuo/integration/BUILD.gn
 new file mode 100644
-index 0000000..0ca8185
+index 0000000..3dfabf8
 --- /dev/null
 +++ b/lengsuo/integration/BUILD.gn
-@@ -0,0 +1,89 @@
+@@ -0,0 +1,93 @@
 +import("//testing/test.gni")
 +
 +# Browser-only dependency. No chrome/browser dependency (avoids a cycle).
@@ -91,6 +91,10 @@ index 0000000..0ca8185
 +    "//base",
 +    "//lengsuo/native:action_table",
 +    "//lengsuo/native:kernel_pipe",
++    # The machine-fact collection rules (task M0): the platform tag and the
++    # storage-serial selection are pure functions, so the collector in
++    # kernel_pipe_client.cc only has to read the machine.
++    "//lengsuo/native:machine_facts",
 +  ]
 +}
 diff --git a/lengsuo/integration/browser_bootstrap.cc b/lengsuo/integration/browser_bootstrap.cc
@@ -785,32 +789,38 @@ index 0000000..5737fd6
 +}  // namespace lengsuo
 diff --git a/lengsuo/integration/kernel_pipe_client.cc b/lengsuo/integration/kernel_pipe_client.cc
 new file mode 100644
-index 0000000..0f33957
+index 0000000..9730883
 --- /dev/null
 +++ b/lengsuo/integration/kernel_pipe_client.cc
-@@ -0,0 +1,453 @@
+@@ -0,0 +1,570 @@
 +#include "kernel_pipe_client.h"
 +
 +#include <errno.h>
 +#include <string.h>
 +
 +#include <algorithm>
++#include <array>
++#include <cstdint>
 +#include <utility>
++#include <vector>
 +
 +#include "base/containers/span.h"
 +#include "base/cpu.h"
++#include "base/files/file_path.h"
++#include "base/files/file_util.h"
 +#include "base/logging.h"
 +#include "base/rand_util.h"
 +#include "base/strings/strcat.h"
 +#include "base/strings/string_number_conversions.h"
 +#include "base/strings/utf_string_conversions.h"
-+#include "base/system/sys_info.h"
 +#include "base/time/time.h"
 +#include "lengsuo/native/action_table.h"
++#include "lengsuo/native/machine_facts.h"
 +
 +#if BUILDFLAG(IS_WIN)
 +#include <windows.h>
 +#else
++#include <dirent.h>
 +#include <sys/socket.h>
 +#include <sys/stat.h>
 +#include <sys/sysinfo.h>
@@ -840,44 +850,156 @@ index 0000000..0f33957
 +#endif
 +}
 +
-+// A stable identifier for the boot volume.
-+//
-+// The value is the volume's serial number where the platform exposes one,
-+// and the device number plus the filesystem type where it does not. Either
-+// way it identifies the machine's storage, which is what the fourth fact is
-+// for: it is a machine binding, not a fingerprint.
-+//
-+// A machine with no readable volume identifier gets an empty value rather
-+// than a made-up one. The machine code then differs from the runner's
-+// expectation and the handshake fails, which is the fail-closed outcome;
-+// inventing a value would be worse, because it would let a machine that was
-+// never bound to this key open the envelope.
-+std::string VolumeIdentifier() {
++// Which platform this build is for. The tag is the platform *kind*, not its
++// version: a patch release must not change the machine code, or every key
++// already bound stops opening.
++fp::Platform BuildPlatform() {
 +#if BUILDFLAG(IS_WIN)
++  return fp::Platform::kWindows;
++#elif BUILDFLAG(IS_MAC)
++  return fp::Platform::kMacos;
++#elif BUILDFLAG(IS_LINUX)
++  return fp::Platform::kLinux;
++#else
++  return fp::Platform::kOther;
++#endif
++}
++
++#if BUILDFLAG(IS_WIN)
++
++// The storage device's serial number, on Windows.
++//
++// This is the two-pass query the storage driver needs:
++//
++//   1. ask with the 12-byte STORAGE_PROPERTY_QUERY and a 16-byte output
++//      buffer. The driver does not answer ERROR_INSUFFICIENT_BUFFER; it
++//      answers *success* and writes the real descriptor size into the
++//      header's Size field.
++//   2. allocate that many bytes, ask again, and read the serial at
++//      buf + SerialNumberOffset.
++//
++// The three things the old code got wrong, each of which is a separate
++// step here:
++//
++//   * it passed no input buffer, so the driver refused the call with
++//     ERROR_BAD_LENGTH (24). The input is a STORAGE_PROPERTY_QUERY, and it
++//     must be 12 bytes: the struct ends in AdditionalParameters[1], and an
++//     8-byte form is refused the same way.
++//   * it passed a 36-byte output buffer while the real descriptor is 396
++//     bytes, so the serial offset (90) pointed past the end.
++//   * it read SerialNumberOffset as a pointer. It is a byte offset into
++//     the buffer.
++//
++// The driver pads the serial with leading spaces, so the value is trimmed.
++std::string WindowsStorageSerial() {
++  static_assert(sizeof(STORAGE_PROPERTY_QUERY) == 12,
++                "the storage query must be 12 bytes; the driver rejects "
++                "an 8-byte form with ERROR_BAD_LENGTH");
++  static_assert(offsetof(STORAGE_DEVICE_DESCRIPTOR, Size) == 4,
++                "the Size field is not where the reader expects it");
++  static_assert(offsetof(STORAGE_DEVICE_DESCRIPTOR, SerialNumberOffset) == 24,
++                "the SerialNumberOffset field is not where the reader "
++                "expects it");
++
 +  const wchar_t kRoot[] = L"\\\\.\\PhysicalDrive0";
 +  HANDLE handle = ::CreateFileW(kRoot, 0, FILE_SHARE_READ | FILE_SHARE_WRITE,
 +                                nullptr, OPEN_EXISTING, 0, nullptr);
 +  if (handle == INVALID_HANDLE_VALUE) {
 +    return "";
 +  }
-+  STORAGE_DEVICE_DESCRIPTOR descriptor = {};
++
++  STORAGE_PROPERTY_QUERY query = {};
++  query.PropertyId = StorageDeviceProperty;
++  query.QueryType = PropertyStandardQuery;
++  query.AdditionalParameters[0] = 0;
++
++  // The first pass: a header-sized buffer, to learn the descriptor's size.
++  std::array<std::uint8_t, 16> header = {};
 +  DWORD returned = 0;
-+  const bool got = ::DeviceIoControl(
-+      handle, IOCTL_STORAGE_QUERY_PROPERTY, nullptr, 0, &descriptor,
-+      sizeof(descriptor), &returned, nullptr);
++  bool got = ::DeviceIoControl(handle, IOCTL_STORAGE_QUERY_PROPERTY, &query,
++                               sizeof(query), header.data(),
++                               static_cast<DWORD>(header.size()), &returned,
++                               nullptr);
++  std::uint32_t descriptor_size = 0;
++  if (!got ||
++      !fp::ParseStorageDescriptorSize(header.data(), header.size(),
++                                       &descriptor_size) ||
++      descriptor_size < sizeof(STORAGE_DEVICE_DESCRIPTOR)) {
++    ::CloseHandle(handle);
++    return "";
++  }
++
++  // The second pass: a buffer of the size the driver named.
++  std::vector<std::uint8_t> descriptor(descriptor_size);
++  got = ::DeviceIoControl(handle, IOCTL_STORAGE_QUERY_PROPERTY, &query,
++                          sizeof(query), descriptor.data(),
++                          static_cast<DWORD>(descriptor.size()), &returned,
++                          nullptr);
 +  ::CloseHandle(handle);
 +  if (!got) {
 +    return "";
 +  }
-+  return std::string(reinterpret_cast<const char*>(descriptor.SerialNumberOffset));
++  return fp::ParseStorageDescriptorSerial(descriptor.data(),
++                                           descriptor.size());
++}
++
 +#else
-+  // stat() on the root of the boot filesystem gives the device number, which
-+  // is stable across reboots on the same machine.
-+  struct stat info;
-+  if (stat("/", &info) != 0) {
-+    return "";
++
++// The storage device's serial numbers, on POSIX.
++//
++// The rule is the client's, word for word: scan every block device's
++// serial file, trim, drop the empty ones, sort, take the first. The sort
++// is what makes a multi-disk machine agree across the two repositories:
++// the directory order is not the same on both sides, so "the first one that
++// answers" would pick two different disks.
++//
++// Every entry under /sys/block is tried, whatever its type: the entries
++// are symlinks into sysfs, and a type filter would miss them.
++std::vector<std::string> PosixStorageSerials() {
++  std::vector<std::string> serials;
++  DIR* directory = ::opendir("/sys/block");
++  if (directory == nullptr) {
++    return serials;
 +  }
-+  return base::NumberToString(static_cast<int64_t>(info.st_dev));
++  while (const struct dirent* entry = ::readdir(directory)) {
++    const std::string name(entry->d_name);
++    if (name == "." || name == "..") {
++      continue;
++    }
++    const base::FilePath path(
++        base::FilePath("/sys/block")
++            .AppendASCII(name.c_str())
++            .AppendASCII("/device/serial"));
++    std::string serial;
++    if (!base::ReadFileToString(path, &serial)) {
++      continue;
++    }
++    serials.push_back(std::move(serial));
++  }
++  ::closedir(directory);
++  return serials;
++}
++
++#endif  // BUILDFLAG(IS_WIN)
++
++// The storage device's serial number: the fourth fact.
++//
++// It is the machine's storage identity, not a fingerprint and not a volume
++// handle. The old Linux value was st_dev, the device number of the boot
++// filesystem: that changes when the machine is re-imaged or repartitioned,
++// so it is not a machine binding (and the client side never produced it
++// anyway, so the two sides could not have agreed).
++//
++// A machine with no readable serial gets an empty value rather than a
++// made-up one. The machine code then differs from the runner's expectation
++// and the handshake fails, which is the fail-closed outcome; inventing a
++// value would be worse, because it would let a machine that was never bound
++// to this key open the envelope.
++std::string StorageIdentifier() {
++#if BUILDFLAG(IS_WIN)
++  return WindowsStorageSerial();
++#else
++  return fp::SelectStorageSerial(PosixStorageSerials());
 +#endif
 +}
 +
@@ -886,8 +1008,7 @@ index 0000000..0f33957
 +fp::MachineFacts CollectMachineFacts() {
 +  fp::MachineFacts facts;
 +
-+  facts.os = base::SysInfo::OperatingSystemName() + " " +
-+              base::SysInfo::OperatingSystemVersion();
++  facts.os = fp::PlatformOsTag(BuildPlatform());
 +
 +  const base::CPU& cpu = base::CPU::GetInstanceNoAllocation();
 +  facts.cpuid = base::StrCat({cpu.vendor_name(), "/",
@@ -895,7 +1016,7 @@ index 0000000..0f33957
 +                               base::NumberToString(cpu.model()), "/",
 +                               base::NumberToString(cpu.stepping())});
 +
-+  facts.hddid = VolumeIdentifier();
++  facts.hddid = StorageIdentifier();
 +  facts.computername = HostName();
 +  return facts;
 +}
@@ -2130,10 +2251,10 @@ index 0000000..3bd62d6
 +#endif
 diff --git a/lengsuo/native/BUILD.gn b/lengsuo/native/BUILD.gn
 new file mode 100644
-index 0000000..16e12fe
+index 0000000..a15e503
 --- /dev/null
 +++ b/lengsuo/native/BUILD.gn
-@@ -0,0 +1,214 @@
+@@ -0,0 +1,225 @@
 +# Decoder source sets. Chromium integration evidence lives in VERIFICATION.md.
 +source_set("profile_wire") {
 +  sources = [
@@ -2295,6 +2416,17 @@ index 0000000..16e12fe
 +    ":kernel_pipe_keys",
 +  ]
 +  deps = [ "//third_party/boringssl" ]
++}
++
++# The collection rules for the machine facts (task M0). The rules are pure:
++# given the candidates, they say which one wins. That is what makes them
++# testable without a machine, and it is why the collector that talks to the
++# device lives in integration/kernel_pipe_client.cc instead of here.
++source_set("machine_facts") {
++  sources = [
++    "machine_facts.cc",
++    "machine_facts.h",
++  ]
 +}
 +
 +# The uplink action table: an action name and the structural validator for its
@@ -7546,10 +7678,10 @@ index 0000000..471bb3e
 +}  // namespace lengsuo::fp
 diff --git a/lengsuo/native/kernel_pipe_keys.h b/lengsuo/native/kernel_pipe_keys.h
 new file mode 100644
-index 0000000..c673fc3
+index 0000000..79fe7f8
 --- /dev/null
 +++ b/lengsuo/native/kernel_pipe_keys.h
-@@ -0,0 +1,63 @@
+@@ -0,0 +1,96 @@
 +// kernel_pipe_keys - the machine-code derivation of the runner <-> kernel
 +// pipe (task Q).
 +//
@@ -7575,6 +7707,39 @@ index 0000000..c673fc3
 +namespace lengsuo::fp {
 +
 +// The four machine facts the contract fixes, in the contract's key order.
++// The four machine facts the contract fixes, in the contract's key order.
++//
++// ⭐ What each field holds is a rule both repositories implement (task M0).
++// The table below is the same table, word for word, as the one in the
++// client repo's task book; the collection rules themselves live in
++// machine_facts.h (the pure part) and in
++// integration/kernel_pipe_client.cc (the part that talks to the machine).
++//
++//   field          Windows                        POSIX
++//   -------------  ----------------------------  --------------------------------
++//   os             "windows"                      "linux" / "macos"
++//                  (a constant; no version)       (a constant; no version)
++//   cpuid          base::CPU vendor/family/       base::CPU vendor/family/
++//                  model/stepping, slash joined   model/stepping, slash joined
++//   hddid          the serial number of           scan
++//                  \\.\PhysicalDrive0, trimmed    /sys/block/*/device/serial,
++//                  (two-pass storage query)       trimmed, sorted, first
++//   computername   GetComputerNameW               gethostname()
++//
++// Three rules hold for every cell:
++//
++//   * a version never appears in a value. A patch release would change the
++//     machine code, and every key already bound would stop opening.
++//   * a value that cannot be obtained is the empty string, never an
++//     invented one. The two sides then disagree, the handshake fails, and
++//     that is the intended way to fail.
++//   * the value is the machine's identity, not a fingerprint of the
++//     session: it does not change when the browser is updated, and it is
++//     the same for every process on the machine.
++//
++// The macOS hddid cell is empty on both sides: macOS exposes no portable
++// per-disk serial to an unprivileged reader, and neither side gets to
++// invent one. See docs/l3-reports/task-M0.md.
 +struct MachineFacts {
 +  std::string os;
 +  std::string cpuid;
@@ -9946,6 +10111,564 @@ index 0000000..9ef1197
 +}  // namespace lengsuo::fp
 +
 +#endif  // LENGSUO_NATIVE_L3_WIRE_H_
+diff --git a/lengsuo/native/machine_facts.cc b/lengsuo/native/machine_facts.cc
+new file mode 100644
+index 0000000..263a268
+--- /dev/null
++++ b/lengsuo/native/machine_facts.cc
+@@ -0,0 +1,103 @@
++#include "machine_facts.h"
++
++#include <algorithm>
++#include <utility>
++
++namespace lengsuo::fp {
++namespace {
++
++bool IsAsciiSpace(char c) {
++  return c == ' ' || c == '\t' || c == '\n' || c == '\r' || c == '\v' ||
++         c == '\f';
++}
++
++// Little endian, the byte order of the Windows structures this reads.
++std::uint32_t ReadU32Le(const std::uint8_t* buffer) {
++  return static_cast<std::uint32_t>(buffer[0]) |
++         (static_cast<std::uint32_t>(buffer[1]) << 8) |
++         (static_cast<std::uint32_t>(buffer[2]) << 16) |
++         (static_cast<std::uint32_t>(buffer[3]) << 24);
++}
++
++}  // namespace
++
++std::string TrimAscii(std::string_view text) {
++  std::size_t begin = 0;
++  std::size_t end = text.size();
++  while (begin < end && IsAsciiSpace(text[begin])) {
++    ++begin;
++  }
++  while (end > begin && IsAsciiSpace(text[end - 1])) {
++    --end;
++  }
++  return std::string(text.substr(begin, end - begin));
++}
++
++std::string PlatformOsTag(Platform platform) {
++  switch (platform) {
++    case Platform::kWindows:
++      return "windows";
++    case Platform::kMacos:
++      return "macos";
++    case Platform::kLinux:
++      return "linux";
++    case Platform::kOther:
++      // A platform neither side supports: the empty tag makes the two
++      // machine codes differ, which is the fail-closed outcome.
++      return std::string();
++  }
++  return std::string();
++}
++
++std::string SelectStorageSerial(const std::vector<std::string>& candidates) {
++  std::vector<std::string> usable;
++  usable.reserve(candidates.size());
++  for (const std::string& candidate : candidates) {
++    std::string trimmed = TrimAscii(candidate);
++    if (!trimmed.empty()) {
++      usable.push_back(std::move(trimmed));
++    }
++  }
++  if (usable.empty()) {
++    return std::string();
++  }
++  std::sort(usable.begin(), usable.end());
++  return usable.front();
++}
++
++bool ParseStorageDescriptorSize(const std::uint8_t* buffer,
++                                std::size_t size,
++                                std::uint32_t* size_out) {
++  if (buffer == nullptr || size_out == nullptr ||
++      size < kStorageDescriptorSizeOffset + sizeof(std::uint32_t)) {
++    return false;
++  }
++  *size_out = ReadU32Le(buffer + kStorageDescriptorSizeOffset);
++  return true;
++}
++
++std::string ParseStorageDescriptorSerial(const std::uint8_t* buffer,
++                                         std::size_t size) {
++  if (buffer == nullptr ||
++      size < kStorageDescriptorSerialNumberFieldOffset + sizeof(std::uint32_t)) {
++    return std::string();
++  }
++  // The field is a DWORD byte offset into the descriptor, not a pointer.
++  const std::uint32_t offset =
++      ReadU32Le(buffer + kStorageDescriptorSerialNumberFieldOffset);
++  if (offset == 0 || offset >= size) {
++    // 0 means the driver has no serial to report; an offset past the end
++    // means the descriptor was cut short.
++    return std::string();
++  }
++  const char* text =
++      reinterpret_cast<const char*>(buffer + offset);
++  const std::size_t available = size - offset;
++  std::size_t length = 0;
++  while (length < available && text[length] != '\0') {
++    ++length;
++  }
++  return TrimAscii(std::string_view(text, length));
++}
++
++}  // namespace lengsuo::fp
+diff --git a/lengsuo/native/machine_facts.h b/lengsuo/native/machine_facts.h
+new file mode 100644
+index 0000000..a5beb6e
+--- /dev/null
++++ b/lengsuo/native/machine_facts.h
+@@ -0,0 +1,120 @@
++// machine_facts - the collection rules for the kernel's four machine facts
++// (task M0).
++//
++// The wire contract fixes the *shape* of the machine code (four fields, one
++// key order) but not what each field holds. Task M0 pins the values: the
++// kernel side and the client side must collect the same four values on the
++// same machine, or the two sides derive different machine keys and the
++// handshake fails closed.
++//
++// The rules live here, apart from the Chromium-bound collector in
++// integration/kernel_pipe_client.cc, because they are pure: given a set of
++// candidates they say which one wins. That is what makes them testable
++// without a machine - the tests feed them fake data.
++//
++// The rule table (four fields, two platforms). Both repos implement this
++// table word for word; a cell that cannot be filled stays empty, and an
++// empty cell makes the two sides' machine codes differ, which is the
++// fail-closed outcome.
++//
++//   field          Windows                          POSIX
++//   -------------  ------------------------------  ------------------------------
++//   os             "windows"                        "linux" / "macos"
++//   cpuid          base::CPU vendor/family/model/    the same
++//                  stepping                         base::CPU shape
++//   hddid          the serial number of             scan
++//                  \\.\PhysicalDrive0               /sys/block/*/device/serial,
++//                  (trimmed)                        trimmed, sorted, first
++//   computername   GetComputerNameW                 gethostname()
++#ifndef LENGSUO_NATIVE_MACHINE_FACTS_H_
++#define LENGSUO_NATIVE_MACHINE_FACTS_H_
++
++#include <cstddef>
++#include <cstdint>
++#include <string>
++#include <string_view>
++#include <vector>
++
++namespace lengsuo::fp {
++
++// The platforms the two repositories support.
++//
++// The platform is an argument rather than a compile-time constant so the
++// mapping of every cell is testable from any host: the test asks for each
++// platform and gets the tag the rule table names.
++enum class Platform {
++  kWindows,
++  kMacos,
++  kLinux,
++  // A platform neither side supports.
++  kOther,
++};
++
++// The platform tag: "windows", "macos" or "linux".
++//
++// Lower case, no version: the tag says which *kind* of machine this is, so
++// every machine of a kind agrees on it. A version would change the machine
++// code when the browser is patched, and every key already bound would stop
++// opening.
++//
++// kOther returns the empty string: the machine code then differs from the
++// runner's expectation and the handshake fails, which is the fail-closed
++// outcome. (The client side uses the same three-value mapping; it is not
++// Rust's OS name, which would differ on a platform the two repos do not
++// support.)
++std::string PlatformOsTag(Platform platform);
++
++// Picks the storage serial number out of the candidates.
++//
++// The rule is the client's, copied word for word: trim each candidate, drop
++// the empty ones, sort what is left byte by byte, take the first.
++//
++// The sort is what makes the choice the same on a multi-disk machine. The
++// directory order is not the same on both sides, so "the first one that
++// answers" would pick two different disks.
++std::string SelectStorageSerial(const std::vector<std::string>& candidates);
++
++// The offset of the Size field inside STORAGE_DEVICE_DESCRIPTOR. It is a
++// DWORD (STORAGE_DEVICE_DESCRIPTOR: Version, Size, DeviceType, ...).
++inline constexpr std::size_t kStorageDescriptorSizeOffset = 4;
++
++// The offset of the SerialNumberOffset field inside
++// STORAGE_DEVICE_DESCRIPTOR. It is a DWORD, not a byte: the header is
++// Version, Size, DeviceType, DeviceTypeModifier, RemovableMedia,
++// CommandQueueing, VendorIdOffset, ProductIdOffset, ProductRevisionOffset,
++// SerialNumberOffset, BusType, RawPropertiesLength.
++//
++// integration/kernel_pipe_client.cc static_asserts both offsets against
++// the real Windows struct, so a platform whose header disagrees fails the
++// build instead of reading the wrong four bytes.
++inline constexpr std::size_t kStorageDescriptorSerialNumberFieldOffset = 24;
++
++// Reads the Size field of a storage descriptor header.
++//
++// The Windows driver answers a storage-property query with success even when
++// the buffer is too small: it writes the real size into the header instead
++// of failing with ERROR_INSUFFICIENT_BUFFER. So the collector asks with a
++// small buffer, reads the size here, and asks again with a buffer of that
++// size.
++bool ParseStorageDescriptorSize(const std::uint8_t* buffer,
++                                std::size_t size,
++                                std::uint32_t* size_out);
++
++// Reads the serial number out of a storage descriptor.
++//
++// The descriptor carries the serial as a NUL terminated string at the offset
++// the header names; the offset is a position in the buffer, not an address.
++// The driver pads the serial with leading spaces, so the value is trimmed
++// before it is used.
++//
++// A descriptor with no serial, an offset that points outside the buffer, and
++// a truncated buffer all yield the empty string.
++std::string ParseStorageDescriptorSerial(const std::uint8_t* buffer,
++                                         std::size_t size);
++
++// Trims ASCII whitespace off both ends.
++std::string TrimAscii(std::string_view text);
++
++}  // namespace lengsuo::fp
++
++#endif  // LENGSUO_NATIVE_MACHINE_FACTS_H_
+diff --git a/lengsuo/native/machine_facts_test.cc b/lengsuo/native/machine_facts_test.cc
+new file mode 100644
+index 0000000..9aeaae6
+--- /dev/null
++++ b/lengsuo/native/machine_facts_test.cc
+@@ -0,0 +1,317 @@
++// machine_facts_test - the machine-fact collection rules (task M0).
++//
++// The point of this file is that it runs on Linux CI while testing the
++// Windows path too: the collector in integration/kernel_pipe_client.cc is
++// split into "ask the device" (compiled only on Windows) and "parse the
++// answer" (here, pure). The Windows descriptor below is a synthetic
++// 396-byte buffer shaped like the one the driver actually returns on the
++// research machine, so the three defects task M0 lists are each pinned by a
++// case that fails if the defect comes back.
++//
++// The rule vectors at the bottom are the cross-repo agreement: the client
++// repo hardcodes the same seven values per row, and
++// tools/cross_repo_machine.py refuses to pass unless both sides agree and
++// the digests recompute from the four fields.
++#include "machine_facts.h"
++
++#include <gtest/gtest.h>
++
++#include <algorithm>
++#include <array>
++#include <cstdint>
++#include <string>
++
++#include "kernel_pipe_keys.h"
++#include "kernel_pipe_test_util.h"
++
++namespace lengsuo::fp {
++namespace {
++namespace test_util = ::lengsuo::fp::test;
++
++void WriteU32Le(std::uint8_t* out, std::uint32_t value) {
++  out[0] = static_cast<std::uint8_t>(value & 0xFF);
++  out[1] = static_cast<std::uint8_t>((value >> 8) & 0xFF);
++  out[2] = static_cast<std::uint8_t>((value >> 16) & 0xFF);
++  out[3] = static_cast<std::uint8_t>((value >> 24) & 0xFF);
++}
++
++// --- the os cell ---------------------------------------------------------
++//
++// The tag is the platform *kind*, not the platform version: a patch release
++// must not change the machine code, or every key already bound stops
++// opening (R2).
++
++TEST(MachineFacts, OsTagIsTheLowerCasePlatformWithoutVersion) {
++  EXPECT_EQ(PlatformOsTag(Platform::kWindows), "windows");
++  EXPECT_EQ(PlatformOsTag(Platform::kMacos), "macos");
++  EXPECT_EQ(PlatformOsTag(Platform::kLinux), "linux");
++  // A platform neither side supports gets no tag: the two sides then
++  // disagree, which is the fail-closed outcome.
++  EXPECT_EQ(PlatformOsTag(Platform::kOther), "");
++}
++
++TEST(MachineFacts, OsTagCarriesNoSpaceAndNoVersion) {
++  for (const Platform platform : {Platform::kWindows, Platform::kMacos,
++                                 Platform::kLinux}) {
++    const std::string tag = PlatformOsTag(platform);
++    EXPECT_EQ(tag.find(' '), std::string::npos) << tag;
++    EXPECT_EQ(tag.find('.'), std::string::npos) << tag;
++    for (const char c : tag) {
++      EXPECT_TRUE(c >= 'a' && c <= 'z') << "not lower case: " << tag;
++    }
++  }
++}
++
++// --- the hddid cell, POSIX side -----------------------------------------
++//
++// The rule is the client's, word for word: trim, drop the empty ones, sort,
++// take the first. The sort is the part that matters on a multi-disk
++// machine: the directory order differs between the two sides, so "the first
++// one that answers" would pick two different disks (R1).
++
++TEST(MachineFacts, StorageSerialSortsAndTakesTheFirst) {
++  EXPECT_EQ(SelectStorageSerial({"SERIAL-B", "SERIAL-A", "SERIAL-C"}),
++            "SERIAL-A");
++  // The order the candidates arrive in does not matter.
++  EXPECT_EQ(SelectStorageSerial({"SERIAL-C", "SERIAL-A", "SERIAL-B"}),
++            "SERIAL-A");
++}
++
++TEST(MachineFacts, StorageSerialTrimsBeforeChoosing) {
++  // "/sys/block/*/device/serial" files end in a newline.
++  EXPECT_EQ(SelectStorageSerial({"  SERIAL-A\n"}), "SERIAL-A");
++  EXPECT_EQ(SelectStorageSerial({" \tSERIAL-A \r\n"}), "SERIAL-A");
++  // Trimming happens before the sort, so the space does not decide it.
++  EXPECT_EQ(SelectStorageSerial({" SERIAL-B", "SERIAL-A"}), "SERIAL-A");
++}
++
++TEST(MachineFacts, StorageSerialDropsEmptyCandidates) {
++  EXPECT_EQ(SelectStorageSerial({"", "   ", "\n", "SERIAL-A"}), "SERIAL-A");
++}
++
++TEST(MachineFacts, StorageSerialIsEmptyWhenNothingUsable) {
++  // Constraint 5: a value that cannot be obtained is the empty string, not
++  // an invented one. Empty makes the two sides disagree, which is the
++  // fail-closed outcome.
++  EXPECT_EQ(SelectStorageSerial({}), "");
++  EXPECT_EQ(SelectStorageSerial({"", " ", "\t\r\n"}), "");
++}
++
++TEST(MachineFacts, StorageSerialComparesBytesNotCase) {
++  // Sorting is byte-wise, as the client's `Vec<String>::sort` is. This is
++  // not a locale-aware comparison.
++  EXPECT_EQ(SelectStorageSerial({"a", "B", "A"}), "A");
++}
++
++// --- the hddid cell, Windows side ---------------------------------------
++//
++// A descriptor shaped like the one the driver returns on the research
++// machine: 396 bytes, the serial at offset 90, and the driver's leading
++// spaces. The header fields are at the offsets the Windows struct pins.
++
++constexpr std::size_t kRealDescriptorSize = 396;
++constexpr std::uint32_t kRealSerialOffset = 90;
++// Exactly what the research machine's driver returned, spaces included.
++constexpr char kRealSerialWithPadding[] = "        154310E1E661";
++
++std::array<std::uint8_t, kRealDescriptorSize> RealShapedDescriptor() {
++  std::array<std::uint8_t, kRealDescriptorSize> buffer{};
++  WriteU32Le(buffer.data() + kStorageDescriptorSizeOffset,
++             static_cast<std::uint32_t>(kRealDescriptorSize));
++  WriteU32Le(buffer.data() + kStorageDescriptorSerialNumberFieldOffset,
++             kRealSerialOffset);
++  const std::size_t length = sizeof(kRealSerialWithPadding) - 1;
++  for (std::size_t i = 0; i < length; ++i) {
++    buffer[kRealSerialOffset + i] =
++        static_cast<std::uint8_t>(kRealSerialWithPadding[i]);
++  }
++  return buffer;
++}
++
++TEST(MachineFacts, DescriptorOffsetsMatchTheWindowsStruct) {
++  // These are the two offsets the reader depends on. If a Windows SDK puts
++  // the fields elsewhere, this fails here as well as in the static_assert in
++  // integration/kernel_pipe_client.cc.
++  EXPECT_EQ(kStorageDescriptorSizeOffset, 4u);
++  EXPECT_EQ(kStorageDescriptorSerialNumberFieldOffset, 24u);
++}
++
++TEST(MachineFacts, DescriptorSizeIsReadBack) {
++  const auto buffer = RealShapedDescriptor();
++  std::uint32_t size = 0;
++  ASSERT_TRUE(ParseStorageDescriptorSize(buffer.data(), buffer.size(), &size));
++  EXPECT_EQ(size, kRealDescriptorSize);
++}
++
++TEST(MachineFacts, DescriptorSizeRejectsATruncatedHeader) {
++  std::array<std::uint8_t, 7> buffer{};
++  std::uint32_t size = 0;
++  EXPECT_FALSE(ParseStorageDescriptorSize(buffer.data(), buffer.size(), &size));
++  EXPECT_FALSE(ParseStorageDescriptorSize(nullptr, 16, &size));
++  EXPECT_FALSE(
++      ParseStorageDescriptorSize(buffer.data(), buffer.size(), nullptr));
++}
++
++TEST(MachineFacts, DescriptorSerialIsReadAtTheOffsetAndTrimmed) {
++  // Defects 2 and 3 together: the serial is at byte offset 90, which is
++  // outside the 36-byte header, and the field names an offset, not an
++  // address. The driver's leading spaces are trimmed.
++  const auto buffer = RealShapedDescriptor();
++  EXPECT_EQ(ParseStorageDescriptorSerial(buffer.data(), buffer.size()),
++            "154310E1E661");
++}
++
++TEST(MachineFacts, DescriptorSerialOffsetIsA32BitValue) {
++  // The offset field is a DWORD. An offset past 255 would be read as a
++  // different value if the field were read as a byte, so this descriptor
++  // uses one that does not fit in a byte.
++  std::array<std::uint8_t, 512> buffer{};
++  constexpr std::uint32_t kOffset = 300;
++  WriteU32Le(buffer.data() + kStorageDescriptorSizeOffset, 512);
++  WriteU32Le(buffer.data() + kStorageDescriptorSerialNumberFieldOffset,
++             kOffset);
++  const std::string serial = "SERIAL-PAST-255";
++  for (std::size_t i = 0; i < serial.size(); ++i) {
++    buffer[kOffset + i] = static_cast<std::uint8_t>(serial[i]);
++  }
++  EXPECT_EQ(ParseStorageDescriptorSerial(buffer.data(), buffer.size()),
++            "SERIAL-PAST-255");
++}
++
++TEST(MachineFacts, DescriptorSerialTrailingSpaceIsTrimmedToo) {
++  auto buffer = RealShapedDescriptor();
++  std::fill(buffer.begin() + kRealSerialOffset, buffer.end(), 0);
++  const std::string padded = "154310E1E661   ";
++  for (std::size_t i = 0; i < padded.size(); ++i) {
++    buffer[kRealSerialOffset + i] =
++        static_cast<std::uint8_t>(padded[i]);
++  }
++  EXPECT_EQ(ParseStorageDescriptorSerial(buffer.data(), buffer.size()),
++            "154310E1E661");
++}
++
++TEST(MachineFacts, DescriptorSerialIsEmptyWhenTheDriverHasNone) {
++  auto buffer = RealShapedDescriptor();
++  WriteU32Le(buffer.data() + kStorageDescriptorSerialNumberFieldOffset, 0);
++  EXPECT_EQ(ParseStorageDescriptorSerial(buffer.data(), buffer.size()), "");
++}
++
++TEST(MachineFacts, DescriptorSerialIsEmptyWhenTheOffsetFallsOutside) {
++  auto buffer = RealShapedDescriptor();
++  WriteU32Le(buffer.data() + kStorageDescriptorSerialNumberFieldOffset,
++             static_cast<std::uint32_t>(kRealDescriptorSize));
++  EXPECT_EQ(ParseStorageDescriptorSerial(buffer.data(), buffer.size()), "");
++  WriteU32Le(buffer.data() + kStorageDescriptorSerialNumberFieldOffset, 0xFFFF);
++  EXPECT_EQ(ParseStorageDescriptorSerial(buffer.data(), buffer.size()), "");
++}
++
++TEST(MachineFacts, DescriptorSerialIsEmptyWhenTheHeaderIsTruncated) {
++  std::array<std::uint8_t, 16> buffer{};
++  WriteU32Le(buffer.data() + kStorageDescriptorSizeOffset, 16);
++  EXPECT_EQ(ParseStorageDescriptorSerial(buffer.data(), buffer.size()), "");
++  EXPECT_EQ(ParseStorageDescriptorSerial(nullptr, 396), "");
++}
++
++TEST(MachineFacts, DescriptorSerialMayRunToTheEndWithoutANul) {
++  // The driver does not always NUL terminate inside the buffer.
++  std::array<std::uint8_t, 128> buffer{};
++  WriteU32Le(buffer.data() + kStorageDescriptorSerialNumberFieldOffset, 100);
++  const std::string serial = "SERIAL-NO-NUL";
++  for (std::size_t i = 0; i < serial.size(); ++i) {
++    buffer[100 + i] = static_cast<std::uint8_t>(serial[i]);
++  }
++  EXPECT_EQ(ParseStorageDescriptorSerial(buffer.data(), buffer.size()),
++            "SERIAL-NO-NUL");
++}
++
++TEST(MachineFacts, DescriptorSerialOfOnlySpacesIsEmpty) {
++  std::array<std::uint8_t, 128> buffer{};
++  WriteU32Le(buffer.data() + kStorageDescriptorSerialNumberFieldOffset, 100);
++  for (std::size_t i = 100; i < buffer.size(); ++i) {
++    buffer[i] = ' ';
++  }
++  EXPECT_EQ(ParseStorageDescriptorSerial(buffer.data(), buffer.size()), "");
++}
++
++// --- the cross-repo rule vectors ----------------------------------------
++//
++// Each row is a machine the two repositories must agree on, expressed as
++// the four facts plus the two digests derived from them. The values are
++// fake (constraint 7: never commit a real serial number or host name), and
++// the digests are computed, not copied from a live machine.
++//
++// The same seven values per row live in the client repo's rule-vector
++// table; tools/cross_repo_machine.py compares the two and refuses to pass
++// if they disagree. Keeping these in the test is what makes the agreement
++// checkable rather than a matter of someone reading two files side by side.
++
++struct RuleVector {
++  const char* label;
++  const char* os;
++  const char* cpuid;
++  const char* hddid;
++  const char* computername;
++  const char* machine_code;
++  const char* k_machine;
++};
++
++// @@begin machine-facts-vectors
++inline constexpr RuleVector kRuleVectors[] = {
++    {"linux-demo", "linux", "GenuineIntel/6/183/1", "DEMO-SERIAL-0001",
++     "demo-host",
++     "a64a48e92bef5ce24a4c3982bf33ea210a2dd5d0ad4fa5f23dc0172e7ee1409c",
++     "a917d3ac761be29fcea63dc80fadd30586ee21250ea3ea56e31f5b39f47f04ec"},
++    {"windows-demo", "windows", "AuthenticAMD/25/33/0", "DEMO-SERIAL-0002",
++     "demo-win",
++     "550635314afdee4c9b6b07370c2f6b0760b5dd6bc39cae6741645a46e8fa0891",
++     "d401aa6686460d0cd36059fa0a1a05afd876414a8b4c632694e9d829e4ce5f95"},
++    // macOS has no portable serial source, so the cell is empty on both
++    // sides. Empty is the rule, not a bug: see report.md.
++    {"macos-demo", "macos", "Apple/0/0/0", "", "demo-mac",
++     "38ac35734aedf6623c2c30c4513dbffd08f54e3442af7a51a75a5b8ad68024de",
++     "cde8543cfbfde4028579b96b39ee34cdd7bc2ca612c3c3b7eb67388014ceab3f"},
++    // Every cell empty: the shape is still the four keys in order, and the
++    // digests are still defined.
++    {"empty-demo", "", "", "", "",
++     "c93a0514938359dddef7414908ff15348d058d8fed1cd0a238bd2e72357d065c",
++     "0aea56c49b250fecbfe6c5cb4099987572519e5da82620eaf743be882815e684"},
++};
++// @@end machine-facts-vectors
++
++TEST(MachineFacts, RuleVectorMachineCodesRecompute) {
++  for (const RuleVector& vector : kRuleVectors) {
++    MachineFacts facts;
++    facts.os = vector.os;
++    facts.cpuid = vector.cpuid;
++    facts.hddid = vector.hddid;
++    facts.computername = vector.computername;
++    EXPECT_EQ(DeriveMachineCode(facts), vector.machine_code)
++        << "rule vector " << vector.label;
++  }
++}
++
++TEST(MachineFacts, RuleVectorMachineKeysRecompute) {
++  for (const RuleVector& vector : kRuleVectors) {
++    std::string key;
++    ASSERT_TRUE(DeriveMachineKey(vector.machine_code, &key))
++        << "rule vector " << vector.label;
++    EXPECT_EQ(test_util::BytesToHex(key), vector.k_machine)
++        << "rule vector " << vector.label;
++  }
++}
++
++TEST(MachineFacts, RuleVectorsCoverEveryPlatformTag) {
++  // The eight-cell table has one `os` cell per platform save the ones the
++  // client cannot produce; the vector group must exercise all three tags
++  // plus the empty row, or a platform's cell could drift unnoticed.
++  for (const char* tag : {"linux", "windows", "macos", ""}) {
++    bool found = false;
++    for (const RuleVector& vector : kRuleVectors) {
++      found = found || std::string(vector.os) == tag;
++    }
++    EXPECT_TRUE(found) << "no rule vector for os=\"" << tag << "\"";
++  }
++}
++
++}  // namespace
++}  // namespace lengsuo::fp
 diff --git a/lengsuo/native/product_brand.h b/lengsuo/native/product_brand.h
 new file mode 100644
 index 0000000..0bd9cc8
