@@ -74,6 +74,7 @@ brief_for_task() {
         O)   echo "cc-task-brief-l3e.md" ;;
         N|Q|R|M0) echo "cc-task-brief-l3f.md" ;;
         M)   echo "cc-task-brief-l3d.md" ;;
+        T1|T2|T3) echo "cc-task-brief-l3g.md" ;;
         *)   echo "cc-task-brief-l3b.md" ;;
     esac
 }

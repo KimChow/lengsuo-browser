@@ -69,7 +69,8 @@ def _resolve_briefs(tasks, repo_src=None, brief_dir=None):
 
 def _task_to_brief():
     """Return {task: brief file name} as the launcher resolves it."""
-    return _resolve_briefs(["O", "N", "Q", "R", "M", "I", "J", "K", "L"])
+    return _resolve_briefs(["O", "N", "Q", "R", "M", "I", "J", "K", "L",
+                            "T1", "T2", "T3"])
 
 
 class DispatchBriefTests(unittest.TestCase):
@@ -127,6 +128,24 @@ class DispatchBriefTests(unittest.TestCase):
                                  "cc-task-brief-l3f.md")
         self.assertNotIn("P", mapping,
                          "task P belongs to the client repo line")
+
+    def test_sixth_round_tasks_use_the_sixth_round_brief(self):
+        """T1/T2/T3 are the sixth round (value governance + response
+        monitoring + access-policy kernel base).
+
+        The default arm points at round two's brief, which asks for the
+        envelope to be written from scratch. Dispatching T1 against it
+        would burn a card rebuilding finished work, so the mapping is
+        pinned here.
+        """
+        mapping = _task_to_brief()
+        for task in ("T1", "T2", "T3"):
+            with self.subTest(task=task):
+                self.assertEqual(mapping.get(task),
+                                 "cc-task-brief-l3g.md")
+                self.assertNotIn(mapping.get(task),
+                                 ("cc-task-brief-l3.md",
+                                  "cc-task-brief-l3b.md"))
 
     def test_n_does_not_point_at_the_third_round_brief(self):
         """N moved to the fifth round; the third round would redo finished work.
