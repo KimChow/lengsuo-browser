@@ -63,7 +63,7 @@
     },
     {
       "path": "patches/0016-browser-wiring.patch",
-      "sha256": "176cccc9ef2b27beceb97a45e2831fae4db3bbae9363b1f32faa4269713b27a6"
+      "sha256": "146012d08bf1c4286af7ae93e77d071484b4c31b998087bca6f83c9d41d446d6"
     }
   ]
 }
