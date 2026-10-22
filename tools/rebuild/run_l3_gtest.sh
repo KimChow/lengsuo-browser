@@ -88,6 +88,12 @@ TARGETS=(
   "profile_bundle|native/profile_bundle.cc native/kernel_pipe_json.cc"
   "l3_envelope|native/l3_envelope.cc"
   "l3_envelope_session|native/l3_envelope_session.cc native/l3_envelope.cc native/kernel_pipe_keys.cc native/kernel_pipe_frame.cc"
+  # The access policy (task T2). The layers are listed the way they depend
+  # on each other: the matchers come first because the rules need the URL
+  # validator.
+  "policy_match|native/policy_match.cc native/profile_bundle.cc native/kernel_pipe_json.cc"
+  "policy_rules|native/policy_rules.cc native/policy_match.cc native/profile_bundle.cc native/kernel_pipe_json.cc"
+  "policy_block|native/policy_block.cc native/policy_rules.cc native/policy_match.cc native/policy_report.cc native/profile_bundle.cc native/kernel_pipe_json.cc native/action_table.cc"
 )
 
 FAILED=()

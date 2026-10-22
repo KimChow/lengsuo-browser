@@ -51,6 +51,7 @@ TEST(ActionTable, KnowsTheFourContractActions) {
   EXPECT_TRUE(table.Knows(kActionWebGLSample));
   EXPECT_TRUE(table.Knows(kActionPageEvent));
   EXPECT_TRUE(table.Knows(kActionHeartbeat));
+  EXPECT_TRUE(table.Knows(kActionPolicyEvent));
   EXPECT_FALSE(table.Knows("NoSuchAction"));
   EXPECT_FALSE(table.Knows(""));
   // A name is matched whole: a prefix is not a name.
@@ -60,15 +61,17 @@ TEST(ActionTable, KnowsTheFourContractActions) {
 
 TEST(ActionTable, NamesListsEveryActionInOrder) {
   const std::vector<std::string> names = ActionTable::Get().Names();
-  ASSERT_EQ(names.size(), 4u);
+  ASSERT_EQ(names.size(), 5u);
   for (const std::string& name : names) {
     EXPECT_TRUE(ActionTable::Get().Knows(name));
   }
-  // The order is fixed so the client's mirror can compare lists.
+  // The order is fixed so the client's mirror can compare lists. The four
+  // contract actions keep their places; the policy event was appended.
   EXPECT_EQ(names[0], kActionCanvasSample);
   EXPECT_EQ(names[1], kActionWebGLSample);
   EXPECT_EQ(names[2], kActionPageEvent);
   EXPECT_EQ(names[3], kActionHeartbeat);
+  EXPECT_EQ(names[4], kActionPolicyEvent);
 }
 
 TEST(ActionTable, FindReturnsNullForAnUnknownName) {
@@ -76,6 +79,48 @@ TEST(ActionTable, FindReturnsNullForAnUnknownName) {
   const ActionSchema* schema = ActionTable::Get().Find(kActionPageEvent);
   ASSERT_NE(schema, nullptr);
   EXPECT_EQ(schema->action, kActionPageEvent);
+}
+
+TEST(ActionTable, PolicyEventSchemaIsTheDecision) {
+  const ActionSchema* schema = ActionTable::Get().Find(kActionPolicyEvent);
+  ASSERT_NE(schema, nullptr);
+  ASSERT_EQ(schema->fields.size(), 7u);
+  EXPECT_EQ(schema->fields[0].name, "from");
+  EXPECT_EQ(schema->fields[1].name, "action");
+  EXPECT_EQ(schema->fields[2].name, "url");
+  EXPECT_EQ(schema->fields[3].name, "category");
+  EXPECT_EQ(schema->fields[4].name, "decision");
+  EXPECT_EQ(schema->fields[5].name, "reason");
+  // The rule is the one optional field: a decision that no rule matched has
+  // no rule to report.
+  EXPECT_EQ(schema->fields[6].name, "rule");
+  EXPECT_TRUE(schema->fields[6].optional);
+}
+
+TEST(ActionValidate, AcceptsAPolicyEventPayload) {
+  const ActionTable& table = ActionTable::Get();
+  const ActionCollectorPolicy policy;
+  const char kPolicyEvent[] =
+      R"({"from":"browser","action":"PolicyEvent",)"
+      R"("url":"https://example.test/x","category":"access",)"
+      R"("decision":"block","reason":"black_list","rule":"^https://x$"})";
+  const ActionValidation result = ValidateActionPayload(
+      table, kActionPolicyEvent, kPolicyEvent, policy);
+  EXPECT_TRUE(result.ok);
+  EXPECT_EQ(result.reason, ActionRejectReason::kNone);
+}
+
+TEST(ActionValidate, AcceptsAPolicyEventPayloadWithoutARule) {
+  const ActionTable& table = ActionTable::Get();
+  const ActionCollectorPolicy policy;
+  const char kPolicyEvent[] =
+      R"({"from":"browser","action":"PolicyEvent",)"
+      R"("url":"https://example.test/x","category":"access",)"
+      R"("decision":"allow","reason":"no_match"})";
+  const ActionValidation result = ValidateActionPayload(
+      table, kActionPolicyEvent, kPolicyEvent, policy);
+  EXPECT_TRUE(result.ok);
+  EXPECT_EQ(result.reason, ActionRejectReason::kNone);
 }
 
 TEST(ActionTable, CanvasSchemaHasDrewTextAndDataUrl) {

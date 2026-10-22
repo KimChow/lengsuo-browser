@@ -212,3 +212,54 @@ source_set("l3_envelope_session") {
   # it, it does not reach for the crypto itself.
   public_deps = [ ":l3_envelope" ]
 }
+
+# The access policy (task T2). Four layers, split by dependency:
+#
+#   policy_rules   the rules, and how to read them out of the ConfigBundle
+#   policy_match   the two matchers: a glob for a host, a regex for a URL
+#   policy_block   the decision: send the request or cancel it
+#   policy_report  the uplink payload for a decision
+#
+# policy_rules needs the URL validator, which lives in policy_match, so the
+# dependency runs the other way round from the naming. There is no cycle:
+# the header does not include the other, only the .cc does.
+source_set("policy_rules") {
+  sources = [
+    "policy_rules.cc",
+    "policy_rules.h",
+  ]
+  public_deps = [ ":policy_match" ]
+}
+
+# The matchers. The host matcher reuses the profile sync rules' glob, so
+# this target depends on the profile bundle rather than carrying a second
+# glob.
+source_set("policy_match") {
+  sources = [
+    "policy_match.cc",
+    "policy_match.h",
+  ]
+  public_deps = [ ":profile_bundle" ]
+}
+
+source_set("policy_block") {
+  sources = [
+    "policy_block.cc",
+    "policy_block.h",
+  ]
+  public_deps = [
+    ":policy_match",
+    ":policy_rules",
+  ]
+}
+
+source_set("policy_report") {
+  sources = [
+    "policy_report.cc",
+    "policy_report.h",
+  ]
+  public_deps = [
+    ":action_table",
+    ":policy_block",
+  ]
+}

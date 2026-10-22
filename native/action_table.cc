@@ -61,6 +61,10 @@ ActionTable::ActionTable() {
   schemas_.push_back(ActionSchema{
       kActionHeartbeat,
       {String("from"), String("action"), Integer("ts_unix")}});
+  schemas_.push_back(ActionSchema{
+      kActionPolicyEvent,
+      {String("from"), String("action"), String("url"), String("category"),
+       String("decision"), String("reason"), String("rule", /*optional=*/true)}});
 }
 
 const ActionTable& ActionTable::Get() {

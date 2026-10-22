@@ -35,6 +35,9 @@ inline constexpr char kActionCanvasSample[] = "CanvasSample";
 inline constexpr char kActionWebGLSample[] = "WebGLSample";
 inline constexpr char kActionPageEvent[] = "PageEvent";
 inline constexpr char kActionHeartbeat[] = "Heartbeat";
+// The access policy's decision (task T2). The table is append-only, so this
+// one goes at the end and the four above keep their places.
+inline constexpr char kActionPolicyEvent[] = "PolicyEvent";
 
 // The field that carries the bitmap. The table checks for it by name so a
 // payload cannot smuggle one past the check under a different spelling.

@@ -106,6 +106,20 @@ MAPPING = (
      "lengsuo/public/mojom/l3_provisioning.mojom"),
     ("public/mojom/BUILD.gn", "lengsuo/public/mojom/BUILD.gn"),
     ("integration/BUILD.gn", "lengsuo/integration/BUILD.gn"),
+    # The access policy (task T2). Appended at the end: the mapping is
+    # append-only so that two cards can add their own files without touching
+    # each other's lines.
+    ("native/policy_rules.h", "lengsuo/native/policy_rules.h"),
+    ("native/policy_rules.cc", "lengsuo/native/policy_rules.cc"),
+    ("native/policy_rules_test.cc", "lengsuo/native/policy_rules_test.cc"),
+    ("native/policy_match.h", "lengsuo/native/policy_match.h"),
+    ("native/policy_match.cc", "lengsuo/native/policy_match.cc"),
+    ("native/policy_match_test.cc", "lengsuo/native/policy_match_test.cc"),
+    ("native/policy_block.h", "lengsuo/native/policy_block.h"),
+    ("native/policy_block.cc", "lengsuo/native/policy_block.cc"),
+    ("native/policy_block_test.cc", "lengsuo/native/policy_block_test.cc"),
+    ("native/policy_report.h", "lengsuo/native/policy_report.h"),
+    ("native/policy_report.cc", "lengsuo/native/policy_report.cc"),
 )
 GN_TARGETS = ("//lengsuo/integration:bootstrap", "//lengsuo/native:profile_wire")
 MAX_SOURCE = 1024 * 1024
