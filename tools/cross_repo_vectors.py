@@ -167,6 +167,20 @@ def _rules_tool():
     return module
 
 
+def _bootstrap_tool():
+    """Load the bootstrap-layer check, which lives next to this file.
+
+    Same reason as the frame and rules layers: this file is already near
+    the size limit, and the module is loaded by path because `tools/` is
+    not a package and this file is loaded by path from the tests.
+    """
+    path = pathlib.Path(__file__).resolve().parent / "cross_repo_bootstrap.py"
+    spec = importlib.util.spec_from_file_location("cross_repo_bootstrap", path)
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    return module
+
+
 def hex_tokens(text: str) -> str:
     """Return the hex blob in `text` as lowercase byte pairs.
 
@@ -635,6 +649,34 @@ def main(argv: list[str] | None = None) -> int:
                 ok = False
                 for name, value in check.values.items():
                     print("    %-9s %s" % (name, value))
+
+    # The bootstrap layer: the endpoint prefix, the command-line switch
+    # name, the HKDF info string, four byte counts, the two OS endpoint
+    # shapes and the Hello JSON key names. These are needed *before* a
+    # single frame byte is on the wire, so a drift here does not show up
+    # as a protocol error -- it shows up as "cannot connect" (wrong
+    # endpoint) or as a fail-closed kernel start (wrong HKDF info). Both
+    # repos hardcode their own copy of each and each asserts its own
+    # output against its own copy, so the contract is the third side
+    # here as well.
+    #
+    # A missing side is reported, not skipped: an absent check looks
+    # exactly like a passing one.
+    print()
+    bootstrap_tool = _bootstrap_tool()
+    try:
+        bootstrap_checks = bootstrap_tool.compare_bootstrap(kernel, client)
+    except (OSError, bootstrap_tool.BootstrapVectorError) as error:
+        print("bootstrap layer        %s" % error)
+        ok = False
+    else:
+        for check in bootstrap_checks:
+            print("%-22s %-18s %s" % (check.label, "",
+                                      "OK" if check.ok else "MISMATCH"))
+            if not check.ok:
+                ok = False
+                for name, value in check.values.items():
+                    print("    %-9s %r" % (name, value))
 
     print()
     print("cross-repo vectors agree:" , "YES" if ok else "NO")
