@@ -11,11 +11,13 @@ These tests are pure text checks: they need no Chromium checkout.
 """
 import hashlib
 import json
-import pathlib
+from pathlib import Path
 import re
 import unittest
 
-ROOT = pathlib.Path(__file__).resolve().parents[1]
+ROOT = Path(__file__).resolve().parents[1]
+PATCHES = ROOT / "patches"
+LOCK = ROOT / "baseline.json"
 PATCHES = ROOT / "patches"
 LOCK = ROOT / "baseline.json"
 
@@ -34,6 +36,49 @@ def _added_or_modified_paths(patch_text):
         for line in patch_text.splitlines()
         if line.startswith("+++ b/")
     ]
+
+
+def _upstream_additions(text):
+    """(path, added-line) for every line this patch adds to an *existing* file.
+
+    A section that creates a file (``--- /dev/null``) is skipped on purpose.
+    Every line of a new file reads as an addition, so counting them would flag
+    0011's whole payload as a duplicate of itself -- that is exactly how an
+    earlier auto-dedup attempt came to propose deleting 3360 lines of a
+    brand-new file. Only edits to files that already exist can collide with
+    an earlier patch's edit to the same file.
+
+    Whitespace-only additions are skipped as well: a blank ``+`` line appears
+    legitimately in many hunks and collides by accident, not by defect.
+    """
+    pairs = []
+    path = None
+    creates_file = False
+    in_hunk = False
+    for line in text.splitlines():
+        if line.startswith("--- "):
+            creates_file = line[4:].strip() == "/dev/null"
+            path = None
+            in_hunk = False
+        elif line.startswith("+++ "):
+            new = line[4:].strip()
+            if new == "/dev/null":
+                creates_file = True
+                path = None
+            else:
+                path = new[2:] if new[:2] in ("a/", "b/") else new
+            in_hunk = False
+        elif line.startswith("@@"):
+            in_hunk = True
+        elif not in_hunk or path is None or creates_file:
+            continue
+        elif line.startswith("+"):
+            added = line[1:]
+            if added.strip():
+                pairs.append((path, added))
+        elif not line.startswith((" ", "-", "\\")):
+            in_hunk = False
+    return pairs
 
 
 def _git_blob(rel: str):
@@ -174,6 +219,41 @@ class PatchLockTests(unittest.TestCase):
                     owners.setdefault(path, []).append(patch.name)
         duplicated = {k: v for k, v in owners.items() if len(v) > 1}
         self.assertEqual(duplicated, {}, "file shipped by multiple patches")
+
+    def test_no_line_is_added_twice_to_the_same_upstream_file(self):
+        """No two patches may add the exact same *marker* line to one file.
+
+        That was how 0004 and 0016 both added
+        `"//lengsuo/integration:bootstrap"` to `chrome/browser/BUILD.gn`: every
+        patch applies alone, yet the series fails on a clean tree because the
+        tree already carries the line from the earlier patch.
+
+        The check is deliberately narrow, because a broad one is unusable:
+        a single patch legitimately adds `  }` or `    return;` many times, and
+        two patches can each add a bare `  }` to the same file at unrelated
+        places. Only lines carrying our own `lengsuo` marker are distinctive
+        enough that a repeat means a duplicate hunk. Existing sources
+        (`lengsuo/`) stay out of scope -- they are covered by
+        test_no_patch_ships_the_same_file_twice.
+        """
+        owners = {}
+        for entry in _lock()["patches"]:
+            path_name = Path(entry["path"]).name
+            text = (ROOT / entry["path"]).read_text(
+                encoding="utf-8", errors="replace")
+            for target, added in _upstream_additions(text):
+                if target.startswith("lengsuo/"):
+                    continue
+                if "lengsuo" not in added.lower():
+                    continue
+                names = owners.setdefault((target, added), [])
+                if path_name not in names:
+                    names.append(path_name)
+        duplicates = {k: v for k, v in owners.items() if len(v) > 1}
+        self.assertEqual(
+            duplicates, {},
+            "one upstream marker line added by more than one patch: "
+            + "; ".join(f"{k}: {v}" for k, v in duplicates.items()))
 
 
 class PatchContentTests(unittest.TestCase):

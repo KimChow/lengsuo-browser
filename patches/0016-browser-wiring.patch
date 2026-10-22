@@ -234,11 +234,10 @@ diff --git a/chrome/browser/BUILD.gn b/chrome/browser/BUILD.gn
 index b58905d..600de8f 100644
 --- a/chrome/browser/BUILD.gn
 +++ b/chrome/browser/BUILD.gn
-@@ -879,6 +879,9 @@ source_set("core") {
+@@ -879,6 +879,8 @@ source_set("core") {
    }
  
    deps = [
-+    "//lengsuo/integration:bootstrap",
 +    "//lengsuo/integration:kernel_pipe_client",
 +    "//lengsuo/integration:l3_provisioning",
      ":active_use_util",
