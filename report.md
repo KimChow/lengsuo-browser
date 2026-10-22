@@ -695,3 +695,66 @@ fmt RC=0、clippy `-D warnings` RC=0、**test 436 用例 0 失败**、build RC=0
 ⇒ **这个跨仓固定向量没有落进任何仓的常驻测试** ⇒ 下次改键序或字段会静默漂移。
 ⇒ **建议**：把「155 字节载荷」写成内核侧一条 gtest（断言字节串）+
 客户端侧一条 `const`（已有 `profile_vectors.rs`）⇒ 两侧 CI 各跑各的，才算真守卫。
+
+## R-F. ✅ 2026-10-22 07:5x 补记：R 的跨仓向量已变成**常驻守卫**（R-E 的建议已落地）
+
+**R-E 记的那个落差已经修掉了**。当时的判断是「逐字节比较是临时程序做的，
+没落进任何仓的常驻测试」⇒ 现在它落进去了。
+
+### 1. 为什么这是个真缺口（不是"锦上添花"）
+
+R 卡两侧**各硬编码了一份 155 字节的 `ConfigBundle` 载荷**，但**没有任何一处比较它们**：
+
+| 侧 | 有什么 | 缺什么 |
+|---|---|---|
+| 客户端 | `profile_vectors.rs` 的 `CONFIG_BUNDLE_PAYLOAD`（155 B）+ 断言「自己的输出 == 自己的常量」 | ⛔ 没跟内核那份比 |
+| 内核 | gtest 只做「**自己拼的**载荷 ⇄ 自己的解析器」往返 | ⛔ 没跟客户端那份比 |
+
+⚠️ **内核侧自拼的那份是 127 字节** —— 它少了 `max_package_bytes` 字段
+（`TheDefaultSectionRoundTripsThroughTheParser` 拼的是 `include` + `exclude` 就收尾），
+**与真正上线的 155 字节不是同一串**。
+⇒ 改键序或改字段，**两边都变，两边都还绿** ⇒ 这类漂移没有任何门禁会拦。
+
+### 2. 落地（`addfb08` / `0f14e20` / `d891bd0`）
+
+- **内核侧** `native/profile_bundle_test.cc` 新增 `TheRunnerPayloadIsTheCrossRepoVector`：
+  硬编码 runner 真正发的那 155 字节，断言
+  ① 解析结果 == 内核默认规则、② 长度钉死 155（就是帧头的 `len`）、
+  ③ 载荷里无 `key` / 无 `data_url`。
+- **工具** `tools/cross_repo_vectors.py` 新增两个读法
+  （内核 C++ 裸字符串 / 客户端 Rust `concat!` 裸字符串），
+  并在主流程里**把两侧载荷逐字节相比** ⇒ 不一致即报 `MISMATCH`；
+  **缺一侧报「cannot read」而不是静默跳过**（静默跳过的检查看起来像通过的检查）。
+- **先失败再实现**：4 条新用例在实现前**全红**（工具没有 `CLIENT_PROFILE_REL` /
+  `find_kernel_profile_payload` / `rust_profile_payload`），实现后全绿。
+
+### 3. 47 上实跑（两仓都在 ⇒ 全部真跑，无 skip）
+
+```
+python3 -m unittest tests.test_cross_repo_vectors   → 13 用例全绿
+python3 tools/cross_repo_vectors.py --kernel <内核> --client <客户端>
+  ciphertext (45 B)      45 B, 45 B, 45 B   OK
+  tag (16 B)             16 B, 16 B, 16 B   OK
+  AAD (16 B)             16 B, 16 B         OK
+  payload (85 B)         85 B, 85 B, 85 B   OK
+  clear region omits 63742d3031         OK
+  clear region omits 000000006553f100   OK
+  ConfigBundle payload  155 B              OK     ← 新增
+  cross-repo vectors agree: YES
+```
+
+### 4. 改了 `native/` ⇒ 走补丁纪律 + 重跑全部闸门
+
+| 项 | 结果 |
+|---|---|
+| commit → `relock_baseline` → `test_patch_replay` → `make_sources_patch` | 9 用例全绿；**本机与 47 生成的 0011 与 baseline 逐字节相同**（md5 一致）|
+| `make_sources_patch.py --check` | **patch 0011 matches the repository sources** |
+| overlay + 14 个补丁重放 | **0 失败**（`patch failed: none`）|
+| 28 个 `.rej` | **逐个核对：每条 hunk 的新增行都已在源码里**（改了标记匹配方式重验）⇒ 全是陈旧残留 ⇒ 清掉后树 diff 仍是 29 文件 / 533 行新增 ⇒ 补丁完好 |
+| `gn gen` | rc=0（36018 targets）|
+| 真编译 | **102 步 0 失败**（chrome 08:01 重链接）—— ⭐ **只 102 步**：改的是**测试文件**，它不在 chrome 构建图里（`grep profile_bundle_test --include=BUILD.gn` ⇒ 空）⇒ 二进制逻辑不变，只重新链接 |
+| `find chrome content components blink lengsuo -newer chrome` | **空**（二进制不比源新）|
+| `accept_l3.py` / `accept_l3_noprofile.py` | **8/8 × 2 全 PASS** |
+| `run_l3_gtest.sh` | **18 目标 / 0 失败**（`profile_bundle` 由 18 → **19** 条用例）|
+| `unittest discover` | **214 绿 / 30 跳过 / 零 error**（原 210）|
+| 泄漏门禁 / 行数 | **OK**（禁词 14 个）/ hard-limit **0** |
