@@ -66,6 +66,10 @@ ActionTable::ActionTable() {
       {String("from"), String("action"), String("rule_id"), String("url"),
        Integer("status"), String("content_type"), Integer("body_bytes"),
        Boolean("truncated"), String(kActionBodyField, /*optional=*/true)}});
+  schemas_.push_back(ActionSchema{
+      kActionPolicyEvent,
+      {String("from"), String("action"), String("url"), String("category"),
+       String("decision"), String("reason"), String("rule", /*optional=*/true)}});
 }
 
 const ActionTable& ActionTable::Get() {
