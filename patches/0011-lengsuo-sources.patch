@@ -2811,10 +2811,10 @@ index 0000000..3bd62d6
 +#endif
 diff --git a/lengsuo/integration/resp_throttle.cc b/lengsuo/integration/resp_throttle.cc
 new file mode 100644
-index 0000000..ad1c24d
+index 0000000..dbc868f
 --- /dev/null
 +++ b/lengsuo/integration/resp_throttle.cc
-@@ -0,0 +1,396 @@
+@@ -0,0 +1,410 @@
 +// resp_throttle - the Chromium half (task 0017, the T1 wiring).
 +//
 +// The pure half of the decision is inline in resp_throttle.h, because
@@ -3033,15 +3033,28 @@ index 0000000..ad1c24d
 +  }
 +
 +  // Take the network's body and the two original endpoints.
++  //
++  // Both stand-ins have to be *valid* endpoints, not merely unused ones: the
++  // ThrottlingURLLoader binds whatever it is given on every call
++  // (`url_loader_.Bind(std::move(new_loader))` is the first thing after the
++  // body swap, and Remote::Bind checks that the pending remote is valid). A
++  // default-constructed PendingRemote is not, so each is a real pipe whose
++  // far end is kept alive until the second call has put the originals back.
++  // Nothing is dispatched through them: no message loop runs between the two
++  // calls, and URLLoader has only FollowRedirect and SetPriority.
 +  mojo::PendingRemote<network::mojom::URLLoader> scratch_loader;
++  mojo::PendingReceiver<network::mojom::URLLoader> scratch_loader_receiver =
++      scratch_loader.InitWithNewPipeAndPassReceiver();
 +  mojo::PendingRemote<network::mojom::URLLoaderClient> scratch_client;
++  mojo::PendingReceiver<network::mojom::URLLoaderClient>
++      scratch_client_receiver = scratch_client.InitWithNewPipeAndPassReceiver();
 +  mojo::PendingRemote<network::mojom::URLLoader> source_loader;
 +  mojo::PendingReceiver<network::mojom::URLLoaderClient> source_client_receiver;
 +  mojo::ScopedDataPipeConsumerHandle network_body;
-+  delegate_->InterceptResponse(
-+      std::move(scratch_loader),
-+      scratch_client.InitWithNewPipeAndPassReceiver(), &source_loader,
-+      &source_client_receiver, &network_body);
++  delegate_->InterceptResponse(std::move(scratch_loader),
++                               std::move(scratch_client_receiver),
++                               &source_loader, &source_client_receiver,
++                               &network_body);
 +
 +  // Give both originals straight back, with the page's pipe where the
 +  // network's body was. Both out-parameters have to be non-null: the
@@ -3127,8 +3140,9 @@ index 0000000..ad1c24d
 +  fp::RespTeeWriteStarted(&tee_);
 +  page_writer_->Write(
 +      std::make_unique<mojo::StringDataSource>(
-+          page_chunk_, mojo::StringDataSource::AsyncWritingMode::
-+                           STRING_STAYS_VALID_UNTIL_COMPLETION),
++          base::span<const char>(page_chunk_),
++          mojo::StringDataSource::AsyncWritingMode::
++              STRING_STAYS_VALID_UNTIL_COMPLETION),
 +      base::BindOnce(&RespThrottle::OnPageWritten,
 +                     weak_factory_.GetWeakPtr()));
 +}

@@ -216,15 +216,28 @@ void RespThrottle::WillProcessResponse(
   }
 
   // Take the network's body and the two original endpoints.
+  //
+  // Both stand-ins have to be *valid* endpoints, not merely unused ones: the
+  // ThrottlingURLLoader binds whatever it is given on every call
+  // (`url_loader_.Bind(std::move(new_loader))` is the first thing after the
+  // body swap, and Remote::Bind checks that the pending remote is valid). A
+  // default-constructed PendingRemote is not, so each is a real pipe whose
+  // far end is kept alive until the second call has put the originals back.
+  // Nothing is dispatched through them: no message loop runs between the two
+  // calls, and URLLoader has only FollowRedirect and SetPriority.
   mojo::PendingRemote<network::mojom::URLLoader> scratch_loader;
+  mojo::PendingReceiver<network::mojom::URLLoader> scratch_loader_receiver =
+      scratch_loader.InitWithNewPipeAndPassReceiver();
   mojo::PendingRemote<network::mojom::URLLoaderClient> scratch_client;
+  mojo::PendingReceiver<network::mojom::URLLoaderClient>
+      scratch_client_receiver = scratch_client.InitWithNewPipeAndPassReceiver();
   mojo::PendingRemote<network::mojom::URLLoader> source_loader;
   mojo::PendingReceiver<network::mojom::URLLoaderClient> source_client_receiver;
   mojo::ScopedDataPipeConsumerHandle network_body;
-  delegate_->InterceptResponse(
-      std::move(scratch_loader),
-      scratch_client.InitWithNewPipeAndPassReceiver(), &source_loader,
-      &source_client_receiver, &network_body);
+  delegate_->InterceptResponse(std::move(scratch_loader),
+                               std::move(scratch_client_receiver),
+                               &source_loader, &source_client_receiver,
+                               &network_body);
 
   // Give both originals straight back, with the page's pipe where the
   // network's body was. Both out-parameters have to be non-null: the
@@ -310,8 +323,9 @@ void RespThrottle::OnSourceReadable(MojoResult result,
   fp::RespTeeWriteStarted(&tee_);
   page_writer_->Write(
       std::make_unique<mojo::StringDataSource>(
-          page_chunk_, mojo::StringDataSource::AsyncWritingMode::
-                           STRING_STAYS_VALID_UNTIL_COMPLETION),
+          base::span<const char>(page_chunk_),
+          mojo::StringDataSource::AsyncWritingMode::
+              STRING_STAYS_VALID_UNTIL_COMPLETION),
       base::BindOnce(&RespThrottle::OnPageWritten,
                      weak_factory_.GetWeakPtr()));
 }
