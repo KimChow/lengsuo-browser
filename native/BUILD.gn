@@ -318,6 +318,7 @@ source_set("policy_block") {
   sources = [
     "policy_block.cc",
     "policy_block.h",
+    "ptr_exclusion.h",
   ]
   public_deps = [
     ":policy_match",
@@ -371,6 +372,7 @@ source_set("fp_target") {
     "fp_target.h",
     "fp_target_match.cc",
     "fp_target_match.h",
+    "ptr_exclusion.h",
   ]
   public_deps = [
     ":fp_sampling",

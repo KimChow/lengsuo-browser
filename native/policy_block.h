@@ -45,6 +45,7 @@
 
 #include "policy_match.h"
 #include "policy_rules.h"
+#include "ptr_exclusion.h"
 
 namespace lengsuo::fp {
 
@@ -77,8 +78,9 @@ struct PolicyDecision {
   // The rule that decided, or nullptr when no rule matched. It points into
   // the AccessPolicy that was evaluated, so that policy has to outlive the
   // decision. It is a pointer so that a decision costs no copy of a pattern
-  // on the request path.
-  const std::string* matched_rule = nullptr;
+  // on the request path, and it is a view rather than an owning field, so
+  // raw_ptr does not apply.
+  LENGSUO_RAW_PTR_EXCLUSION const std::string* matched_rule = nullptr;
 };
 
 // Decides what happens to one request.

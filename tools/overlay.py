@@ -159,6 +159,11 @@ MAPPING = (
     ("integration/policy_throttle.cc", "lengsuo/integration/policy_throttle.cc"),
     ("integration/policy_throttle_test.cc",
      "lengsuo/integration/policy_throttle_test.cc"),
+    # The raw_ptr exclusion marker (fix after the first real build of
+    # 0018/0019): a header-only marker the native layer uses in place of
+    # Chromium's RAW_PTR_EXCLUSION, which it cannot include. Appended at the
+    # end, same append-only rule as the entries above.
+    ("native/ptr_exclusion.h", "lengsuo/native/ptr_exclusion.h"),
 )
 GN_TARGETS = ("//lengsuo/integration:bootstrap", "//lengsuo/native:profile_wire")
 MAX_SOURCE = 1024 * 1024

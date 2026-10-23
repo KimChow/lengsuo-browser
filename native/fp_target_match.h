@@ -34,13 +34,16 @@
 #include <string_view>
 
 #include "fp_target.h"
+#include "ptr_exclusion.h"
 
 namespace lengsuo::fp {
 
 // The decision for one URL and one dimension.
 struct FpTargetDecision {
-  // The target that applies, or nullptr when none does.
-  const FpTarget* target = nullptr;
+  // The target that applies, or nullptr when none does. It points into the
+  // caller's table, which owns the object, so it is not an owning field and
+  // raw_ptr does not apply.
+  LENGSUO_RAW_PTR_EXCLUSION const FpTarget* target = nullptr;
   // True when a target applies. False means the caller keeps the existing
   // behaviour.
   bool apply = false;
