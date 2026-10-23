@@ -12,11 +12,15 @@
 #include <cstdint>
 #include <cstring>
 #include <span>
+#include <string>
 #include <string_view>
 #include <utility>
 
 #include "font_family_traits.h"
 #include "font_metrics.h"
+#include "fp_sampling.h"
+#include "fp_target.h"
+#include "fp_target_match.h"
 
 namespace lengsuo::fp {
 namespace {
@@ -143,6 +147,112 @@ std::int64_t PowerOfTwoAtMost(std::int64_t value) {
     result *= 2;
   }
   return result;
+}
+
+// The installed table of per-URL target values. Function-local static for the
+// same reason as the font traits below: no exit-time destructor.
+FpTargetTable& TargetTableStorage() {
+  static FpTargetTable table;
+  return table;
+}
+
+// The capability-cap bias of one seed. Factored out of WebGLParamBias so the
+// profile-derived seed and a per-URL target seed share one implementation and
+// one allow-list; only the seed differs.
+std::int32_t BiasWithSeed(std::uint64_t seed,
+                          std::uint32_t pname,
+                          std::int32_t original) {
+  // Allow-list: only informational MAX_* capability caps form the WebGL
+  // fingerprint surface. State params (ACTIVE_TEXTURE, DEPTH_FUNC,
+  // CURRENT_PROGRAM, VIEWPORT, SCISSOR_BOX, ...) must pass through untouched
+  // or pages break. Values are Khronos GL enums; this translation unit does
+  // not include the GL headers.
+  switch (pname) {
+    case 0x0D33:  // GL_MAX_TEXTURE_SIZE
+    case 0x8073:  // GL_MAX_3D_TEXTURE_SIZE (WebGL2)
+    case 0x84E8:  // GL_MAX_RENDERBUFFER_SIZE
+    case 0x851C:  // GL_MAX_CUBE_MAP_TEXTURE_SIZE
+    case 0x8869:  // GL_MAX_VERTEX_ATTRIBS
+    case 0x8872:  // GL_MAX_TEXTURE_IMAGE_UNITS
+    case 0x88FF:  // GL_MAX_ARRAY_TEXTURE_LAYERS (WebGL2)
+    case 0x8B4C:  // GL_MAX_VERTEX_TEXTURE_IMAGE_UNITS
+    case 0x8B4D:  // GL_MAX_COMBINED_TEXTURE_IMAGE_UNITS
+    case 0x8D57:  // GL_MAX_SAMPLES
+    case 0x8D6B:  // GL_MAX_ELEMENT_INDEX (WebGL2)
+    case 0x8DFB:  // GL_MAX_VERTEX_UNIFORM_VECTORS
+    case 0x8DFC:  // GL_MAX_VARYING_VECTORS
+    case 0x8DFD:  // GL_MAX_FRAGMENT_UNIFORM_VECTORS
+      break;
+    default:
+      return original;
+  }
+  if (original <= 0) {
+    return original;
+  }
+  // Mix the cap value in so two profiles can share one dimension while still
+  // advertising different limits.
+  const std::uint64_t mixed =
+      Mix(seed ^ (static_cast<std::uint64_t>(pname) << 24) ^
+          static_cast<std::uint64_t>(original));
+  // Report a value a real driver could actually report.
+  //
+  // Drivers do not hand back arbitrary integers here; the caps people look at
+  // (texture size, renderbuffer size, uniform/varying counts) come from a small
+  // set of shapes: powers of two, the *_BITS fields stepping by 1, and a handful
+  // of architecture constants. 6364 is not one of them — a randomised number in
+  // that range is more distinctive than the unmodified driver value, which is
+  // the opposite of what this override is for.
+  //
+  // Never advertise more than the driver supports: a page that trusts a higher
+  // cap would allocate a texture/shader that cannot exist and fail at run time.
+  // So the candidate set is filtered to <= original, and the step count is
+  // measured on that filtered set to keep the distribution uniform.
+  //
+  // The driver's own value stays a candidate. That is deliberate and it is the
+  // honest outcome: on a machine with a real GPU the driver value is already a
+  // true measurement, and lowering it only makes sense as "this profile is the
+  // next tier down" - which also has to change the renderer string. Until the
+  // server sends per-tier parameter tables, most profiles therefore keep the
+  // driver value, and this dimension carries almost no entropy. That is the
+  // correct trade: a plausible value beats a perturbed one.
+  std::int32_t candidates[16];
+  std::size_t count = 0;
+  const auto add_candidate = [&](std::int64_t value) {
+    if (value <= 0 || value > original || count >= 16) {
+      return;
+    }
+    for (std::size_t i = 0; i < count; ++i) {
+      if (candidates[i] == value) {
+        return;
+      }
+    }
+    candidates[count++] = static_cast<std::int32_t>(value);
+  };
+  // The driver's own value is always a candidate: leaving a cap untouched is
+  // the most plausible outcome of all.
+  add_candidate(original);
+  // Powers of two at and below the driver value, down to three steps.
+  for (int shift = 0; shift <= 3; ++shift) {
+    const std::int64_t step = PowerOfTwoAtMost(original) >> shift;
+    if (step > 0) {
+      add_candidate(step);
+    }
+  }
+  // Real cards commonly report these exact values.
+  for (std::int64_t common : {16, 24, 30, 31, 32, 48, 60, 64, 96, 128, 256}) {
+    add_candidate(common);
+  }
+  // Stay within half the driver value: one real tier down at most. A larger
+  // drop would contradict the renderer string the profile advertises (a card
+  // claiming 32K textures does not report 4K).
+  const std::int64_t bound = original > 8 ? original / 2 : 1;
+  const std::int64_t floor_value = original - bound;
+  if (count == 0) {
+    return original;
+  }
+  const std::int32_t pick =
+      candidates[static_cast<std::size_t>(mixed % count)];
+  return pick >= floor_value ? pick : original;
 }
 }  // namespace
 
@@ -304,97 +414,66 @@ std::int32_t WebGLParamBias(std::uint32_t pname, std::int32_t original) {
   if (g_webgl_params == 0) {
     return original;
   }
-  // Allow-list: only informational MAX_* capability caps form the WebGL
-  // fingerprint surface. State params (ACTIVE_TEXTURE, DEPTH_FUNC,
-  // CURRENT_PROGRAM, VIEWPORT, SCISSOR_BOX, ...) must pass through untouched
-  // or pages break. Values are Khronos GL enums; this translation unit does
-  // not include the GL headers.
-  switch (pname) {
-    case 0x0D33:  // GL_MAX_TEXTURE_SIZE
-    case 0x8073:  // GL_MAX_3D_TEXTURE_SIZE (WebGL2)
-    case 0x84E8:  // GL_MAX_RENDERBUFFER_SIZE
-    case 0x851C:  // GL_MAX_CUBE_MAP_TEXTURE_SIZE
-    case 0x8869:  // GL_MAX_VERTEX_ATTRIBS
-    case 0x8872:  // GL_MAX_TEXTURE_IMAGE_UNITS
-    case 0x88FF:  // GL_MAX_ARRAY_TEXTURE_LAYERS (WebGL2)
-    case 0x8B4C:  // GL_MAX_VERTEX_TEXTURE_IMAGE_UNITS
-    case 0x8B4D:  // GL_MAX_COMBINED_TEXTURE_IMAGE_UNITS
-    case 0x8D57:  // GL_MAX_SAMPLES
-    case 0x8D6B:  // GL_MAX_ELEMENT_INDEX (WebGL2)
-    case 0x8DFB:  // GL_MAX_VERTEX_UNIFORM_VECTORS
-    case 0x8DFC:  // GL_MAX_VARYING_VECTORS
-    case 0x8DFD:  // GL_MAX_FRAGMENT_UNIFORM_VECTORS
-      break;
-    default:
-      return original;
-  }
-  if (original <= 0) {
-    return original;
-  }
-  // Mix the cap value in so two profiles can share one dimension while still
-  // advertising different limits.
-  const std::uint64_t mixed =
-      Mix(WebGLParamsSeed() ^ (static_cast<std::uint64_t>(pname) << 24) ^
-          static_cast<std::uint64_t>(original));
-  // Report a value a real driver could actually report.
-  //
-  // Drivers do not hand back arbitrary integers here; the caps people look at
-  // (texture size, renderbuffer size, uniform/varying counts) come from a small
-  // set of shapes: powers of two, the *_BITS fields stepping by 1, and a handful
-  // of architecture constants. 6364 is not one of them — a randomised number in
-  // that range is more distinctive than the unmodified driver value, which is
-  // the opposite of what this override is for.
-  //
-  // Never advertise more than the driver supports: a page that trusts a higher
-  // cap would allocate a texture/shader that cannot exist and fail at run time.
-  // So the candidate set is filtered to <= original, and the step count is
-  // measured on that filtered set to keep the distribution uniform.
-  //
-  // The driver's own value stays a candidate. That is deliberate and it is the
-  // honest outcome: on a machine with a real GPU the driver value is already a
-  // true measurement, and lowering it only makes sense as "this profile is the
-  // next tier down" - which also has to change the renderer string. Until the
-  // server sends per-tier parameter tables, most profiles therefore keep the
-  // driver value, and this dimension carries almost no entropy. That is the
-  // correct trade: a plausible value beats a perturbed one.
-  std::int32_t candidates[16];
-  std::size_t count = 0;
-  const auto add_candidate = [&](std::int64_t value) {
-    if (value <= 0 || value > original || count >= 16) {
-      return;
-    }
-    for (std::size_t i = 0; i < count; ++i) {
-      if (candidates[i] == value) {
-        return;
-      }
-    }
-    candidates[count++] = static_cast<std::int32_t>(value);
-  };
-  // The driver's own value is always a candidate: leaving a cap untouched is
-  // the most plausible outcome of all.
-  add_candidate(original);
-  // Powers of two at and below the driver value, down to three steps.
-  for (int shift = 0; shift <= 3; ++shift) {
-    const std::int64_t step = PowerOfTwoAtMost(original) >> shift;
-    if (step > 0) {
-      add_candidate(step);
+  return BiasWithSeed(WebGLParamsSeed(), pname, original);
+}
+
+// --- Per-URL target values (task T3 wiring) ---
+
+bool SetFpTargetsFromBundle(std::string_view bundle_json) {
+  FpTargetTable table;
+  std::string error;
+  // A bundle without the `fp_target` section is not an error: it installs an
+  // empty table, which is the "nothing is targeted" state. A malformed bundle
+  // fails the same way but installs nothing at all, so a bad configuration can
+  // never leave half of a previous one behind.
+  const bool ok = ParseFpTargetConfig(bundle_json, &table, &error);
+  TargetTableStorage() = std::move(table);
+  return ok;
+}
+
+bool HasFpTargets(FpDimension dimension) {
+  for (const FpTarget& target : TargetTableStorage().targets) {
+    if (target.dimension == dimension) {
+      return true;
     }
   }
-  // Real cards commonly report these exact values.
-  for (std::int64_t common : {16, 24, 30, 31, 32, 48, 60, 64, 96, 128, 256}) {
-    add_candidate(common);
+  return false;
+}
+
+const FpTarget* FpTargetForUrl(std::string_view url, FpDimension dimension) {
+  // No page URL means no target: an empty pattern is the default of its
+  // dimension, but it must not be read as "the URL we could not get".
+  if (url.empty()) {
+    return nullptr;
   }
-  // Stay within half the driver value: one real tier down at most. A larger
-  // drop would contradict the renderer string the profile advertises (a card
-  // claiming 32K textures does not report 4K).
-  const std::int64_t bound = original > 8 ? original / 2 : 1;
-  const std::int64_t floor_value = original - bound;
-  if (count == 0) {
-    return original;
+  return SelectFpTarget(TargetTableStorage(), url, dimension);
+}
+
+bool FpTargetSeedForUrl(std::string_view url,
+                        FpDimension dimension,
+                        std::uint64_t* seed) {
+  if (seed == nullptr) {
+    return false;
   }
-  const std::int32_t pick =
-      candidates[static_cast<std::size_t>(mixed % count)];
-  return pick >= floor_value ? pick : original;
+  const FpTarget* target = FpTargetForUrl(url, dimension);
+  if (target == nullptr || target->skip) {
+    return false;
+  }
+  *seed = AttemptSeed(TargetSeed(target->target_hash, SamplingSpecOf(*target)),
+                      0);
+  return true;
+}
+
+std::int32_t WebGLParamBiasForUrl(std::string_view url,
+                                  std::uint32_t pname,
+                                  std::int32_t original) {
+  std::uint64_t seed = 0;
+  if (!FpTargetSeedForUrl(url, FpDimension::kWebgl, &seed)) {
+    // No target governs this URL, or the target says not to perturb it: the
+    // profile-derived value, unchanged, is the answer.
+    return WebGLParamBias(pname, original);
+  }
+  return BiasWithSeed(seed, pname, original);
 }
 
 }  // namespace lengsuo::fp

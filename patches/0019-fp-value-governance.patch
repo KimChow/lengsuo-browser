@@ -1,0 +1,66 @@
+diff --git a/third_party/blink/renderer/modules/webgl/webgl_rendering_context_base.cc b/third_party/blink/renderer/modules/webgl/webgl_rendering_context_base.cc
+index c6c244d..9a4e83c 100644
+--- a/third_party/blink/renderer/modules/webgl/webgl_rendering_context_base.cc
++++ b/third_party/blink/renderer/modules/webgl/webgl_rendering_context_base.cc
+@@ -160,6 +160,7 @@
+ #include "third_party/blink/renderer/platform/heap/member.h"
+ #include "third_party/blink/renderer/platform/runtime_enabled_features.h"
+ #include "third_party/blink/renderer/platform/scheduler/public/post_cross_thread_task.h"
++#include "third_party/blink/renderer/platform/weborigin/kurl.h"
+ #include "third_party/blink/renderer/platform/wtf/cross_thread_functional.h"
+ #include "third_party/blink/renderer/platform/wtf/functional.h"
+ #include "third_party/blink/renderer/platform/wtf/text/format.h"
+@@ -207,6 +208,18 @@ unsigned WebGLRenderingContextBase::max_active_webgl_contexts_on_worker_ = 0;
+ 
+ namespace {
+ 
++// Lengsuo: the page URL a fingerprint target value is selected by. Empty when
++// this card's targets are not configured - then no URL string is built at all -
++// and empty when the context has no document, which keeps the profile-derived
++// value.
++std::string LengsuoFpTargetUrl(ExecutionContext* execution_context) {
++  if (execution_context == nullptr ||
++      !lengsuo::fp::HasFpTargets(lengsuo::fp::FpDimension::kWebgl)) {
++    return std::string();
++  }
++  return execution_context->Url().GetString().Utf8();
++}
++
+ enum class WebGLANGLEImplementation {
+   // These values are persisted to logs. Entries should not be renumbered and
+   // numeric values should never be reused.
+@@ -8042,7 +8055,9 @@ ScriptValue WebGLRenderingContextBase::GetIntParameter(
+     ContextGL()->GetIntegerv(pname, &value);
+     // Lengsuo: deterministic bias on capability caps (fingerprint surface).
+     // Allow-list only; never touches viewport/scissor/range params.
+-    value = lengsuo::fp::WebGLParamBias(pname, static_cast<std::int32_t>(value));
++    value = lengsuo::fp::WebGLParamBiasForUrl(
++        LengsuoFpTargetUrl(GetExecutionContext()), pname,
++        static_cast<std::int32_t>(value));
+     switch (pname) {
+       case GL_IMPLEMENTATION_COLOR_READ_FORMAT:
+       case GL_IMPLEMENTATION_COLOR_READ_TYPE:
+@@ -8065,8 +8080,9 @@ ScriptValue WebGLRenderingContextBase::GetInt64Parameter(
+   GLint64 value = 0;
+   if (!isContextLost()) {
+     ContextGL()->GetInteger64v(pname, &value);
+-    value = static_cast<GLint64>(lengsuo::fp::WebGLParamBias(
+-        pname, static_cast<std::int32_t>(value)));
++    value = static_cast<GLint64>(lengsuo::fp::WebGLParamBiasForUrl(
++        LengsuoFpTargetUrl(GetExecutionContext()), pname,
++        static_cast<std::int32_t>(value)));
+   }
+   return WebGLAny(script_state, value);
+ }
+@@ -8077,8 +8093,9 @@ ScriptValue WebGLRenderingContextBase::GetUnsignedIntParameter(
+   GLint value = 0;
+   if (!isContextLost()) {
+     ContextGL()->GetIntegerv(pname, &value);
+-    value = lengsuo::fp::WebGLParamBias(
+-        pname, static_cast<std::int32_t>(value));
++    value = lengsuo::fp::WebGLParamBiasForUrl(
++        LengsuoFpTargetUrl(GetExecutionContext()), pname,
++        static_cast<std::int32_t>(value));
+   }
+   return WebGLAny(script_state, static_cast<unsigned>(value));
+ }

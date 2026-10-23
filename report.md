@@ -17,6 +17,7 @@
 | **N** | `docs/l3-reports/task-N-conflicts.md` | `docs/l3-reports/task-N.md` |
 | **R** | `docs/l3-reports/task-R-conflicts.md` | （本卡无卡侧报告，见 R-C） |
 | **凭据线 W** | `docs/credential-dispatch-plan.md` §8.3（W6/扩展 ID）/ §8.5（W5 派卡实录） | （同左；本轮为派卡方取证，非卡侧报告） |
+| **T3**（0019，接线）| `docs/l3-reports/task-T3-wiring-conflicts.md` | `docs/l3-reports/task-T3-wiring.md` |
 
 > `docs/` 只留本地、不入库 ⇒ 这些报告不随仓库分发，也不在 git 历史里。
 
@@ -53,6 +54,8 @@
 | ~~**W-HTTP-PERM**~~ | ✅ **已解决（2026-10-22）**：**不新增权限码**。`tests/scope.rs:119-144` 明文钉死「本仓只允许 `REMOTE_SCOPE_PERMISSIONS`(3) + `DEVICE_PERMISSIONS`(4) 两个集合，第三个域的码会让该测试红」⇒ 加 `credential:unlock` 属**契约级扩宽**，本轮不擅自做。授权改由 **`store_auth`（成员 ⇄ 环境）** 承担 —— 与对标端一致：对标端 `passkey_list:7` / `hasPasswordViewAuth` 是「看不看得到」，而**成员能不能操作这个环境**由 `store_auth(store_id,user_id,granted_by)` 判（`account-sharing.md` §12、`enterprise-model.md` §三）。⇒ 审计 `permission` 维持**留空**（本仓权限码集合封闭，凭据域无动作码）|
 | **W-UNLOCK-OWNER** ⭐ | **已发现并修复（2026-10-22）**：接线卡原判据 `secret.account_id == auth.user_id` 是**跨命名空间比较** —— `SecretRef.account_id` / `PasskeyRef.account_id` 的语义是「**店铺账号**」（`passkey-decision-items.md` §5.6 逐字「哪个店铺账号用哪个 passkey」），而 `auth.user_id` 是**登录用户**。生产上二者永不相等 ⇒ **解锁恒被拒** ⇒ 「同一个公司下面的都可以使用得到，只要给权限」**走不通**。⇒ 修为 `ensure_store_authorized(auth, store_id)`（成员 ⇄ 环境，新增 `StoreAuthorization` trait，与 `DeviceBindings` 同构、fail-closed）。服务端线 `1d05c32` + 契约 §7.6 已改；47 上门禁全绿（含 11 条跨仓 interop 字节互验）|
 | **W-FRAME-LEN** | **契约 §5.2 括号写「不含这 4 字节头」，而帧头实为 8 字节** | 字节语义本身无歧义（偏移表 `payload` 在 `[8..)`，且同仓 `kernel-wire-contract.md` §2 的同形帧明写「payload 字节数（不含本头 **8** 字节）」+ 偏移表 `0/4/5/8` 完全同构）⇒ 判定 **`len` = payload 长度、整帧 = 8 + len** ⇒ W3a 据此实现；但**契约文字应订正一处措辞**（⛔ 本轮未改任何契约字节定义）|
+| **T3-A** ⛔ | **目标值入口无驱动方，且「接到既有注入点」接线卡做不到** | `SetFpTargetsFromBundle()`（`lengsuo/native/fp_overrides.h:59`）是唯一「按 URL 取目标值」入口，全量补丁树里**零调用方**（只有本卡新写的 gtest）。目标表的数据源是 ConfigBundle 的 `fp_target` 段，**冻结在浏览器进程**（`lengsuo/integration/kernel_pipe_client.cc:481-491`，`FrameType::kConfigBundle`），**没有任何路径转发给渲染进程**。现有两个注入点：① `--lengsuo-managed-fp` 开关（`renderer_main.cc:185` ← `chrome_content_browser_client.cc:2944`）形态是**定长冒号字段**，装不下变长目标表；② L3 Mojo 通道（`renderer_main.cc:359`/`:383` `GetL3Runtime().Init(l3_wire,…)`）—— L3W1 文档**没有指纹目标段**（`l3_wire.h` 的 `L3Config` 只有 `pins`/`extensions`/`rules`/`cookies`/`sign`/`signed_unix`）。两处宿主文件（`content/renderer/renderer_main.cc`、`lengsuo/native/l3_runtime.*`、`lengsuo/public/mojom/l3_provisioning.mojom`）**全属 patch 0016**（⛔ 本卡不许改），而「自造第二套通道」被必做项 1 明文禁止 ⇒ 必做项 1 的退路**走不通**。⭐ 四条候选路（①扩命令行开关 ②给 L3W1 加段 ③另开接线卡 ④新增专用开关——④已因必做项 6 排除），**本卡未择一**。无论走①还是②，本卡交付的入口**都不用改**（与 `InitFromSwitch()` 同构：一份值 → 内部装状态）。详见 `docs/l3-reports/task-T3-wiring-conflicts.md` T3-A |
+| **T3-B** ⛔ | **任务书点名的出口无法被目标值驱动** | 任务书要求把扰动喂给「现有的 `WebGLVendor` / `AudioSeed` / `PerturbGlyphAdvance` 等出口」。但：`WebGLVendor()`/`WebGLRenderer()` 是 **seed+slot 解出的字符串面**，而 `FpTarget` 只带不透明的 `target_hash` + 采样几何（`width`/`length`/`drew_text`）⇒ **没有 vendor 字符串字段**，「目标 vendor 是谁」无从定义；`AudioSeed()` / `PerturbGlyphAdvance()` 是**画像级**标量，而 `enum class FpDimension : std::uint8_t { kCanvas, kWebgl }`（`native/fp_sampling.h:38`）**没有 audio/font 维度**。⇒ 本卡**只接了唯一自洽的那条**：`WebGLParamBias(pname, original)`（按 pname 的 `kWebgl` 出口，patch 0008 在 `webgl_rendering_context_base.cc` 调用），并复用**同一段**候选选择代码（原函数体挪成 `BiasWithSeed(seed,…)`，两个出口分别喂 `WebGLParamsSeed()` 与目标 seed）。三条候选路（①扩 `FpDimension`+让 target 带面字符串 ②只接 webgl 参数出口并上报缺口 ③给 `FpTarget` 加 `vendor`/`renderer` 字段），**本卡取了②，需追认**。详见 conflicts T3-B |
 | **W-VEC-SIZE** | **W3a 固定向量文件 273 KB**（其中 262 KB 是 `len = 65536` 那一条的 `payload_hex` + `frame_hex` 字面量，单行最长 131,110 字符）| 任务书 §2.6 要求「合法向量给出期望的**整帧 hex**」且把 `len = 65536` 列为边界例子 ⇒ W3a **照字面执行**（同仓已有 195 KB 的 `wg_padding_vectors.txt` 先例，量级相当）。⚠️ 但该文件是**跨仓共享产物**（客户端 → 扩展 → 服务端三仓各存一份）⇒ 273 KB × 3 仓 + `git diff` 不可读。**卡未自行改动**（正确）。⇒ 备选：把该条改成「`header_hex` + `payload_fill_byte` + `payload_fill_len` + `frame_len`」的填充描述（等价、无歧义、任何语言 5 行可复算），文件降到约 **11 KB**；代价是该条不再有字面量 `frame_hex`。**不影响字节语义**，纯载体选择 ⇒ 请主理人定 |
 
 ### 🟡 待复核
@@ -82,6 +85,13 @@
 | N-H | `tests/test_patch_replay.py` 的 required 集合没加新路径 |
 | N-I | 补丁纪律踩坑：relock 必须在 commit **之后** |
 | R-B | 内核侧**不产出**契约 §4.5 那个 JSON 清单 —— 这是有意的，不是缺口 |
+| T3-C | 画布维度的消费端 `native/canvas_apply.cc`（patch 0007）在允许清单外；`fp_overrides.cc` 的 `g_canvas` 是**算了从没被读过**的死值 ⇒ 本卡对画布**只交付查询入口** |
+| T3-D | `navigator_concurrent_hardware.cc` / `navigator_device_memory.cc` **有意未动**（任务书写「只在必要处」）：它们驱动的是画像级标量 `HardwareConcurrency()`/`DeviceMemoryGB()`，`FpDimension` 无对应维度 ⇒ 无 URL 可传 |
+| T3-E | 「**目标优先于画像槽位**」（`fp_overrides.h:56-58`）是本卡对必做项 2 的读法 ⇒ 推论「画像槽位关着时目标仍生效」（单测已钉死）。任务书未明说两者并存时谁赢，另一条读法结论相反 ⇒ 请复核 |
+| T3-F | 必做项 4（按既有 `CanvasSample`/`WebGLSample` action 回采上报）**本卡未做**：上行发送端在上行链路（patch 0016/0017 范围）不在允许清单内；且无驱动方 ⇒ 无采样可报（必做项 5 要求默认关闭时上报一次都不发生）|
+| T3-G | 两个文件**超出允许清单**（`native/fp_overrides_test.cc` 新建、`tools/rebuild/run_l3_gtest.sh` 加 TARGETS 条目）⇒ **需追认**。前者是任务书 §验收要求的新单测载体；后者不加则新单测根本不会被编译运行（与 O-D / Q-E / N-G 同类）|
+| T3-H | **GN 依赖图改动需真实构建确认**：为免成环拆出新叶子 `canvas_noise_algorithm`，`fp_sampling` 改指它，`canvas_noise` 依赖 `:fp_target`。⛔ 本卡不许跑真实构建 ⇒ 只在图上推演过。⚠️ 连带：`fp_target`→`kernel_pipe_json`+`profile_bundle` 现**经由 `canvas_noise` 进 blink**，若某 blink target 不能依赖这两个则需换形态 |
+| T3-I | `native/fp_overrides.cc` 401 → **479 行**（> 400 软目标，< 700 硬上限；hard 失败 0）⇒ 要压回可把「按 URL 取目标值」拆成独立 source_set |
 
 ### ✅ 已裁定（留档，不必再议）
 

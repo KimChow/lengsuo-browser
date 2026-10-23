@@ -106,6 +106,9 @@ TARGETS=(
   # is compiled: the header decides, and the URLLoaderThrottle in the .cc is
   # Chromium's type and only ever links in a real build.
   "policy_throttle|native/policy_block.cc native/policy_rules.cc native/policy_match.cc native/policy_report.cc native/profile_bundle.cc native/kernel_pipe_json.cc native/action_table.cc"
+  # The per-URL target entry (task 0019). It sits on top of the profile
+  # perturbation, which owns the font tables, so those come along.
+  "fp_overrides|native/fp_overrides.cc native/fp_target.cc native/fp_target_match.cc native/fp_sampling.cc native/canvas_noise.cc native/kernel_pipe_json.cc native/profile_bundle.cc native/font_family_traits.cc native/font_metrics.cc"
 )
 
 FAILED=()
