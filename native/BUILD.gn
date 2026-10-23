@@ -318,3 +318,46 @@ source_set("policy_report") {
     ":policy_block",
   ]
 }
+
+# Fingerprint value governance (task T3). Three layers, each one a
+# dependency of the next:
+#
+#   fp_sampling    the sampling geometry, the fingerprint hash and the
+#                  deterministic perturbation
+#   fp_converge    the hamming distance and the convergence verdict
+#   fp_target      the table of target values and the URL targeting
+#
+# fp_sampling reuses the canvas noise the kernel already had, so it
+# depends on :canvas_noise and on nothing else. fp_target reads the
+# ConfigBundle, so it depends on the JSON reader; the glob form of the
+# URL selection reuses the profile layer's matcher, so it depends on
+# :profile_bundle too.
+source_set("fp_sampling") {
+  sources = [
+    "fp_sampling.cc",
+    "fp_sampling.h",
+  ]
+  public_deps = [ ":canvas_noise" ]
+}
+
+source_set("fp_converge") {
+  sources = [
+    "fp_converge.cc",
+    "fp_converge.h",
+  ]
+  public_deps = [ ":fp_sampling" ]
+}
+
+source_set("fp_target") {
+  sources = [
+    "fp_target.cc",
+    "fp_target.h",
+    "fp_target_match.cc",
+    "fp_target_match.h",
+  ]
+  public_deps = [
+    ":fp_sampling",
+    ":kernel_pipe_json",
+    ":profile_bundle",
+  ]
+}

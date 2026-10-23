@@ -99,6 +99,9 @@ TARGETS=(
   "policy_match|native/policy_match.cc native/profile_bundle.cc native/kernel_pipe_json.cc"
   "policy_rules|native/policy_rules.cc native/policy_match.cc native/profile_bundle.cc native/kernel_pipe_json.cc"
   "policy_block|native/policy_block.cc native/policy_rules.cc native/policy_match.cc native/policy_report.cc native/profile_bundle.cc native/kernel_pipe_json.cc native/action_table.cc"
+  "fp_sampling|native/fp_sampling.cc native/canvas_noise.cc"
+  "fp_converge|native/fp_converge.cc native/fp_sampling.cc native/canvas_noise.cc"
+  "fp_target|native/fp_target.cc native/fp_target_match.cc native/fp_sampling.cc native/canvas_noise.cc native/kernel_pipe_json.cc native/profile_bundle.cc"
 )
 
 FAILED=()
