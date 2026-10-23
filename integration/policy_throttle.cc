@@ -27,7 +27,7 @@
 #include <utility>
 
 #include "lengsuo/integration/kernel_pipe_client.h"
-#include "net/base/net_error_list.h"
+#include "net/base/net_errors.h"
 #include "services/network/public/cpp/resource_request.h"
 #include "third_party/blink/public/common/loader/url_loader_throttle.h"
 

@@ -299,6 +299,7 @@ source_set("policy_rules") {
   sources = [
     "policy_rules.cc",
     "policy_rules.h",
+    "ptr_exclusion.h",
   ]
   public_deps = [ ":policy_match" ]
 }

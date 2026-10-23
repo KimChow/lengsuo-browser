@@ -6,6 +6,7 @@
 
 #include "kernel_pipe_json.h"
 #include "policy_match.h"
+#include "ptr_exclusion.h"
 
 namespace lengsuo::fp {
 namespace {
@@ -226,7 +227,8 @@ void ReadFrameRules(const JsonObject& section,
   }
   struct Entry {
     const char* key;
-    FramePolicyLists* lists;
+    // A view into the caller's parsed lists, not an owning field.
+    LENGSUO_RAW_PTR_EXCLUSION FramePolicyLists* lists;
   };
   const Entry entries[] = {{"main_frame", main_frame}, {"sub_frame", sub_frame}};
   for (const Entry& entry : entries) {
