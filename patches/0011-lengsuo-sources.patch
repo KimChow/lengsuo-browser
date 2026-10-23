@@ -1,9 +1,9 @@
 diff --git a/lengsuo/integration/BUILD.gn b/lengsuo/integration/BUILD.gn
 new file mode 100644
-index 0000000..3dfabf8
+index 0000000..f383403
 --- /dev/null
 +++ b/lengsuo/integration/BUILD.gn
-@@ -0,0 +1,93 @@
+@@ -0,0 +1,121 @@
 +import("//testing/test.gni")
 +
 +# Browser-only dependency. No chrome/browser dependency (avoids a cycle).
@@ -62,10 +62,12 @@ index 0000000..3dfabf8
 +    "browser_bootstrap_unittest.cc",
 +    "l3_provisioning_impl_test.cc",
 +    "official_defaults_unittest.cc",
++    "policy_throttle_test.cc",
 +  ]
 +  deps = [
 +    ":bootstrap",
 +    ":l3_provisioning",
++    ":policy_throttle",
 +    "//lengsuo/native:l3_runtime",
 +    "//base",
 +    "//testing/gtest",
@@ -95,6 +97,32 @@ index 0000000..3dfabf8
 +    # storage-serial selection are pure functions, so the collector in
 +    # kernel_pipe_client.cc only has to read the machine.
 +    "//lengsuo/native:machine_facts",
++  ]
++}
++
++# The access policy on the request path (task 0018). The decision itself is
++# the pure half inline in policy_throttle.h, so it is unit-tested without a
++# Chromium type; the .cc is the URLLoaderThrottle that carries the decision
++# out, which is why this target needs the request-path and the pipe headers.
++#
++# It sits in integration/ rather than native/ because that is where the file
++# lands: //lengsuo/integration/policy_throttle.cc, and GN sources are resolved
++# against their own BUILD.gn's directory (a `..` path is rejected outright).
++source_set("policy_throttle") {
++  sources = [
++    "policy_throttle.cc",
++    "policy_throttle.h",
++  ]
++  public_deps = [
++    # policy_throttle.h includes the policy layers, so anything that includes
++    # it - chrome/browser does - needs them too.
++    "//lengsuo/native:policy_report",
++  ]
++  deps = [
++    ":kernel_pipe_client",
++    "//net",
++    "//services/network/public/cpp",
++    "//third_party/blink/public/common",
 +  ]
 +}
 diff --git a/lengsuo/integration/browser_bootstrap.cc b/lengsuo/integration/browser_bootstrap.cc
@@ -2165,6 +2193,504 @@ index 0000000..226c891
 +  // 9. Null-safe: callers may pass nothing in tests.
 +  lengsuo::ApplyOfficialFeatureDefaults(nullptr);
 +}
+diff --git a/lengsuo/integration/policy_throttle.cc b/lengsuo/integration/policy_throttle.cc
+new file mode 100644
+index 0000000..a25ca83
+--- /dev/null
++++ b/lengsuo/integration/policy_throttle.cc
+@@ -0,0 +1,121 @@
++// policy_throttle - the Chromium half (task 0018).
++//
++// The pure half of the decision is inline in policy_throttle.h, because
++// tools/rebuild/run_l3_gtest.sh compiles that header with a plain g++ and no
++// Chromium headers at all. This file is the half that cannot be tested that
++// way: it derives from blink::URLLoaderThrottle, reads the frozen
++// ConfigBundle off the process pipe, and puts the decision on the uplink.
++//
++// Three things this file is careful about:
++//
++//   * It does not decide anything itself. ReadAccessPolicy,
++//     PolicyHasRules and DecidePolicy are the header's, so the gtest covers
++//     the decision and this file only carries it out.
++//
++//   * It never blocks. WillStartRequest runs on the browser's UI thread, and
++//     everything it touches is local: the bundle is already in the process
++//     and EnqueueEvent is a lock-and-signal, not a write. A policy that had
++//     to wait for the runner would have to defer and resume asynchronously;
++//     this one does not, so it does not.
++//
++//   * It mounts nothing when there is nothing to enforce. CreatePolicyThrottle
++//     returns nullptr for "no pipe", "no section" and "no rules", so a
++//     switched-off policy is not a throttle that always says allow.
++#include "lengsuo/integration/policy_throttle.h"
++
++#include <memory>
++#include <utility>
++
++#include "lengsuo/integration/kernel_pipe_client.h"
++#include "net/base/net_error_list.h"
++#include "services/network/public/cpp/resource_request.h"
++#include "third_party/blink/public/common/loader/url_loader_throttle.h"
++
++namespace lengsuo {
++namespace {
++
++// The error a cancelled request carries.
++//
++// It is the browser's ordinary "this request was blocked on purpose" net
++// error - the same one an extension's declarativeNetRequest block produces -
++// so a page sees a blocked navigation rather than a network failure. The
++// policy's own reason travels separately, on the uplink report; this code is
++// what the page gets.
++constexpr int kBlockedError = net::ERR_BLOCKED_BY_CLIENT;
++
++// The access policy as a request-path hook.
++//
++// The policy is copied in at construction and read-only afterwards, so the
++// decision needs no lock: the throttle is created on the UI thread, lives on
++// it, and is only ever called on it.
++class PolicyThrottle : public blink::URLLoaderThrottle {
++ public:
++  explicit PolicyThrottle(fp::AccessPolicy policy)
++      : policy_(std::move(policy)) {}
++  PolicyThrottle(const PolicyThrottle&) = delete;
++  PolicyThrottle& operator=(const PolicyThrottle&) = delete;
++  ~PolicyThrottle() override = default;
++
++  // Called once, before the resource request is started.
++  //
++  // `defer` is left alone: the decision is made here and now, so the request
++  // is either cancelled or allowed to continue without any waiting.
++  void WillStartRequest(network::ResourceRequest* request,
++                        bool* /*defer*/) override {
++    if (request == nullptr) {
++      return;
++    }
++    const fp::PolicyRequest policy_request = BuildPolicyRequest(
++        request->url.spec(), request->url.host(), request->url.scheme(),
++        request->is_outermost_main_frame ? fp::PolicyFrame::kMainFrame
++                                         : fp::PolicyFrame::kSubFrame);
++    const PolicyOutcome outcome = DecidePolicy(policy_, policy_request);
++
++    // The report goes out even when the request is allowed: the point of the
++    // policy is to say what it decided, and "allowed by this rule" is a
++    // decision. A request no rule matched is not reported at all.
++    if (outcome.report) {
++      if (KernelPipeClient* client = KernelPipeClient::Get()) {
++        // Non-blocking by contract: it validates the payload and drops it
++        // into a bounded queue that a sender thread drains.
++        client->EnqueueEvent(fp::kActionPolicyEvent, outcome.payload);
++      }
++    }
++
++    if (outcome.cancel) {
++      // Cancel before the transaction starts: no connection, no DNS, no
++      // bytes. This is the one place the policy changes what the browser
++      // does, and it does it in-band, which the Delegate's contract allows.
++      delegate_->CancelWithError(kBlockedError);
++    }
++  }
++
++ private:
++  fp::AccessPolicy policy_;
++};
++
++}  // namespace
++
++std::unique_ptr<blink::URLLoaderThrottle> CreatePolicyThrottle() {
++  KernelPipeClient* client = KernelPipeClient::Get();
++  if (client == nullptr) {
++    // No pipe was requested, so the platform sent no configuration. There is
++    // no policy to enforce and nothing to mount.
++    return nullptr;
++  }
++  fp::AccessPolicy policy;
++  if (!ReadAccessPolicy(client->config(), &policy)) {
++    // The bundle does not carry a readable policy. An empty policy refuses
++    // nothing, so mount nothing - never a throttle that blocks everything
++    // because the configuration could not be read.
++    return nullptr;
++  }
++  if (!PolicyHasRules(policy)) {
++    // No rules means no request could ever be decided. Mounting a throttle
++    // for it would be a cost on every request with no benefit.
++    return nullptr;
++  }
++  return std::make_unique<PolicyThrottle>(std::move(policy));
++}
++
++}  // namespace lengsuo
+\ No newline at end of file
+diff --git a/lengsuo/integration/policy_throttle.h b/lengsuo/integration/policy_throttle.h
+new file mode 100644
+index 0000000..fec4d58
+--- /dev/null
++++ b/lengsuo/integration/policy_throttle.h
+@@ -0,0 +1,159 @@
++// policy_throttle - the access policy, enforced on the request path
++// (task 0018).
++//
++// native/policy_rules.h reads the rules, native/policy_match.h matches a
++// request against them, native/policy_block.h decides, and
++// native/policy_report.h builds the uplink payload. All four were in the
++// kernel already and none of them had a caller: the policy was a library
++// with no driver. This file is the driver. It is a URLLoaderThrottle that
++// decides every request before it leaves the browser and tells the runner
++// what it decided.
++//
++// Why this layer. "The request does not go out" is the whole point of
++// policy_block (see its header), and WillStartRequest plus
++// Delegate::CancelWithError is cancel-before-send. A response filter or a
++// renderer-side check would both be too late: by the time either of them
++// looks, the bytes have already left the machine.
++//
++// Where the rules come from. The ConfigBundle (frame type 0x03) the runner
++// sent, which the browser process already holds: KernelPipeClient::Get()
++// owns the frozen bundle, and the throttle reads the `access_policy`
++// section out of it. There is no second configuration channel and no new
++// command-line switch - a policy that is visible in the process list is a
++// policy the platform leaked.
++//
++// Where the split is. The top half of this header is pure logic: it takes a
++// bundle and a request and answers with a decision, so
++// tools/rebuild/run_l3_gtest.sh compiles and tests it with a plain g++, no
++// Chromium headers involved. The bottom half is one declaration, and the
++// Chromium types live in the .cc, exactly as task O did it with
++// l3_provisioning_impl.h.
++//
++// Threading. CreateURLLoaderThrottles runs on the browser's UI thread
++// (chrome/browser/chrome_content_browser_client.cc has
++// DCHECK_CURRENTLY_ON(BrowserThread::UI) at the top of it), so both the
++// factory and every callback below run there. Nothing here waits on
++// anything: the bundle is already in the process, the decision is string
++// arithmetic, and the uplink is a non-blocking enqueue
++// (kernel_pipe_client.h). There is no defer/Resume pair because there is
++// nothing to wait for.
++#ifndef LENGSUO_INTEGRATION_POLICY_THROTTLE_H_
++#define LENGSUO_INTEGRATION_POLICY_THROTTLE_H_
++
++#include <memory>
++#include <string>
++#include <string_view>
++
++#include "lengsuo/native/policy_block.h"
++#include "lengsuo/native/policy_match.h"
++#include "lengsuo/native/policy_report.h"
++#include "lengsuo/native/policy_rules.h"
++
++namespace blink {
++class URLLoaderThrottle;
++}  // namespace blink
++
++namespace lengsuo {
++
++// Reads the `access_policy` section out of a frozen ConfigBundle.
++//
++// Returns false only when the bundle or its section cannot be read. A bundle
++// that carries no `access_policy` section is a success with an empty policy:
++// the platform did not ask for one, and an empty policy refuses nothing.
++// policy_rules.h states the rule this follows - "a browser that blocks
++// everything because the runner is not up yet is a broken browser".
++//
++// On failure `*out` is left as an empty policy, so the caller that ignores
++// the return value still ends up mounting nothing.
++inline bool ReadAccessPolicy(std::string_view bundle_json,
++                             fp::AccessPolicy* out) {
++  return fp::ParseAccessPolicy(bundle_json, out, nullptr);
++}
++
++// True when the policy carries at least one rule that could fire.
++//
++// A policy with no rules cannot decide anything: every request would come
++// back "no match", no request would be cancelled and nothing would be
++// reported. Mounting a throttle for it would cost a virtual call on every
++// request in the browser and buy nothing, so the factory does not.
++inline bool PolicyHasRules(const fp::AccessPolicy& policy) {
++  return !policy.black_list.empty() || !policy.white_list.empty() ||
++         !policy.exception_list.empty() || !policy.black_schemes.empty() ||
++         !policy.main_frame_list.empty() ||
++         !policy.sub_frame_black_list.empty() ||
++         !policy.main_frame_rules.black.empty() ||
++         !policy.main_frame_rules.white.empty() ||
++         !policy.sub_frame_rules.black.empty() ||
++         !policy.sub_frame_rules.white.empty() ||
++         !policy.domain_black_list.empty() ||
++         !policy.domain_check_list.empty();
++}
++
++// The request the policy is asked about.
++//
++// The URL, the host and the scheme are handed in rather than parsed here:
++// the browser already has them (GURL::spec/host/scheme), and parsing a URL
++// is the browser's job, not a rule engine's.
++inline fp::PolicyRequest BuildPolicyRequest(std::string_view url,
++                                            std::string_view host,
++                                            std::string_view scheme,
++                                            fp::PolicyFrame frame) {
++  fp::PolicyRequest request;
++  request.url = std::string(url);
++  request.host = std::string(host);
++  request.scheme = std::string(scheme);
++  request.frame = frame;
++  return request;
++}
++
++// What the throttle does about one request.
++struct PolicyOutcome {
++  // The request is stopped before it is sent. Set when, and only when, the
++  // decision is a cancel.
++  bool cancel = false;
++  // The decision goes on the uplink. False when no rule matched.
++  //
++  // "No rule matched" is not a decision, it is the absence of one, so it is
++  // not reported: a report per request the browser makes would flood the
++  // uplink with lines that all say the policy had no opinion.
++  bool report = false;
++  // The decision itself. `matched_rule` points into the policy that was
++  // evaluated, so that policy has to outlive the outcome.
++  fp::PolicyDecision decision;
++  // The `PolicyEvent` payload, built only when `report` is true. Empty
++  // otherwise, so nothing builds a payload it does not send.
++  std::string payload;
++};
++
++// Decides one request out of a policy that has already been read.
++//
++// This is the whole of what the throttle does to a request, spelled out as
++// a pure function so the gtest can pin it: a block hit cancels, an allow hit
++// does not, and a request no rule matched is neither cancelled nor reported.
++inline PolicyOutcome DecidePolicy(const fp::AccessPolicy& policy,
++                                  const fp::PolicyRequest& request) {
++  PolicyOutcome outcome;
++  outcome.decision = fp::EvaluatePolicy(policy, request);
++  outcome.cancel = outcome.decision.action == fp::PolicyAction::kCancelRequest;
++  outcome.report = outcome.decision.reason != fp::PolicyReason::kNoMatch;
++  if (outcome.report) {
++    outcome.payload = fp::BuildPolicyEventPayload(request, outcome.decision);
++  }
++  return outcome;
++}
++
++// Creates the throttle, or nullptr when the policy is not worth mounting.
++//
++// Returns nullptr when no pipe was requested, when the bundle carries no
++// `access_policy` section, or when that section has no rules. Those are the
++// ordinary "no policy" cases and they must cost nothing, so the caller
++// mounts nothing rather than mounting a throttle that decides "allow" on
++// every request.
++//
++// The throttle is a blink::URLLoaderThrottle; that type is Chromium's and is
++// therefore only named here, never included.
++std::unique_ptr<blink::URLLoaderThrottle> CreatePolicyThrottle();
++
++}  // namespace lengsuo
++
++#endif  // LENGSUO_INTEGRATION_POLICY_THROTTLE_H_
+\ No newline at end of file
+diff --git a/lengsuo/integration/policy_throttle_test.cc b/lengsuo/integration/policy_throttle_test.cc
+new file mode 100644
+index 0000000..1ca54da
+--- /dev/null
++++ b/lengsuo/integration/policy_throttle_test.cc
+@@ -0,0 +1,197 @@
++// policy_throttle_test - what the request path does with a decision
++// (task 0018).
++//
++// The class that talks to Chromium (PolicyThrottle) cannot be compiled here:
++// a plain g++ has no blink::URLLoaderThrottle. What is compiled here is the
++// decision the throttle carries out, which is the part that can be wrong
++// silently - and the three cases the card names are exactly the three that
++// must not drift:
++//
++//   * a block hit cancels the request;
++//   * an allow hit does not;
++//   * a request no rule matched is neither cancelled nor reported.
++//
++// The last one is not an optimisation. "No rule matched" is the absence of a
++// decision, and reporting it would put one line on the uplink for every
++// request the browser makes - a report channel that says nothing, thousands
++// of times a minute. The test says so out loud so it cannot be relaxed
++// quietly.
++//
++// What the throttle does with the outcome - mount nothing when there are no
++// rules, call CancelWithError, enqueue the payload - is one call per branch
++// and is covered by the real build and the acceptance run, which is where a
++// Chromium type can be linked at all.
++#include "lengsuo/integration/policy_throttle.h"
++
++#include <gtest/gtest.h>
++
++#include <string>
++#include <string_view>
++
++#include "lengsuo/native/action_table.h"
++#include "lengsuo/native/policy_block.h"
++#include "lengsuo/native/policy_match.h"
++#include "lengsuo/native/policy_report.h"
++#include "lengsuo/native/policy_rules.h"
++
++namespace lengsuo {
++namespace {
++
++// A ConfigBundle whose `access_policy` section is `section`.
++std::string Bundle(const std::string& section) {
++  return "{\"access_policy\":" + section + "}";
++}
++
++// The policy read out of that section.
++fp::AccessPolicy PolicyFrom(const std::string& section) {
++  fp::AccessPolicy policy;
++  EXPECT_TRUE(ReadAccessPolicy(Bundle(section), &policy));
++  return policy;
++}
++
++// A main-frame https request as the browser hands it to the throttle.
++fp::PolicyRequest Request(std::string url, std::string host) {
++  return BuildPolicyRequest(std::move(url), std::move(host), "https",
++                            fp::PolicyFrame::kMainFrame);
++}
++
++TEST(PolicyThrottleTest, NoRuleMatchedIsNeitherCancelledNorReported) {
++  // A policy with rules, none of which match this request. The policy still
++  // has an opinion - it is simply "nothing here applies".
++  const fp::AccessPolicy policy =
++      PolicyFrom(R"({"black_list":["https://blocked\\.test/.*"]})");
++  const PolicyOutcome outcome =
++      DecidePolicy(policy, Request("https://a.test/x", "a.test"));
++
++  EXPECT_FALSE(outcome.cancel);
++  EXPECT_FALSE(outcome.report);
++  // Nothing was built for a report that is not sent.
++  EXPECT_TRUE(outcome.payload.empty());
++  EXPECT_EQ(outcome.decision.reason, fp::PolicyReason::kNoMatch);
++}
++
++TEST(PolicyThrottleTest, ABlockListHitCancelsAndReports) {
++  const fp::AccessPolicy policy =
++      PolicyFrom(R"({"black_list":["https://blocked\\.test/.*"]})");
++  const PolicyOutcome outcome =
++      DecidePolicy(policy, Request("https://blocked.test/x", "blocked.test"));
++
++  // The request does not go out.
++  EXPECT_TRUE(outcome.cancel);
++  EXPECT_EQ(outcome.decision.action, fp::PolicyAction::kCancelRequest);
++  EXPECT_EQ(outcome.decision.reason, fp::PolicyReason::kBlackListMatch);
++  ASSERT_NE(outcome.decision.matched_rule, nullptr);
++  EXPECT_EQ(*outcome.decision.matched_rule, "https://blocked\\.test/.*");
++  // And the decision is reported.
++  EXPECT_TRUE(outcome.report);
++  EXPECT_NE(outcome.payload.find("\"decision\":\"block\""), std::string::npos);
++  EXPECT_NE(outcome.payload.find("\"reason\":\"black_list\""),
++            std::string::npos);
++}
++
++TEST(PolicyThrottleTest, AWhiteListHitIsReportedButNotCancelled) {
++  const fp::AccessPolicy policy =
++      PolicyFrom(R"({"white_list":["https://allowed\\.test/.*"]})");
++  const PolicyOutcome outcome =
++      DecidePolicy(policy, Request("https://allowed.test/x", "allowed.test"));
++
++  // An allow hit is a decision and is reported, but it does not cancel.
++  EXPECT_FALSE(outcome.cancel);
++  EXPECT_EQ(outcome.decision.action, fp::PolicyAction::kSendRequest);
++  EXPECT_EQ(outcome.decision.reason, fp::PolicyReason::kWhiteListMatch);
++  EXPECT_TRUE(outcome.report);
++  EXPECT_NE(outcome.payload.find("\"decision\":\"allow\""),
++            std::string::npos);
++}
++
++TEST(PolicyThrottleTest, ARefusedSchemeCancelsBeforeTheRequestGoesOut) {
++  // The scheme list is independent of the URL lists and needs no URL match.
++  const fp::AccessPolicy policy = PolicyFrom(R"({"black_schemes":["ftp"]})");
++  fp::PolicyRequest request = Request("ftp://files.test/x", "files.test");
++  request.scheme = "ftp";
++  const PolicyOutcome outcome = DecidePolicy(policy, request);
++
++  EXPECT_TRUE(outcome.cancel);
++  EXPECT_EQ(outcome.decision.reason, fp::PolicyReason::kSchemeBlocked);
++  EXPECT_TRUE(outcome.report);
++  EXPECT_NE(outcome.payload.find("\"decision\":\"block\""),
++            std::string::npos);
++}
++
++TEST(PolicyThrottleTest, ACheckListHitIsObservedAndStillSent) {
++  // domain_check_list watches: the request goes out, and the report says it
++  // was noticed rather than refused.
++  const fp::AccessPolicy policy =
++      PolicyFrom(R"({"domain_check_list":["*.watched.test"]})");
++  const PolicyOutcome outcome =
++      DecidePolicy(policy, Request("https://a.watched.test/x", "a.watched.test"));
++
++  EXPECT_FALSE(outcome.cancel);
++  EXPECT_TRUE(outcome.decision.observed);
++  EXPECT_EQ(outcome.decision.reason, fp::PolicyReason::kDomainCheckMatch);
++  EXPECT_TRUE(outcome.report);
++  EXPECT_NE(outcome.payload.find("\"decision\":\"observe\""),
++            std::string::npos);
++}
++
++TEST(PolicyThrottleTest, ABlockedDecisionPayloadPassesTheActionTable) {
++  // The payload the throttle enqueues has to satisfy the action the pipe
++  // files it under, or EnqueueEvent rejects it and the decision is lost.
++  const fp::AccessPolicy policy =
++      PolicyFrom(R"({"black_list":["https://blocked\\.test/.*"]})");
++  const PolicyOutcome outcome =
++      DecidePolicy(policy, Request("https://blocked.test/x", "blocked.test"));
++  ASSERT_TRUE(outcome.report);
++
++  const fp::ActionCollectorPolicy collector;
++  std::string action;
++  const fp::ActionValidation validation = fp::ValidateActionPayload(
++      fp::ActionTable::Get(), fp::kActionPolicyEvent, outcome.payload,
++      collector, &action);
++  EXPECT_TRUE(validation.ok);
++  EXPECT_EQ(action, fp::kActionPolicyEvent);
++}
++
++TEST(PolicyThrottleTest, AnEmptyPolicyHasNoRulesToMount) {
++  // No section at all: the platform did not ask for a policy. The read
++  // succeeds - it is an empty policy, not an error - and it is not worth
++  // mounting.
++  fp::AccessPolicy policy;
++  EXPECT_TRUE(ReadAccessPolicy("{}", &policy));
++  EXPECT_FALSE(PolicyHasRules(policy));
++
++  // A section that is present but carries nothing is the same thing.
++  EXPECT_FALSE(PolicyHasRules(PolicyFrom("{}")));
++}
++
++TEST(PolicyThrottleTest, APolicyWithOneRuleIsWorthMounting) {
++  EXPECT_TRUE(PolicyHasRules(
++      PolicyFrom(R"({"white_list":["https://allowed\\.test/.*"]})")));
++  // Every list counts, including the ones that only watch.
++  EXPECT_TRUE(PolicyHasRules(PolicyFrom(R"({"domain_check_list":["*.a.test"]})")));
++  EXPECT_TRUE(PolicyHasRules(PolicyFrom(R"({"black_schemes":["file"]})")));
++  EXPECT_TRUE(PolicyHasRules(PolicyFrom(R"({"black_schemes":["file"]})")));
++}
++
++TEST(PolicyThrottleTest, AMalformedBundleReadsAsAnEmptyPolicy) {
++  // The read fails and the output is left empty, so a caller that ignores
++  // the return value still mounts nothing rather than blocking everything.
++  fp::AccessPolicy policy;
++  EXPECT_FALSE(ReadAccessPolicy("{not json", &policy));
++  EXPECT_FALSE(PolicyHasRules(policy));
++}
++
++TEST(PolicyThrottleTest, BuildPolicyRequestCarriesTheBrowsersOwnFields) {
++  // The URL, its host and its scheme are handed in rather than parsed out
++  // again: the browser already has them and they must not be re-derived.
++  const fp::PolicyRequest request =
++      BuildPolicyRequest("https://a.test/x?y=1", "a.test", "https",
++                         fp::PolicyFrame::kSubFrame);
++  EXPECT_EQ(request.url, "https://a.test/x?y=1");
++  EXPECT_EQ(request.host, "a.test");
++  EXPECT_EQ(request.scheme, "https");
++  EXPECT_EQ(request.frame, fp::PolicyFrame::kSubFrame);
++}
++
++}  // namespace
++}  // namespace lengsuo
+\ No newline at end of file
 diff --git a/lengsuo/integration/profile_bootstrap_state.cc b/lengsuo/integration/profile_bootstrap_state.cc
 new file mode 100644
 index 0000000..a144dcb
@@ -3017,10 +3543,10 @@ index 0000000..80d1a6e
 +#endif  // LENGSUO_NATIVE_ACTION_TABLE_H_
 diff --git a/lengsuo/native/action_table_test.cc b/lengsuo/native/action_table_test.cc
 new file mode 100644
-index 0000000..f27c294
+index 0000000..2a47580
 --- /dev/null
 +++ b/lengsuo/native/action_table_test.cc
-@@ -0,0 +1,424 @@
+@@ -0,0 +1,426 @@
 +// action_table_test - the uplink action table (task Q).
 +//
 +// The table is structural, so the tests are structural too: a payload that
@@ -3084,18 +3610,20 @@ index 0000000..f27c294
 +
 +TEST(ActionTable, NamesListsEveryActionInOrder) {
 +  const std::vector<std::string> names = ActionTable::Get().Names();
-+  ASSERT_EQ(names.size(), 5u);
++  ASSERT_EQ(names.size(), 6u);
 +  for (const std::string& name : names) {
 +    EXPECT_TRUE(ActionTable::Get().Knows(name));
 +  }
 +  // The order is fixed so the client's mirror can compare lists. The four
-+  // contract actions keep their places; the policy event was appended.
++  // contract actions keep their places; the two new ones were appended in the
++  // order the two rounds merged in: the response monitor first, then the
++  // access policy's event.
 +  EXPECT_EQ(names[0], kActionCanvasSample);
 +  EXPECT_EQ(names[1], kActionWebGLSample);
 +  EXPECT_EQ(names[2], kActionPageEvent);
 +  EXPECT_EQ(names[3], kActionHeartbeat);
 +  EXPECT_EQ(names[4], kActionResponseMonitor);
-+  EXPECT_EQ(names[4], kActionPolicyEvent);
++  EXPECT_EQ(names[5], kActionPolicyEvent);
 +}
 +
 +TEST(ActionTable, FindReturnsNullForAnUnknownName) {

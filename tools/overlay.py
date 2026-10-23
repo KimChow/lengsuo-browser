@@ -150,6 +150,13 @@ MAPPING = (
     ("native/policy_block_test.cc", "lengsuo/native/policy_block_test.cc"),
     ("native/policy_report.h", "lengsuo/native/policy_report.h"),
     ("native/policy_report.cc", "lengsuo/native/policy_report.cc"),
+    # The access policy's driver (task 0018). Appended at the end, after the
+    # kernels it drives: the mapping is append-only so that two cards can add
+    # their own files without touching each other's lines.
+    ("integration/policy_throttle.h", "lengsuo/integration/policy_throttle.h"),
+    ("integration/policy_throttle.cc", "lengsuo/integration/policy_throttle.cc"),
+    ("integration/policy_throttle_test.cc",
+     "lengsuo/integration/policy_throttle_test.cc"),
 )
 GN_TARGETS = ("//lengsuo/integration:bootstrap", "//lengsuo/native:profile_wire")
 MAX_SOURCE = 1024 * 1024

@@ -1,0 +1,38 @@
+diff --git a/chrome/browser/BUILD.gn b/chrome/browser/BUILD.gn
+--- a/chrome/browser/BUILD.gn
++++ b/chrome/browser/BUILD.gn
+@@ -882,6 +882,7 @@ source_set("core") {
+     "//lengsuo/integration:bootstrap",
+     "//lengsuo/integration:kernel_pipe_client",
+     "//lengsuo/integration:l3_provisioning",
++    "//lengsuo/integration:policy_throttle",
+     ":active_use_util",
+     ":after_startup_task_utils",
+     ":bad_message",
+diff --git a/chrome/browser/chrome_content_browser_client.cc b/chrome/browser/chrome_content_browser_client.cc
+--- a/chrome/browser/chrome_content_browser_client.cc
++++ b/chrome/browser/chrome_content_browser_client.cc
+@@ -5,6 +5,7 @@
+ #include "chrome/browser/chrome_content_browser_client.h"
+ 
+ #include "lengsuo/integration/browser_bootstrap.h"
++#include "lengsuo/integration/policy_throttle.h"
+ 
+ #include <algorithm>
+ #include <iterator>
+@@ -6184,6 +6185,15 @@ ChromeContentBrowserClient::CreateURLLoaderThrottles(
+     result.push_back(std::move(contextual_tasks_throttle));
+   }
+ 
++  // The access policy: it decides a request before the request is sent. A
++  // ruled-out request is cancelled here, and every decision goes up the
++  // existing uplink as a PolicyEvent. CreatePolicyThrottle returns nullptr
++  // when no policy is configured or when none of its rules could ever match,
++  // so a switched-off policy costs nothing on the request path.
++  if (auto policy_throttle = lengsuo::CreatePolicyThrottle()) {
++    result.push_back(std::move(policy_throttle));
++  }
++
+   return result;
+ }
+ 
