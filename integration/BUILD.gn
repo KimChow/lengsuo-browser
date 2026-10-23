@@ -56,10 +56,12 @@ test("bootstrap_unittests") {
     "browser_bootstrap_unittest.cc",
     "l3_provisioning_impl_test.cc",
     "official_defaults_unittest.cc",
+    "policy_throttle_test.cc",
   ]
   deps = [
     ":bootstrap",
     ":l3_provisioning",
+    ":policy_throttle",
     "//lengsuo/native:l3_runtime",
     "//base",
     "//testing/gtest",
@@ -89,5 +91,31 @@ source_set("kernel_pipe_client") {
     # storage-serial selection are pure functions, so the collector in
     # kernel_pipe_client.cc only has to read the machine.
     "//lengsuo/native:machine_facts",
+  ]
+}
+
+# The access policy on the request path (task 0018). The decision itself is
+# the pure half inline in policy_throttle.h, so it is unit-tested without a
+# Chromium type; the .cc is the URLLoaderThrottle that carries the decision
+# out, which is why this target needs the request-path and the pipe headers.
+#
+# It sits in integration/ rather than native/ because that is where the file
+# lands: //lengsuo/integration/policy_throttle.cc, and GN sources are resolved
+# against their own BUILD.gn's directory (a `..` path is rejected outright).
+source_set("policy_throttle") {
+  sources = [
+    "policy_throttle.cc",
+    "policy_throttle.h",
+  ]
+  public_deps = [
+    # policy_throttle.h includes the policy layers, so anything that includes
+    # it - chrome/browser does - needs them too.
+    "//lengsuo/native:policy_report",
+  ]
+  deps = [
+    ":kernel_pipe_client",
+    "//net",
+    "//services/network/public/cpp",
+    "//third_party/blink/public/common",
   ]
 }

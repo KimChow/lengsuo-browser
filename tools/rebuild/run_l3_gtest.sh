@@ -102,6 +102,10 @@ TARGETS=(
   "fp_sampling|native/fp_sampling.cc native/canvas_noise.cc"
   "fp_converge|native/fp_converge.cc native/fp_sampling.cc native/canvas_noise.cc"
   "fp_target|native/fp_target.cc native/fp_target_match.cc native/fp_sampling.cc native/canvas_noise.cc native/kernel_pipe_json.cc native/profile_bundle.cc"
+  # The access policy's request-path driver (task 0018). Only the pure half
+  # is compiled: the header decides, and the URLLoaderThrottle in the .cc is
+  # Chromium's type and only ever links in a real build.
+  "policy_throttle|native/policy_block.cc native/policy_rules.cc native/policy_match.cc native/policy_report.cc native/profile_bundle.cc native/kernel_pipe_json.cc native/action_table.cc"
 )
 
 FAILED=()
@@ -114,6 +118,7 @@ for spec in "${TARGETS[@]}"; do
   case "$name" in
     l3_bootstrap) srcs=("$REPO/integration/l3_bootstrap_test.cc") ;;
     l3_provisioning) srcs=("$REPO/integration/l3_provisioning_impl_test.cc") ;;
+    policy_throttle) srcs=("$REPO/integration/policy_throttle_test.cc") ;;
   esac
   for s in $extra; do srcs+=("$REPO/$s"); done
 
