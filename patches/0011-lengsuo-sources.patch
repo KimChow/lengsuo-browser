@@ -2781,10 +2781,10 @@ index 0000000..3bd62d6
 +#endif
 diff --git a/lengsuo/native/BUILD.gn b/lengsuo/native/BUILD.gn
 new file mode 100644
-index 0000000..c3015aa
+index 0000000..768f93b
 --- /dev/null
 +++ b/lengsuo/native/BUILD.gn
-@@ -0,0 +1,380 @@
+@@ -0,0 +1,382 @@
 +# Decoder source sets. Chromium integration evidence lives in VERIFICATION.md.
 +source_set("profile_wire") {
 +  sources = [
@@ -3105,6 +3105,7 @@ index 0000000..c3015aa
 +  sources = [
 +    "policy_block.cc",
 +    "policy_block.h",
++    "ptr_exclusion.h",
 +  ]
 +  public_deps = [
 +    ":policy_match",
@@ -3158,6 +3159,7 @@ index 0000000..c3015aa
 +    "fp_target.h",
 +    "fp_target_match.cc",
 +    "fp_target_match.h",
++    "ptr_exclusion.h",
 +  ]
 +  public_deps = [
 +    ":fp_sampling",
@@ -8671,10 +8673,10 @@ index 0000000..cf45414
 +}  // namespace lengsuo::fp
 diff --git a/lengsuo/native/fp_target_match.h b/lengsuo/native/fp_target_match.h
 new file mode 100644
-index 0000000..ed92174
+index 0000000..a720080
 --- /dev/null
 +++ b/lengsuo/native/fp_target_match.h
-@@ -0,0 +1,70 @@
+@@ -0,0 +1,73 @@
 +// fp_target_match - the URL targeting (task T3).
 +//
 +// Two rules shape this file.
@@ -8711,13 +8713,16 @@ index 0000000..ed92174
 +#include <string_view>
 +
 +#include "fp_target.h"
++#include "ptr_exclusion.h"
 +
 +namespace lengsuo::fp {
 +
 +// The decision for one URL and one dimension.
 +struct FpTargetDecision {
-+  // The target that applies, or nullptr when none does.
-+  const FpTarget* target = nullptr;
++  // The target that applies, or nullptr when none does. It points into the
++  // caller's table, which owns the object, so it is not an owning field and
++  // raw_ptr does not apply.
++  LENGSUO_RAW_PTR_EXCLUSION const FpTarget* target = nullptr;
 +  // True when a target applies. False means the caller keeps the existing
 +  // behaviour.
 +  bool apply = false;
@@ -14401,10 +14406,10 @@ index 0000000..f4a37fb
 +}  // namespace lengsuo::fp
 diff --git a/lengsuo/native/policy_block.h b/lengsuo/native/policy_block.h
 new file mode 100644
-index 0000000..c32bb53
+index 0000000..fb0574a
 --- /dev/null
 +++ b/lengsuo/native/policy_block.h
-@@ -0,0 +1,101 @@
+@@ -0,0 +1,103 @@
 +// policy_block - the interception decision (task T2).
 +//
 +// The decision is the whole point of the access policy: for one request, is
@@ -14452,6 +14457,7 @@ index 0000000..c32bb53
 +
 +#include "policy_match.h"
 +#include "policy_rules.h"
++#include "ptr_exclusion.h"
 +
 +namespace lengsuo::fp {
 +
@@ -14484,8 +14490,9 @@ index 0000000..c32bb53
 +  // The rule that decided, or nullptr when no rule matched. It points into
 +  // the AccessPolicy that was evaluated, so that policy has to outlive the
 +  // decision. It is a pointer so that a decision costs no copy of a pattern
-+  // on the request path.
-+  const std::string* matched_rule = nullptr;
++  // on the request path, and it is a view rather than an owning field, so
++  // raw_ptr does not apply.
++  LENGSUO_RAW_PTR_EXCLUSION const std::string* matched_rule = nullptr;
 +};
 +
 +// Decides what happens to one request.
@@ -18095,6 +18102,38 @@ index 0000000..505f2d3
 +std::optional<ParsedProfile> DecodeProfile(std::span<const std::uint8_t> bytes);
 +}  // namespace lengsuo
 +#endif
+diff --git a/lengsuo/native/ptr_exclusion.h b/lengsuo/native/ptr_exclusion.h
+new file mode 100644
+index 0000000..bcf4745
+--- /dev/null
++++ b/lengsuo/native/ptr_exclusion.h
+@@ -0,0 +1,25 @@
++// The raw_ptr exclusion marker (standalone).
++//
++// Chromium's raw-ptr plugin (check-raw-ptr-fields) requires raw_ptr<T> for
++// pointer fields. It reads an annotation named "raw_ptr_exclusion", which is
++// what upstream's RAW_PTR_EXCLUSION macro expands to when the plugin is on
++// (tools/clang/raw_ptr_plugin/RawPtrHelpers.h: isRawPtrExclusionAnnotated).
++//
++// The kernel's native layer cannot use raw_ptr: it is standalone pure logic
++// that compiles for its own gtest without Chromium's base/ headers. Fields
++// that are non-owning views into a caller-owned table - the caller owns the
++// object, the field only names it for the duration of one call - are therefore
++// marked here instead, and the annotation is the only thing the plugin needs.
++//
++// The marker is empty outside clang: the gtest builds with g++ -Werror
++// -pedantic, and clang::annotate is not a g++ attribute.
++#ifndef LENGSUO_NATIVE_PTR_EXCLUSION_H_
++#define LENGSUO_NATIVE_PTR_EXCLUSION_H_
++
++#if defined(__clang__)
++#define LENGSUO_RAW_PTR_EXCLUSION [[clang::annotate("raw_ptr_exclusion")]]
++#else
++#define LENGSUO_RAW_PTR_EXCLUSION
++#endif
++
++#endif  // LENGSUO_NATIVE_PTR_EXCLUSION_H_
+\ No newline at end of file
 diff --git a/lengsuo/native/resp_monitor.cc b/lengsuo/native/resp_monitor.cc
 new file mode 100644
 index 0000000..f95b9d7
