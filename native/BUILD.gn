@@ -261,6 +261,19 @@ source_set("resp_monitor_body") {
   ]
 }
 
+# The response monitor's fan-out tee (task 0017). It turns one body chunk
+# into two copies - the page's, byte for byte, and the monitor's, bounded -
+# and it is written here rather than taken from the tree's prefetch tee,
+# which serves one target at a time and may drop the early bytes (see
+# resp_tee.h). It depends on the capture it fills.
+source_set("resp_tee") {
+  sources = [
+    "resp_tee.cc",
+    "resp_tee.h",
+  ]
+  public_deps = [ ":resp_monitor_body" ]
+}
+
 # The response monitor's matching and counting: which response belongs to
 # which rule, and how many times a rule may say something about one URL
 # (task T1).

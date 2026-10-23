@@ -164,6 +164,17 @@ MAPPING = (
     # Chromium's RAW_PTR_EXCLUSION, which it cannot include. Appended at the
     # end, same append-only rule as the entries above.
     ("native/ptr_exclusion.h", "lengsuo/native/ptr_exclusion.h"),
+    # The response-body monitor's tee and its driver (task 0017). The tee is
+    # the fan-out that keeps the page's bytes byte-for-byte intact; the driver
+    # is the URLLoaderThrottle that calls it. Appended at the end, same
+    # append-only rule as the entries above.
+    ("native/resp_tee.h", "lengsuo/native/resp_tee.h"),
+    ("native/resp_tee.cc", "lengsuo/native/resp_tee.cc"),
+    ("native/resp_tee_test.cc", "lengsuo/native/resp_tee_test.cc"),
+    ("integration/resp_throttle.h", "lengsuo/integration/resp_throttle.h"),
+    ("integration/resp_throttle.cc", "lengsuo/integration/resp_throttle.cc"),
+    ("integration/resp_throttle_test.cc",
+     "lengsuo/integration/resp_throttle_test.cc"),
 )
 GN_TARGETS = ("//lengsuo/integration:bootstrap", "//lengsuo/native:profile_wire")
 MAX_SOURCE = 1024 * 1024

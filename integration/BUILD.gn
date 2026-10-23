@@ -57,11 +57,13 @@ test("bootstrap_unittests") {
     "l3_provisioning_impl_test.cc",
     "official_defaults_unittest.cc",
     "policy_throttle_test.cc",
+    "resp_throttle_test.cc",
   ]
   deps = [
     ":bootstrap",
     ":l3_provisioning",
     ":policy_throttle",
+    ":resp_throttle",
     "//lengsuo/native:l3_runtime",
     "//base",
     "//testing/gtest",
@@ -111,6 +113,34 @@ source_set("policy_throttle") {
     # policy_throttle.h includes the policy layers, so anything that includes
     # it - chrome/browser does - needs them too.
     "//lengsuo/native:policy_report",
+  ]
+  deps = [
+    ":kernel_pipe_client",
+    "//net",
+    "//services/network/public/cpp",
+    "//third_party/blink/public/common",
+  ]
+}
+
+# The response-body monitor on the response path (task 0017). The decision is
+# the pure half inline in resp_throttle.h, so it is unit-tested without a
+# Chromium type; the .cc is the URLLoaderThrottle that carries it out and
+# owns the two data pipes the body passes through.
+#
+# It sits in integration/ for the same reason policy_throttle does: GN
+# resolves a target's sources against its own BUILD.gn's directory and
+# rejects a `..` path.
+source_set("resp_throttle") {
+  sources = [
+    "resp_throttle.cc",
+    "resp_throttle.h",
+  ]
+  public_deps = [
+    # resp_throttle.h includes the monitor's layers and the tee, so anything
+    # that includes it - chrome/browser does - needs them too.
+    "//lengsuo/native:resp_monitor",
+    "//lengsuo/native:resp_monitor_report",
+    "//lengsuo/native:resp_tee",
   ]
   deps = [
     ":kernel_pipe_client",

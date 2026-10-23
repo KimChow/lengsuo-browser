@@ -1,9 +1,9 @@
 diff --git a/lengsuo/integration/BUILD.gn b/lengsuo/integration/BUILD.gn
 new file mode 100644
-index 0000000..f383403
+index 0000000..af70e27
 --- /dev/null
 +++ b/lengsuo/integration/BUILD.gn
-@@ -0,0 +1,121 @@
+@@ -0,0 +1,151 @@
 +import("//testing/test.gni")
 +
 +# Browser-only dependency. No chrome/browser dependency (avoids a cycle).
@@ -63,11 +63,13 @@ index 0000000..f383403
 +    "l3_provisioning_impl_test.cc",
 +    "official_defaults_unittest.cc",
 +    "policy_throttle_test.cc",
++    "resp_throttle_test.cc",
 +  ]
 +  deps = [
 +    ":bootstrap",
 +    ":l3_provisioning",
 +    ":policy_throttle",
++    ":resp_throttle",
 +    "//lengsuo/native:l3_runtime",
 +    "//base",
 +    "//testing/gtest",
@@ -117,6 +119,34 @@ index 0000000..f383403
 +    # policy_throttle.h includes the policy layers, so anything that includes
 +    # it - chrome/browser does - needs them too.
 +    "//lengsuo/native:policy_report",
++  ]
++  deps = [
++    ":kernel_pipe_client",
++    "//net",
++    "//services/network/public/cpp",
++    "//third_party/blink/public/common",
++  ]
++}
++
++# The response-body monitor on the response path (task 0017). The decision is
++# the pure half inline in resp_throttle.h, so it is unit-tested without a
++# Chromium type; the .cc is the URLLoaderThrottle that carries it out and
++# owns the two data pipes the body passes through.
++#
++# It sits in integration/ for the same reason policy_throttle does: GN
++# resolves a target's sources against its own BUILD.gn's directory and
++# rejects a `..` path.
++source_set("resp_throttle") {
++  sources = [
++    "resp_throttle.cc",
++    "resp_throttle.h",
++  ]
++  public_deps = [
++    # resp_throttle.h includes the monitor's layers and the tee, so anything
++    # that includes it - chrome/browser does - needs them too.
++    "//lengsuo/native:resp_monitor",
++    "//lengsuo/native:resp_monitor_report",
++    "//lengsuo/native:resp_tee",
 +  ]
 +  deps = [
 +    ":kernel_pipe_client",
@@ -2779,12 +2809,1092 @@ index 0000000..3bd62d6
 +};
 +}  // namespace lengsuo
 +#endif
+diff --git a/lengsuo/integration/resp_throttle.cc b/lengsuo/integration/resp_throttle.cc
+new file mode 100644
+index 0000000..dbc868f
+--- /dev/null
++++ b/lengsuo/integration/resp_throttle.cc
+@@ -0,0 +1,410 @@
++// resp_throttle - the Chromium half (task 0017, the T1 wiring).
++//
++// The pure half of the decision is inline in resp_throttle.h, because
++// tools/rebuild/run_l3_gtest.sh compiles that header with a plain g++ and no
++// Chromium headers at all. This file is the half that cannot be tested that
++// way: it derives from blink::URLLoaderThrottle, owns the two data pipes that
++// carry the body past, reads the frozen ConfigBundle off the process pipe,
++// and puts the report on the uplink.
++//
++// How the body is taken without being disturbed. A URLLoaderThrottle has
++// exactly one route to a response body: Delegate::InterceptResponse, which
++// hands the caller the data pipe the network filled and gives the page
++// whatever pipe the caller passes back. The call rebinds the URLLoader and
++// URLLoaderClient endpoints as well, and that is deliberate - its own doc
++// comment says it "Replaces the URLLoader and URLLoaderClient endpoints held
++// by the ThrottlingURLLoader instance".
++//
++// Two calls are made, both synchronous, in the same function:
++//
++//   1. The first takes the network's body handle and the two original
++//      endpoints, and puts throwaway endpoints in their place for the moment
++//      between the two calls. Nothing is dispatched in that gap: the code
++//      between the two calls runs no message loop, so the transient state is
++//      never observed.
++//   2. The second gives both original endpoints straight back and hands the
++//      page the pipe this file created. After it, the ThrottlingURLLoader
++//      holds the network's own URLLoader and the page's own client again,
++//      exactly as before, with the page's body pipe in place of the
++//      network's.
++//
++// The net effect is one thing and only one thing: "give me the bytes that
++// would have gone to the page, and give the page this instead". The loader
++// still reaches the real network, the page still gets every callback, and
++// only where the body bytes flow first has changed. That is why neither
++// endpoint needs a forwarder object: there is nothing to forward through.
++// A proxy throttle that kept the endpoints and re-sent every call would have
++// to re-implement all five URLLoaderClient methods - including the
++// OnReceiveResponse that carries a data pipe and the OnUploadProgress that
++// carries a callback - and every one of them is on the page's critical path.
++// (extensions/renderer/extension_localization_throttle.cc is that shape, and
++// is why it is not copied here.)
++//
++// Three more things this file is careful about:
++//
++//   * It does not read synchronously. The body is pumped asynchronously by a
++//     mojo::SimpleWatcher on the network's pipe, one chunk at a time, and a
++//     chunk is read only when the page's previous chunk has been written
++//     (native/resp_tee.h's gate). A slow page therefore reads slowly; it
++//     never becomes an unbounded buffer in the browser.
++//
++//   * It mounts nothing when there is nothing to do. CreateRespThrottle
++//     returns nullptr for "no pipe", "no section", "switched off" and "no
++//     rules", so a switched-off monitor is not a throttle that inspects every
++//     response and copies nothing.
++//
++//   * It never changes what the page receives. The page's pipe is written
++//     with exactly the bytes read from the network's pipe, in order, and it
++//     is closed when the network's is. A failure on this side - a broken
++//     pipe, a page that has gone away - stops the copy and releases the
++//     network's pipe; it never truncates or reorders what the page is
++//     already reading.
++#include "lengsuo/integration/resp_throttle.h"
++
++#include <cstddef>
++#include <cstdint>
++#include <memory>
++#include <string>
++#include <utility>
++
++#include "base/containers/span.h"
++#include "base/functional/bind.h"
++#include "base/location.h"
++#include "base/memory/weak_ptr.h"
++#include "base/strings/string_view_util.h"
++#include "base/task/sequenced_task_runner.h"
++#include "lengsuo/integration/kernel_pipe_client.h"
++#include "mojo/public/cpp/bindings/pending_receiver.h"
++#include "mojo/public/cpp/bindings/pending_remote.h"
++#include "mojo/public/cpp/system/data_pipe.h"
++#include "mojo/public/cpp/system/data_pipe_producer.h"
++#include "mojo/public/cpp/system/simple_watcher.h"
++#include "mojo/public/cpp/system/string_data_source.h"
++#include "net/http/http_response_headers.h"
++#include "services/network/public/cpp/resource_request.h"
++#include "services/network/public/mojom/url_loader.mojom.h"
++#include "services/network/public/mojom/url_response_head.mojom.h"
++#include "third_party/blink/public/common/loader/url_loader_throttle.h"
++#include "url/gurl.h"
++
++namespace lengsuo {
++namespace {
++
++// The monitor's state: one per process, like the uplink it reports on.
++//
++// The counters it holds must survive: native/resp_monitor.h is explicit that
++// pushing the same configuration down again - once per storage partition, for
++// instance - must not hand a rule a fresh allowance. A state per throttle
++// would hand every response a fresh allowance, so the state is here instead.
++fp::RespMonitorState& SharedRespMonitorState() {
++  static fp::RespMonitorState state;
++  return state;
++}
++
++// The response monitor as a response-path hook.
++class RespThrottle : public blink::URLLoaderThrottle {
++ public:
++  explicit RespThrottle(fp::RespMonitorState* state) : state_(state) {}
++  RespThrottle(const RespThrottle&) = delete;
++  RespThrottle& operator=(const RespThrottle&) = delete;
++  ~RespThrottle() override;
++
++  // Called once, before the resource request is started. The only thing
++  // wanted from it is the initiator origin: the response phase no longer has
++  // the request in hand, and "did a page start this?" is a question about the
++  // request. `defer` is left alone - nothing here waits.
++  void WillStartRequest(network::ResourceRequest* request,
++                        bool* /*defer*/) override {
++    if (request == nullptr) {
++      return;
++    }
++    initiator_scheme_ = request->request_initiator
++                            ? request->request_initiator->scheme()
++                            : std::string();
++  }
++
++  // Called when the response head is available, before the body is forwarded
++  // to the page. This is where the decision is made and the body is taken.
++  void WillProcessResponse(const GURL& response_url,
++                           network::mojom::URLResponseHead* response_head,
++                           bool* /*defer*/) override;
++
++ private:
++  // One readable signal on the network's pipe.
++  void OnSourceReadable(MojoResult result,
++                        const mojo::HandleSignalsState& state);
++  // The page's copy of one chunk has been taken over by the pipe.
++  void OnPageWritten(MojoResult result);
++
++  // Stop watching and release the network's pipe. Safe to call more than
++  // once, and safe to call from inside a watcher callback: Cancel() promises
++  // the callback will not be entered again.
++  void StopReading();
++  // The body ended: close the page's pipe, which is how the page learns that
++  // the body is complete, then report what was seen. Reports once.
++  void FinishBody();
++  // The body cannot be read to the end - the page is gone, or the pipe broke.
++  // Stop and report nothing: half a body reported as if it were complete
++  // would be a lie.
++  void AbandonBody();
++
++  fp::RespMonitorState* const state_;
++  // What the decision was for this response, and the facts the report needs.
++  fp::RespMonitorOutcome outcome_;
++  std::string initiator_scheme_;
++  std::string url_;
++  std::string content_type_;
++  int status_ = 0;
++
++  fp::RespTee tee_;
++  // The network's body, read by this file; the page has its own pipe.
++  mojo::ScopedDataPipeConsumerHandle network_body_;
++  // The page's pipe, written by this file. Closing it ends the page's body.
++  std::unique_ptr<mojo::DataPipeProducer> page_writer_;
++  // The watcher has no default constructor, so it is made on demand and kept
++  // only while there is something to watch.
++  std::unique_ptr<mojo::SimpleWatcher> source_watcher_;
++  // The buffer the page's current chunk is written from. It is a member
++  // because the pipe's write outlives the call that started it.
++  std::string page_chunk_;
++  bool reported_ = false;
++
++  // Last member on purpose: it is destroyed first, so no watcher callback can
++  // reach a half-destroyed throttle.
++  base::WeakPtrFactory<RespThrottle> weak_factory_{this};
++};
++
++void RespThrottle::WillProcessResponse(
++    const GURL& response_url,
++    network::mojom::URLResponseHead* response_head,
++    bool* /*defer*/) {
++  if (response_head == nullptr) {
++    return;
++  }
++  content_type_ = response_head->mime_type;
++  status_ = 0;
++  std::string content_encoding;
++  if (response_head->headers) {
++    status_ = response_head->headers->response_code();
++    content_encoding =
++        response_head->headers->GetNormalizedHeader("Content-Encoding")
++            .value_or(std::string());
++  }
++
++  url_ = response_url.spec();
++  const fp::RespMonitorRequest request =
++      BuildRespMonitorRequest(url_, response_url.scheme(), initiator_scheme_);
++  const RespMonitorOutcome outcome =
++      DecideRespMonitor(state_, request, content_type_, content_encoding);
++  if (!outcome.monitor) {
++    // No rule claimed this response, or its body must not be read, or the
++    // rule has said all it had to say about this URL. The response is left
++    // completely alone.
++    return;
++  }
++
++  // The page's own pipe is created before anything is touched, so a failure
++  // here leaves the response exactly as it was.
++  mojo::ScopedDataPipeProducerHandle page_producer;
++  mojo::ScopedDataPipeConsumerHandle page_consumer;
++  if (mojo::CreateDataPipe(nullptr, page_producer, page_consumer) !=
++      MOJO_RESULT_OK) {
++    // A pipe could not be made. The rule is switched off - it has failed to
++    // serve its purpose once - and this response is left alone.
++    fp::RespMonitorDisableRule(state_, outcome.rule_id);
++    return;
++  }
++
++  // Take the network's body and the two original endpoints.
++  //
++  // Both stand-ins have to be *valid* endpoints, not merely unused ones: the
++  // ThrottlingURLLoader binds whatever it is given on every call
++  // (`url_loader_.Bind(std::move(new_loader))` is the first thing after the
++  // body swap, and Remote::Bind checks that the pending remote is valid). A
++  // default-constructed PendingRemote is not, so each is a real pipe whose
++  // far end is kept alive until the second call has put the originals back.
++  // Nothing is dispatched through them: no message loop runs between the two
++  // calls, and URLLoader has only FollowRedirect and SetPriority.
++  mojo::PendingRemote<network::mojom::URLLoader> scratch_loader;
++  mojo::PendingReceiver<network::mojom::URLLoader> scratch_loader_receiver =
++      scratch_loader.InitWithNewPipeAndPassReceiver();
++  mojo::PendingRemote<network::mojom::URLLoaderClient> scratch_client;
++  mojo::PendingReceiver<network::mojom::URLLoaderClient>
++      scratch_client_receiver = scratch_client.InitWithNewPipeAndPassReceiver();
++  mojo::PendingRemote<network::mojom::URLLoader> source_loader;
++  mojo::PendingReceiver<network::mojom::URLLoaderClient> source_client_receiver;
++  mojo::ScopedDataPipeConsumerHandle network_body;
++  delegate_->InterceptResponse(std::move(scratch_loader),
++                               std::move(scratch_client_receiver),
++                               &source_loader, &source_client_receiver,
++                               &network_body);
++
++  // Give both originals straight back, with the page's pipe where the
++  // network's body was. Both out-parameters have to be non-null: the
++  // ThrottlingURLLoader binds its new endpoints on every call, and binding
++  // over a bound endpoint is a check failure.
++  mojo::PendingRemote<network::mojom::URLLoader> discarded_loader;
++  mojo::PendingReceiver<network::mojom::URLLoaderClient> discarded_client;
++  delegate_->InterceptResponse(std::move(source_loader),
++                               std::move(source_client_receiver),
++                               &discarded_loader, &discarded_client,
++                               &page_consumer);
++
++  fp::RespTeeReset(&tee_, outcome.capture_limit);
++  outcome_ = outcome;
++  network_body_ = std::move(network_body);
++  page_writer_ =
++      std::make_unique<mojo::DataPipeProducer>(std::move(page_producer));
++
++  if (!network_body_.is_valid()) {
++    // The response carries no body at all (204, a HEAD response). Closing the
++    // page's pipe is the whole of what the page is owed.
++    FinishBody();
++    return;
++  }
++
++  source_watcher_ =
++      std::make_unique<mojo::SimpleWatcher>(
++          FROM_HERE, mojo::SimpleWatcher::ArmingPolicy::MANUAL,
++          base::SequencedTaskRunner::GetCurrentDefault());
++  source_watcher_->Watch(
++      network_body_.get(), MOJO_HANDLE_SIGNAL_READABLE,
++      MOJO_TRIGGER_CONDITION_SIGNALS_SATISFIED,
++      base::BindRepeating(&RespThrottle::OnSourceReadable,
++                          weak_factory_.GetWeakPtr()));
++  // The first read is armed here; every later one is armed by the read, or by
++  // the page's write, that unblocks it.
++  source_watcher_->ArmOrNotify();
++}
++
++void RespThrottle::OnSourceReadable(MojoResult result,
++                                    const mojo::HandleSignalsState& /*state*/) {
++  if (result == MOJO_RESULT_FAILED_PRECONDITION) {
++    // The network closed its end: the body is over.
++    FinishBody();
++    return;
++  }
++  if (result != MOJO_RESULT_OK) {
++    AbandonBody();
++    return;
++  }
++  if (!fp::RespTeeWantsRead(tee_)) {
++    // A write to the page is still in flight. The page's copy is the copy
++    // that must not be delayed, so this read waits, and OnPageWritten re-arms
++    // the watcher.
++    return;
++  }
++
++  base::span<const uint8_t> data;
++  const MojoResult read =
++      network_body_->BeginReadData(MOJO_READ_DATA_FLAG_NONE, data);
++  if (read == MOJO_RESULT_FAILED_PRECONDITION) {
++    FinishBody();
++    return;
++  }
++  if (read == MOJO_RESULT_SHOULD_WAIT) {
++    source_watcher_->ArmOrNotify();
++    return;
++  }
++  if (read != MOJO_RESULT_OK) {
++    AbandonBody();
++    return;
++  }
++
++  // The one line that makes this a tee: the whole chunk is copied for the
++  // page and the bounded prefix of it is copied for the monitor.
++  fp::RespTeeFan(&tee_, base::as_string_view(data), &page_chunk_);
++  const MojoResult ended = network_body_->EndReadData(data.size());
++  if (ended != MOJO_RESULT_OK) {
++    AbandonBody();
++    return;
++  }
++
++  fp::RespTeeWriteStarted(&tee_);
++  page_writer_->Write(
++      std::make_unique<mojo::StringDataSource>(
++          base::span<const char>(page_chunk_),
++          mojo::StringDataSource::AsyncWritingMode::
++              STRING_STAYS_VALID_UNTIL_COMPLETION),
++      base::BindOnce(&RespThrottle::OnPageWritten,
++                     weak_factory_.GetWeakPtr()));
++}
++
++void RespThrottle::OnPageWritten(MojoResult result) {
++  fp::RespTeeWriteFinished(&tee_);
++  if (result != MOJO_RESULT_OK) {
++    // The page is gone. Stop reading and let the network's pipe close.
++    AbandonBody();
++    return;
++  }
++  source_watcher_->ArmOrNotify();
++}
++
++void RespThrottle::StopReading() {
++  if (source_watcher_) {
++    source_watcher_->Cancel();
++  }
++  // Closing the network's pipe is what tells the network the body is no
++  // longer wanted; it only closes once the watcher has let go of it.
++  network_body_.reset();
++}
++
++void RespThrottle::FinishBody() {
++  // Closing the page's producer is how the page learns that the body ended.
++  // Nothing is in flight here: a chunk is read only when the previous write
++  // has been acknowledged.
++  page_writer_.reset();
++  StopReading();
++  if (reported_) {
++    return;
++  }
++  reported_ = true;
++  const fp::RespMonitorReport report =
++      BuildRespMonitorReport(outcome_, url_, status_, content_type_, tee_);
++  if (KernelPipeClient* client = KernelPipeClient::Get()) {
++    // Non-blocking by contract: it validates the payload and drops it into a
++    // bounded queue that a sender thread drains.
++    client->EnqueueEvent(fp::kActionResponseMonitor,
++                         fp::BuildRespMonitorActionPayload(report));
++  }
++}
++
++void RespThrottle::AbandonBody() {
++  page_writer_.reset();
++  StopReading();
++}
++
++RespThrottle::~RespThrottle() {
++  AbandonBody();
++}
++
++}  // namespace
++
++std::unique_ptr<blink::URLLoaderThrottle> CreateRespThrottle() {
++  KernelPipeClient* client = KernelPipeClient::Get();
++  if (client == nullptr) {
++    // No pipe was requested, so the platform sent no configuration. There is
++    // no monitor to mount.
++    return nullptr;
++  }
++  fp::RespMonitorConfig config;
++  if (!ReadRespMonitorConfig(client->config(), &config)) {
++    // The bundle does not carry a readable section. Mount nothing - never a
++    // monitor that reads every response because the configuration could not
++    // be read.
++    return nullptr;
++  }
++  if (!RespMonitorHasRules(config)) {
++    // Switched off, or no rule could ever fire. Mounting a throttle for it
++    // would be a cost on every response with no benefit.
++    return nullptr;
++  }
++  fp::RespMonitorState& state = SharedRespMonitorState();
++  // Installing the same rules again is what the native layer is built for: it
++  // keeps the counters of the rules that stay, so a rule's per-URL allowance
++  // is not renewed by a second mount.
++  fp::RespMonitorSetRules(&state, config);
++  return std::make_unique<RespThrottle>(&state);
++}
++
++}  // namespace lengsuo
+\ No newline at end of file
+diff --git a/lengsuo/integration/resp_throttle.h b/lengsuo/integration/resp_throttle.h
+new file mode 100644
+index 0000000..ee7ac9f
+--- /dev/null
++++ b/lengsuo/integration/resp_throttle.h
+@@ -0,0 +1,254 @@
++// resp_throttle - the response-body monitor on the response path
++// (task 0017, the T1 wiring).
++//
++// native/resp_monitor.h decides which responses a rule claims,
++// native/resp_monitor_body.h holds the bounded capture, native/resp_tee.h
++// fans a body chunk out to the page and to the capture, and
++// native/resp_monitor_report.h builds the uplink payload. All of them were in
++// the kernel already and none of them had a caller: the monitor was a library
++// with no driver. This file is the driver. It is a URLLoaderThrottle that
++// copies the first bytes of the responses the rules claim and tells the
++// runner what it saw.
++//
++// The one rule that shapes everything below: the page is not a consumer of
++// this feature. The page receives its bytes completely unchanged, and a
++// response the monitor cannot read without touching the page's copy is a
++// response the monitor leaves alone.
++//
++// Where the rules come from. The ConfigBundle (frame type 0x03) the runner
++// sent, which the browser process already holds: KernelPipeClient::Get()
++// owns the frozen bundle, and the throttle reads the `response_monitor`
++// section out of it. There is no second configuration channel and no new
++// command-line switch - a monitor that is visible in the process list is a
++// monitor the platform leaked.
++//
++// Where the split is. The top half of this header is pure logic: it takes a
++// bundle, a request and a response head and answers with a decision and a
++// report, so tools/rebuild/run_l3_gtest.sh compiles and tests it with a plain
++// g++, no Chromium headers involved. The bottom half is one declaration, and
++// the Chromium types live in the .cc, exactly as task 0018 did it with
++// policy_throttle.h.
++//
++// Threading. CreateURLLoaderThrottles runs on the browser's UI thread
++// (chrome/browser/chrome_content_browser_client.cc has
++// DCHECK_CURRENTLY_ON(BrowserThread::UI) at the top of it), so the factory
++// runs there. A URLLoaderThrottle's Will* methods run on the sequence the
++// loader runs on, which is the UI thread for a browser-initiated load, and
++// the mojo watcher the .cc arms is bound to that same sequence's default task
++// runner. Nothing here waits on anything: the bundle is already in the
++// process, the decision is string arithmetic, the body is copied as it flows
++// past, and the uplink is a non-blocking enqueue (kernel_pipe_client.h).
++#ifndef LENGSUO_INTEGRATION_RESP_THROTTLE_H_
++#define LENGSUO_INTEGRATION_RESP_THROTTLE_H_
++
++#include <cstddef>
++#include <memory>
++#include <string>
++#include <string_view>
++
++#include "lengsuo/native/resp_monitor.h"
++#include "lengsuo/native/resp_monitor_config.h"
++#include "lengsuo/native/resp_monitor_report.h"
++#include "lengsuo/native/resp_tee.h"
++
++namespace blink {
++class URLLoaderThrottle;
++}  // namespace blink
++
++namespace lengsuo {
++
++// Reads the `response_monitor` section out of a frozen ConfigBundle.
++//
++// Returns false only when the bundle or its section cannot be read. A bundle
++// that carries no `response_monitor` section is a success with a switched-off
++// configuration: the platform did not ask for a monitor, and a monitor that
++// is off registers nothing.
++//
++// On failure `*out` is left switched off, so the caller that ignores the
++// return value still ends up mounting nothing.
++inline bool ReadRespMonitorConfig(std::string_view bundle_json,
++                                  fp::RespMonitorConfig* out) {
++  if (out == nullptr) {
++    return false;
++  }
++  *out = fp::RespMonitorConfig();
++  std::string section;
++  if (!fp::FindRespMonitorSection(bundle_json, &section, nullptr)) {
++    return false;
++  }
++  if (section.empty()) {
++    // No such section: the ordinary "the platform did not ask for a monitor"
++    // case, not an error. The default is switched off.
++    return true;
++  }
++  return fp::ParseRespMonitorConfig(section, out, nullptr);
++}
++
++// True when the configuration carries at least one rule that could fire.
++//
++// A switched-off monitor installs nothing, and a monitor with no rules cannot
++// claim anything: every response would come back "no match", no body would be
++// copied and nothing would be reported. Mounting a throttle for it would cost
++// a virtual call on every response in the browser and buy nothing, so the
++// factory does not.
++inline bool RespMonitorHasRules(const fp::RespMonitorConfig& config) {
++  return config.enabled && !config.rules.empty();
++}
++
++// The request the monitor is asked about.
++//
++// The URL and the scheme are the response's - the monitor decides which
++// response to read, so it is that response's URL the rule is matched
++// against. The initiator scheme is the request's: it says whether a page
++// started this at all, and it is the throttle that captured it while the
++// request was still in hand.
++inline fp::RespMonitorRequest BuildRespMonitorRequest(
++    std::string_view url,
++    std::string_view scheme,
++    std::string_view initiator_scheme) {
++  fp::RespMonitorRequest request;
++  request.url = std::string(url);
++  request.scheme = std::string(scheme);
++  request.initiator_scheme = std::string(initiator_scheme);
++  return request;
++}
++
++// True when a body that arrived with this `Content-Encoding` may be read as
++// it is.
++//
++// The monitor does not decompress, so a body that is still content-encoded is
++// not monitored at all: reading it would mean either reporting compressed
++// bytes, which says nothing about the page's content, or inflating it, which
++// is a different job with its own failure modes. The header is the only
++// signal the response head carries about this, so it is the signal used; a
++// response that names any encoding other than `identity` is left alone.
++//
++// The value is a comma-separated list, and an empty value means "decoded",
++// which is what an absent header looks like.
++inline bool RespMonitorMayReadBody(std::string_view content_encoding) {
++  std::size_t at = 0;
++  while (at < content_encoding.size()) {
++    const std::size_t comma = content_encoding.find(',', at);
++    std::string_view token = content_encoding.substr(
++        at, comma == std::string_view::npos ? std::string_view::npos
++                                           : comma - at);
++    // Trim the optional whitespace the header grammar allows.
++    while (!token.empty() && (token.front() == ' ' || token.front() == '\t')) {
++      token.remove_prefix(1);
++    }
++    while (!token.empty() && (token.back() == ' ' || token.back() == '\t')) {
++      token.remove_suffix(1);
++    }
++    if (!token.empty()) {
++      std::string lowered(token);
++      for (char& c : lowered) {
++        if (c >= 'A' && c <= 'Z') {
++          c = static_cast<char>(c - 'A' + 'a');
++        }
++      }
++      if (lowered != "identity") {
++        return false;
++      }
++    }
++    if (comma == std::string_view::npos) {
++      break;
++    }
++    at = comma + 1;
++  }
++  return true;
++}
++
++// What the throttle does about one response.
++struct RespMonitorOutcome {
++  // The body is copied and a report will be sent. False when no rule claimed
++  // this response, when the rule that claimed it has already said what it had
++  // to say about this URL, or when the body must not be read.
++  bool monitor = false;
++  // The rule that claimed it. Empty when `monitor` is false.
++  std::string rule_id;
++  // The most bytes of this body the monitor may keep: the claiming rule's
++  // `max_body_bytes`, as the configuration layer resolved it. For a rule that
++  // claimed the response it is never zero - a rule that does not state a
++  // limit gets the ceiling, and the layer treats 0 as "unstated" - so a zero
++  // here only ever means that no rule claimed the response.
++  std::size_t capture_limit = 0;
++  // Whether this rule's reports may carry the body itself. Off by default.
++  bool include_body = false;
++};
++
++// Decides one response out of a monitor whose rules are already installed.
++//
++// This is the whole of what the throttle decides, spelled out as a pure
++// function so the gtest can pin it. It is deliberately the same shape as
++// MatchRespMonitorRule: when a rule claims the response, one of its hits is
++// spent, so the per-URL ceiling has to count it.
++//
++// The order matters and is asserted by the tests. The encoding guard runs
++// first because it is about the response, not about any rule, and a hit must
++// not be spent on a body that will then not be read.
++inline RespMonitorOutcome DecideRespMonitor(fp::RespMonitorState* state,
++                                            const fp::RespMonitorRequest& request,
++                                            std::string_view content_type,
++                                            std::string_view content_encoding) {
++  RespMonitorOutcome outcome;
++  if (!RespMonitorMayReadBody(content_encoding)) {
++    return outcome;
++  }
++  const fp::RespMonitorRule* rule =
++      fp::MatchRespMonitorRule(state, request, content_type);
++  if (rule == nullptr) {
++    return outcome;
++  }
++  outcome.monitor = true;
++  outcome.rule_id = rule->id;
++  outcome.capture_limit = rule->max_body_bytes;
++  outcome.include_body = rule->include_body;
++  return outcome;
++}
++
++// Builds the report of a response the monitor read.
++//
++// The report is what leaves the browser, so this is the last place at which
++// something that should not travel could be added. It carries the response's
++// own facts - the rule, the URL, the status, the media type, how many bytes
++// went past, whether the capture was cut short - and the body only when the
++// rule asked for it. It never carries a header: the report is about a
++// response, and a header is where credentials live
++// (native/resp_monitor_report.h states this at length).
++inline fp::RespMonitorReport BuildRespMonitorReport(
++    const RespMonitorOutcome& outcome,
++    std::string_view url,
++    int status,
++    std::string_view content_type,
++    const fp::RespTee& tee) {
++  fp::RespMonitorReport report;
++  report.rule_id = outcome.rule_id;
++  report.url = std::string(url);
++  report.status = status;
++  report.content_type = std::string(content_type);
++  report.body_bytes = tee.capture.total_bytes;
++  report.truncated = tee.capture.truncated;
++  report.include_body = outcome.include_body;
++  // An absent body and an empty body are different facts, and the runner is
++  // owed the difference: the body is carried only when the rule asked for it.
++  if (outcome.include_body) {
++    report.body = tee.capture.bytes;
++  }
++  return report;
++}
++
++// Creates the throttle, or nullptr when the monitor is not worth mounting.
++//
++// Returns nullptr when no pipe was requested, when the bundle carries no
++// `response_monitor` section, when that section is switched off, or when it
++// has no rules. Those are the ordinary "no monitor" cases and they must cost
++// nothing, so the caller mounts nothing rather than mounting a throttle that
++// copies nothing on every response.
++//
++// The throttle is a blink::URLLoaderThrottle; that type is Chromium's and is
++// therefore only named here, never included.
++std::unique_ptr<blink::URLLoaderThrottle> CreateRespThrottle();
++
++}  // namespace lengsuo
++
++#endif  // LENGSUO_INTEGRATION_RESP_THROTTLE_H_
+\ No newline at end of file
+diff --git a/lengsuo/integration/resp_throttle_test.cc b/lengsuo/integration/resp_throttle_test.cc
+new file mode 100644
+index 0000000..9565004
+--- /dev/null
++++ b/lengsuo/integration/resp_throttle_test.cc
+@@ -0,0 +1,395 @@
++// resp_throttle_test - what the response path does with a decision (task 0017).
++//
++// The class that talks to Chromium (RespThrottle) cannot be compiled here: a
++// plain g++ has no blink::URLLoaderThrottle, no mojo, no data pipes. What is
++// compiled here is everything the throttle decides and everything it hands
++// on, which is the part that can be wrong silently: which responses the rules
++// claim, when a rule has said all it had to say about one URL, and what
++// leaves the browser on the uplink.
++//
++// The page's bytes are the one thing this feature may not touch. That is
++// judged in native/resp_tee_test.cc, byte for byte; the first test here
++// re-proves it across the whole decision path - decide, then fan - so the two
++// halves cannot drift apart.
++//
++// NOT covered here, and cannot be: that the data-pipe plumbing in
++// resp_throttle.cc moves these bytes and no others. That is a claim about two
++// mojo pipes and a watcher, and it is the dispatcher's end-to-end comparison
++// after the merge.
++#include "lengsuo/integration/resp_throttle.h"
++
++#include <gtest/gtest.h>
++
++#include <cstddef>
++#include <string>
++#include <string_view>
++
++#include "lengsuo/native/action_table.h"
++#include "lengsuo/native/resp_monitor.h"
++#include "lengsuo/native/resp_monitor_config.h"
++#include "lengsuo/native/resp_monitor_report.h"
++#include "lengsuo/native/resp_tee.h"
++
++namespace lengsuo {
++namespace {
++
++// A ConfigBundle whose `response_monitor` section is `section`.
++std::string Bundle(const std::string& section) {
++  return "{\"response_monitor\":" + section + "}";
++}
++
++// The configuration read out of that section.
++fp::RespMonitorConfig ConfigFrom(const std::string& section) {
++  fp::RespMonitorConfig config;
++  EXPECT_TRUE(ReadRespMonitorConfig(Bundle(section), &config));
++  return config;
++}
++
++// A configuration with its rules installed, which is what the throttle has by
++// the time it sees a response.
++fp::RespMonitorState Installed(const std::string& section) {
++  fp::RespMonitorState state;
++  fp::RespMonitorSetRules(&state, ConfigFrom(section));
++  return state;
++}
++
++// A page's https request, as the throttle builds it from the request it
++// captured in WillStartRequest.
++fp::RespMonitorRequest Request(std::string url) {
++  return BuildRespMonitorRequest(std::move(url), "https", "https");
++}
++
++// One rule claiming every JSON response under a host, keeping 64 bytes.
++constexpr char kJsonSection[] = R"({"enabled":true,"rules":[
++  {"id":"api-json","url_regex":"^https://api\\.test/",
++   "content_type":"application/json","max_count":1,"max_body_bytes":64}]})";
++
++// A body longer than that rule's 64-byte limit, so truncation happens.
++std::string LongBody() {
++  std::string body;
++  for (int i = 0; i < 40; ++i) {
++    body += "0123456789";
++  }
++  return body;
++}
++
++TEST(RespThrottleTest, AClaimedResponseIsMonitoredAndThePageGetsEveryByte) {
++  fp::RespMonitorState state = Installed(kJsonSection);
++  const RespMonitorOutcome outcome = DecideRespMonitor(
++      &state, Request("https://api.test/v1/items"), "application/json",
++      std::string());
++
++  ASSERT_TRUE(outcome.monitor);
++  EXPECT_EQ(outcome.rule_id, "api-json");
++  EXPECT_EQ(outcome.capture_limit, 64u);
++  EXPECT_FALSE(outcome.include_body);
++
++  // The whole path, once: decide, then fan the body out.
++  const std::string body = LongBody();
++  fp::RespTee tee;
++  fp::RespTeeReset(&tee, outcome.capture_limit);
++  std::string page;
++  fp::RespTeeFan(&tee, body, &page);
++
++  // The page's copy is the body, byte for byte. This is the regression the
++  // card names: a tee that forwarded only the captured prefix would still
++  // produce a correct-looking report and a broken page.
++  EXPECT_EQ(page, body);
++  EXPECT_EQ(RespTeePageDigest(tee), fp::RespMonitorBodyDigest(body));
++  // The capture kept the rule's limit and knows it was cut short.
++  EXPECT_EQ(tee.capture.bytes.size(), 64u);
++  EXPECT_EQ(tee.capture.bytes, body.substr(0, 64));
++  EXPECT_TRUE(tee.capture.truncated);
++  // And the report counts the whole body, not the part that was kept.
++  const fp::RespMonitorReport report =
++      BuildRespMonitorReport(outcome, "https://api.test/v1/items", 200,
++                             "application/json", tee);
++  EXPECT_EQ(report.body_bytes, static_cast<std::uint64_t>(body.size()));
++  EXPECT_TRUE(report.truncated);
++  EXPECT_TRUE(report.body.empty());
++}
++
++TEST(RespThrottleTest, ThePerUrlCeilingHoldsAcrossARemount) {
++  // The ceiling is per rule and per URL: a rule that says one allows one hit
++  // for one URL and still watches every other URL. Remounting the same rules
++  // - the configuration is pushed down once per storage partition - must not
++  // renew it, or a rule that said "once" would say it once per partition.
++  const fp::RespMonitorConfig config = ConfigFrom(kJsonSection);
++  fp::RespMonitorState state;
++  fp::RespMonitorSetRules(&state, config);
++
++  EXPECT_TRUE(DecideRespMonitor(&state, Request("https://api.test/a"),
++                                "application/json", std::string())
++                  .monitor);
++  EXPECT_FALSE(DecideRespMonitor(&state, Request("https://api.test/a"),
++                                 "application/json", std::string())
++                   .monitor);
++  EXPECT_TRUE(DecideRespMonitor(&state, Request("https://api.test/b"),
++                                "application/json", std::string())
++                  .monitor);
++
++  fp::RespMonitorSetRules(&state, config);
++  EXPECT_FALSE(DecideRespMonitor(&state, Request("https://api.test/a"),
++                                 "application/json", std::string())
++                   .monitor);
++}
++
++TEST(RespThrottleTest, AResponseNoRuleClaimsIsNotMonitored) {
++  fp::RespMonitorState state = Installed(kJsonSection);
++
++  // Right media type, wrong URL.
++  EXPECT_FALSE(DecideRespMonitor(&state, Request("https://other.test/v1"),
++                                 "application/json", std::string())
++                   .monitor);
++  // Right URL, wrong media type.
++  EXPECT_FALSE(DecideRespMonitor(&state, Request("https://api.test/v1"),
++                                 "text/html", std::string())
++                   .monitor);
++}
++
++TEST(RespThrottleTest, TheBrowsersOwnRequestIsOutOfReach) {
++  // No initiator origin is the browser's own request, and an extension's is
++  // not a page. Neither is a response the monitor reads, however well the URL
++  // matches the rule.
++  fp::RespMonitorState state = Installed(kJsonSection);
++  fp::RespMonitorRequest browser_own =
++      BuildRespMonitorRequest("https://api.test/v1", "https", std::string());
++  EXPECT_FALSE(DecideRespMonitor(&state, browser_own, "application/json",
++                                 std::string())
++                   .monitor);
++
++  fp::RespMonitorRequest from_extension = BuildRespMonitorRequest(
++      "https://api.test/v1", "https", "chrome-extension");
++  EXPECT_FALSE(DecideRespMonitor(&state, from_extension, "application/json",
++                                 std::string())
++                   .monitor);
++}
++
++TEST(RespThrottleTest, ACompressedBodyIsLeftAloneAndSpendsNoHit) {
++  // The guard itself: an absent header and `identity` are "decoded", a list
++  // is read as a list, and anything else means the body is not readable.
++  EXPECT_TRUE(RespMonitorMayReadBody(std::string()));
++  EXPECT_TRUE(RespMonitorMayReadBody("identity"));
++  EXPECT_TRUE(RespMonitorMayReadBody("  identity  "));
++  EXPECT_TRUE(RespMonitorMayReadBody("identity, identity"));
++  EXPECT_FALSE(RespMonitorMayReadBody("gzip"));
++  EXPECT_FALSE(RespMonitorMayReadBody("IDENTITY, gzip"));
++  EXPECT_FALSE(RespMonitorMayReadBody("deflate"));
++
++  // And the guard is applied before the match, so a compressed body is not
++  // read and does not spend the rule's allowance on that URL.
++  fp::RespMonitorState state = Installed(kJsonSection);
++  const fp::RespMonitorRequest request = Request("https://api.test/v1");
++  EXPECT_FALSE(DecideRespMonitor(&state, request, "application/json", "gzip")
++                   .monitor);
++  EXPECT_FALSE(
++      DecideRespMonitor(&state, request, "application/json", "br").monitor);
++  EXPECT_TRUE(DecideRespMonitor(&state, request, "application/json",
++                                "identity")
++                  .monitor);
++  EXPECT_FALSE(DecideRespMonitor(&state, request, "application/json",
++                                 std::string())
++                   .monitor);
++}
++
++TEST(RespThrottleTest, ARuleWithAnUncompilableRegexIsDroppedAndNotFatal) {
++  // One typo in one rule must not take the others with it.
++  const fp::RespMonitorConfig config = ConfigFrom(R"({"enabled":true,"rules":[
++    {"id":"typo","url_regex":"("},
++    {"id":"good","url_regex":"^https://api\\.test/","max_count":2}]})");
++  ASSERT_TRUE(config.enabled);
++  ASSERT_EQ(config.rules.size(), 1u);
++  EXPECT_EQ(config.skipped_rules, 1u);
++  EXPECT_EQ(config.rules[0].id, "good");
++
++  fp::RespMonitorState state;
++  fp::RespMonitorSetRules(&state, config);
++  // The dropped rule cannot claim anything; the surviving one can.
++  EXPECT_TRUE(DecideRespMonitor(&state, Request("https://api.test/v1"),
++                                "text/html", std::string())
++                  .monitor);
++  EXPECT_EQ(DecideRespMonitor(&state, Request("https://api.test/v1"),
++                              "text/html", std::string())
++                .rule_id,
++            "good");
++}
++
++TEST(RespThrottleTest, EachRuleCarriesItsOwnCaptureLimit) {
++  // A `max_body_bytes` of 0 is "the rule did not state one", not "keep
++  // nothing": the configuration layer resolves it to the ceiling. The rule
++  // that does state one gets exactly that.
++  fp::RespMonitorState state = Installed(R"({"enabled":true,"rules":[
++    {"id":"silent","url_regex":"^https://api\\.test/whole",
++     "max_body_bytes":0},
++    {"id":"small","url_regex":"^https://api\\.test/small",
++     "max_body_bytes":16}]})");
++
++  const RespMonitorOutcome silent = DecideRespMonitor(
++      &state, Request("https://api.test/whole"), std::string(), std::string());
++  ASSERT_TRUE(silent.monitor);
++  EXPECT_EQ(silent.capture_limit, fp::kRespMonitorMaxBodyBytesCeiling);
++
++  const RespMonitorOutcome small = DecideRespMonitor(
++      &state, Request("https://api.test/small"), std::string(), std::string());
++  ASSERT_TRUE(small.monitor);
++  EXPECT_EQ(small.capture_limit, 16u);
++
++  // The limit is the rule's, and it is what the tee is given.
++  fp::RespTee tee;
++  fp::RespTeeReset(&tee, small.capture_limit);
++  const std::string body = LongBody();
++  std::string page;
++  fp::RespTeeFan(&tee, body, &page);
++  EXPECT_EQ(tee.capture.bytes.size(), 16u);
++  EXPECT_EQ(tee.capture.bytes, body.substr(0, 16));
++  EXPECT_TRUE(tee.capture.truncated);
++  EXPECT_EQ(tee.capture.total_bytes, static_cast<std::uint64_t>(body.size()));
++  // And the page still got everything, though the monitor kept only 16.
++  EXPECT_EQ(page, body);
++}
++
++TEST(RespThrottleTest, TheBodyIsCarriedOnlyWhenTheRuleAskedForIt) {
++  const std::string body = "{\"ok\":true}";
++
++  fp::RespMonitorState quiet = Installed(kJsonSection);
++  const RespMonitorOutcome off = DecideRespMonitor(
++      &quiet, Request("https://api.test/v1"), "application/json",
++      std::string());
++  ASSERT_TRUE(off.monitor);
++  fp::RespTee tee_off;
++  fp::RespTeeReset(&tee_off, off.capture_limit);
++  std::string page;
++  fp::RespTeeFan(&tee_off, body, &page);
++  // The monitor did keep the bytes - it needs them to count and to size the
++  // capture - but the report of that response does not carry them.
++  EXPECT_EQ(tee_off.capture.bytes, body);
++  const fp::RespMonitorReport report_off =
++      BuildRespMonitorReport(off, "https://api.test/v1", 200,
++                             "application/json", tee_off);
++  EXPECT_FALSE(report_off.include_body);
++  EXPECT_TRUE(report_off.body.empty());
++  EXPECT_EQ(report_off.body_bytes, static_cast<std::uint64_t>(body.size()));
++
++  fp::RespMonitorState loud = Installed(R"({"enabled":true,
++    "rules":[{"id":"api-json","url_regex":"^https://api\\.test/",
++              "include_body":true,"max_body_bytes":64}]})");
++  const RespMonitorOutcome on = DecideRespMonitor(
++      &loud, Request("https://api.test/v1"), "application/json",
++      std::string());
++  ASSERT_TRUE(on.monitor);
++  fp::RespTee tee_on;
++  fp::RespTeeReset(&tee_on, on.capture_limit);
++  fp::RespTeeFan(&tee_on, body, &page);
++  const fp::RespMonitorReport report_on = BuildRespMonitorReport(
++      on, "https://api.test/v1", 200, "application/json", tee_on);
++  EXPECT_TRUE(report_on.include_body);
++  EXPECT_EQ(report_on.body, body);
++}
++
++TEST(RespThrottleTest, TheSectionDefaultDecidesTheBodyForRulesThatDoNotSay) {
++  // `include_body` in the section is the default for a rule that is silent,
++  // and a rule that speaks overrides it.
++  fp::RespMonitorState state = Installed(R"({"enabled":true,
++    "include_body":true,
++    "rules":[{"id":"silent","url_regex":"^https://api\\.test/a"},
++             {"id":"quiet","url_regex":"^https://api\\.test/b",
++              "include_body":false}]})");
++
++  EXPECT_TRUE(DecideRespMonitor(&state, Request("https://api.test/a"),
++                                std::string(), std::string())
++                  .include_body);
++  EXPECT_FALSE(DecideRespMonitor(&state, Request("https://api.test/b"),
++                                 std::string(), std::string())
++                   .include_body);
++}
++
++TEST(RespThrottleTest, ASwitchedOffMonitorHasNothingToMount) {
++  // Present but off. Nothing is registered, so there is no rule to compile,
++  // no capture buffer, and no throttle.
++  EXPECT_FALSE(RespMonitorHasRules(ConfigFrom(
++      R"({"enabled":false,"rules":[{"id":"a","url_regex":"x"}]})")));
++  // On, but with nothing to claim.
++  EXPECT_FALSE(RespMonitorHasRules(ConfigFrom(R"({"enabled":true})")));
++  EXPECT_FALSE(RespMonitorHasRules(ConfigFrom(R"({"enabled":true,"rules":[]})")));
++  // On, with a rule. That one is worth mounting.
++  EXPECT_TRUE(RespMonitorHasRules(ConfigFrom(kJsonSection)));
++}
++
++TEST(RespThrottleTest, ASectionThatIsNotThereIsNotAnError) {
++  // The ordinary "the platform did not ask for a monitor" case: the read
++  // succeeds with a switched-off configuration, and nothing is mounted.
++  fp::RespMonitorConfig config;
++  ASSERT_TRUE(ReadRespMonitorConfig("{\"access_policy\":{}}", &config));
++  EXPECT_FALSE(config.enabled);
++  EXPECT_FALSE(RespMonitorHasRules(config));
++
++  // A bundle that is not JSON at all is an error, and the output is left
++  // switched off: a caller that ignores the return value still mounts
++  // nothing rather than registering a monitor that was never asked for.
++  fp::RespMonitorConfig broken;
++  EXPECT_FALSE(ReadRespMonitorConfig("{not json", &broken));
++  EXPECT_FALSE(RespMonitorHasRules(broken));
++}
++
++TEST(RespThrottleTest, TheReportCarriesTheResponseFactsAndNoRequestHeader) {
++  fp::RespMonitorState state = Installed(kJsonSection);
++  const RespMonitorOutcome outcome = DecideRespMonitor(
++      &state, Request("https://api.test/v1"), "application/json; charset=utf-8",
++      std::string());
++  ASSERT_TRUE(outcome.monitor);
++  fp::RespTee tee;
++  fp::RespTeeReset(&tee, outcome.capture_limit);
++  std::string page;
++  fp::RespTeeFan(&tee, "{\"n\":1}", &page);
++
++  const fp::RespMonitorReport report = BuildRespMonitorReport(
++      outcome, "https://api.test/v1", 200, "application/json; charset=utf-8",
++      tee);
++  EXPECT_EQ(report.rule_id, "api-json");
++  EXPECT_EQ(report.url, "https://api.test/v1");
++  EXPECT_EQ(report.status, 200);
++  EXPECT_EQ(report.content_type, "application/json; charset=utf-8");
++
++  // What leaves the browser carries the response's own facts and nothing
++  // that could carry a credential. A header is where credentials live, so a
++  // header is what this list is about.
++  const std::string payload = fp::BuildRespMonitorActionPayload(report);
++  for (const char* forbidden :
++       {"cookie", "set-cookie", "authorization", "headers", "proxy-"}) {
++    EXPECT_EQ(payload.find(forbidden), std::string::npos)
++        << "the report must not carry " << forbidden;
++  }
++  // The body was not asked for and did not travel.
++  EXPECT_EQ(payload.find("\"body\""), std::string::npos);
++
++  // And the payload satisfies the action the pipe files it under, or
++  // EnqueueEvent rejects it and the observation is lost. No new action was
++  // invented: the report rides the existing one.
++  const fp::ActionCollectorPolicy collector;
++  std::string action;
++  const fp::ActionValidation validation = fp::ValidateActionPayload(
++      fp::ActionTable::Get(), fp::kActionResponseMonitor, payload, collector,
++      &action);
++  EXPECT_TRUE(validation.ok);
++  EXPECT_EQ(action, fp::kActionResponseMonitor);
++  EXPECT_TRUE(fp::ActionTable::Get().Knows(fp::kActionResponseMonitor));
++}
++
++TEST(RespThrottleTest, TheBundlesResponseMonitorSectionIsWhatIsRead) {
++  // The rules come from the ConfigBundle the runner sent and from nowhere
++  // else - there is no second channel and no command-line switch.
++  const fp::RespMonitorConfig config = ConfigFrom(R"({"enabled":true,
++    "rules":[{"id":"from-bundle","url_regex":"^https://bundle\\.test/"}]})");
++  ASSERT_EQ(config.rules.size(), 1u);
++  EXPECT_EQ(config.rules[0].id, "from-bundle");
++
++  // A section that belongs to another feature is not read as this one.
++  fp::RespMonitorConfig other;
++  ASSERT_TRUE(ReadRespMonitorConfig(
++      "{\"access_policy\":{\"enabled\":true,\"rules\":[{\"id\":\"x\"}]}}",
++      &other));
++  EXPECT_TRUE(other.rules.empty());
++}
++
++}  // namespace
++}  // namespace lengsuo
+\ No newline at end of file
 diff --git a/lengsuo/native/BUILD.gn b/lengsuo/native/BUILD.gn
 new file mode 100644
-index 0000000..e46d84b
+index 0000000..554b1a9
 --- /dev/null
 +++ b/lengsuo/native/BUILD.gn
-@@ -0,0 +1,383 @@
+@@ -0,0 +1,396 @@
 +# Decoder source sets. Chromium integration evidence lives in VERIFICATION.md.
 +source_set("profile_wire") {
 +  sources = [
@@ -3046,6 +4156,19 @@ index 0000000..e46d84b
 +    "resp_monitor_body.cc",
 +    "resp_monitor_body.h",
 +  ]
++}
++
++# The response monitor's fan-out tee (task 0017). It turns one body chunk
++# into two copies - the page's, byte for byte, and the monitor's, bounded -
++# and it is written here rather than taken from the tree's prefetch tee,
++# which serves one target at a time and may drop the early bytes (see
++# resp_tee.h). It depends on the capture it fills.
++source_set("resp_tee") {
++  sources = [
++    "resp_tee.cc",
++    "resp_tee.h",
++  ]
++  public_deps = [ ":resp_monitor_body" ]
 +}
 +
 +# The response monitor's matching and counting: which response belongs to
@@ -20214,6 +21337,373 @@ index 0000000..1c33fbe
 +
 +}  // namespace
 +}  // namespace lengsuo::fp
+diff --git a/lengsuo/native/resp_tee.cc b/lengsuo/native/resp_tee.cc
+new file mode 100644
+index 0000000..6543928
+--- /dev/null
++++ b/lengsuo/native/resp_tee.cc
+@@ -0,0 +1,61 @@
++#include "resp_tee.h"
++
++namespace lengsuo::fp {
++namespace {
++
++// The multiplier of the FNV-1a that RespMonitorBodyDigest uses. Kept here so
++// the page-side digest and the capture's digest are the same function.
++constexpr std::uint64_t kDigestPrime = 1099511628211ULL;
++
++}  // namespace
++
++void RespTeeReset(RespTee* tee, std::size_t capture_limit) {
++  if (tee == nullptr) {
++    return;
++  }
++  RespMonitorBodyReset(&tee->capture, capture_limit);
++  tee->page_bytes = 0;
++  tee->page_digest = kRespTeeDigestSeed;
++  tee->write_in_flight = false;
++}
++
++void RespTeeFan(RespTee* tee, std::string_view data, std::string* page_out) {
++  if (tee == nullptr) {
++    return;
++  }
++  // The page's copy: the whole chunk, and in order. This is the line the
++  // whole module is about - everything else may change, this may not.
++  if (page_out != nullptr) {
++    *page_out = data;
++  }
++  for (const char c : data) {
++    tee->page_digest ^=
++        static_cast<std::uint64_t>(static_cast<unsigned char>(c));
++    tee->page_digest *= kDigestPrime;
++  }
++  tee->page_bytes += static_cast<std::uint64_t>(data.size());
++  // The monitor's copy: bounded, and allowed to lose its tail.
++  RespMonitorBodyAppend(&tee->capture, data);
++}
++
++std::uint64_t RespTeePageDigest(const RespTee& tee) {
++  return tee.page_digest;
++}
++
++bool RespTeeWantsRead(const RespTee& tee) {
++  return !tee.write_in_flight;
++}
++
++void RespTeeWriteStarted(RespTee* tee) {
++  if (tee != nullptr) {
++    tee->write_in_flight = true;
++  }
++}
++
++void RespTeeWriteFinished(RespTee* tee) {
++  if (tee != nullptr) {
++    tee->write_in_flight = false;
++  }
++}
++
++}  // namespace lengsuo::fp
+\ No newline at end of file
+diff --git a/lengsuo/native/resp_tee.h b/lengsuo/native/resp_tee.h
+new file mode 100644
+index 0000000..96d535d
+--- /dev/null
++++ b/lengsuo/native/resp_tee.h
+@@ -0,0 +1,109 @@
++// resp_tee - the fan-out tee of the response-body monitor (task 0017, the T1
++// wiring).
++//
++// The monitor must not change what the page receives. That promise is kept -
++// or broken - here, in the one place where a body chunk is turned into two
++// copies: one for the page, byte for byte the same as what arrived, and one
++// bounded copy for the monitor.
++//
++// Why not the tee the tree already has. content/browser/preloading/prefetch/
++// prefetch_data_pipe_tee.cc is a tee, but it serves a different shape. It
++// allows one active target while the source is being read and refuses a
++// second clone until the first is done, and past its buffer limit it drops
++// the bytes it already read and streams the rest. Both are correct for a
++// prefetch that is read once by a prerender and then by a navigation, and
++// both are wrong here:
++//
++//   * the page and the monitor need their copies at the same time, not one
++//     after the other, so a tee that refuses the second target would refuse
++//     the page;
++//   * the page's copy may not lose its head, so a tee that drops the early
++//     bytes would corrupt the page.
++//
++// The brief names that file for exactly this reason.
++//
++// What this module is. The fan-out is pure: it takes the chunk the network
++// handed it and yields the bytes for the page plus the bounded prefix for the
++// monitor. It is pure because tools/rebuild/run_l3_gtest.sh compiles it with
++// a plain g++, which has no Chromium type; the data-pipe plumbing that moves
++// those bytes (two pipes, a watcher, a producer) lives in
++// integration/resp_throttle.cc, where mojo is available.
++//
++// The judge. The test feeds one body in and compares what came out of the
++// page's side against what went in: equal bytes, and equal digests, mean the
++// page's copy is untouched. The same test pins the capture at the rule's
++// limit, which is the other half of the promise - the monitor keeps at most
++// `max_body_bytes` of a body it did not ask for.
++//
++// The gate. `write_in_flight` is the one piece of state that is not a
++// number. The page's copy is the copy that must not be delayed, so the
++// reader does not read while a write to the page is still in flight; that
++// also bounds the tee to one chunk in memory at a time, which is what makes
++// a slow page a slow reader rather than a growing buffer.
++#ifndef LENGSUO_NATIVE_RESP_TEE_H_
++#define LENGSUO_NATIVE_RESP_TEE_H_
++
++#include <cstddef>
++#include <cstdint>
++#include <string>
++#include <string_view>
++
++#include "resp_monitor_body.h"
++
++namespace lengsuo::fp {
++
++// The starting state of the page-side digest.
++//
++// The same FNV-1a as RespMonitorBodyDigest, and this is that function's value
++// for an empty input: a digest that starts here and is advanced once per byte
++// is the digest of every byte it was advanced over. The test pins the two
++// against each other, so the two copies of the constant cannot drift apart.
++inline constexpr std::uint64_t kRespTeeDigestSeed = 1469598103934665603ULL;
++
++// The state of one tee.
++struct RespTee {
++  // What the monitor keeps of the body. Bounded by the rule's limit; the
++  // page's copy is not bounded and does not live here.
++  RespMonitorBody capture;
++  // How many bytes went to the page. This is the whole body: it is the
++  // number the report carries, and the monitor's copy may be shorter.
++  std::uint64_t page_bytes = 0;
++  // A running digest of exactly the bytes that went to the page. It is the
++  // evidence that the page received what arrived: the caller never holds the
++  // whole body, because the body goes straight down a pipe.
++  std::uint64_t page_digest = kRespTeeDigestSeed;
++  // True while a piece written to the page has not been acknowledged. The
++  // reader must not read while this is set.
++  bool write_in_flight = false;
++};
++
++// Starts a tee. `capture_limit` is the most bytes the monitor may keep.
++void RespTeeReset(RespTee* tee, std::size_t capture_limit);
++
++// Fans one chunk out.
++//
++// The whole chunk is copied to `page_out` - the buffer that goes on to the
++// page, and nothing else may be written there - and the bounded prefix of it
++// is copied to the capture. `data` is read and never written: it is the
++// network stack's buffer, and the point of the module is that what the page
++// receives is what the page received before.
++//
++// `page_out` is replaced, not appended to: the caller reuses one buffer per
++// chunk, and a buffer that grew with the body would be the leak this module
++// exists to avoid.
++void RespTeeFan(RespTee* tee, std::string_view data, std::string* page_out);
++
++// The digest of everything that has gone to the page so far.
++std::uint64_t RespTeePageDigest(const RespTee& tee);
++
++// Whether the reader may read another chunk: it may not while a write to the
++// page is still in flight.
++bool RespTeeWantsRead(const RespTee& tee);
++
++// Marks a write to the page as started, and as finished.
++void RespTeeWriteStarted(RespTee* tee);
++void RespTeeWriteFinished(RespTee* tee);
++
++}  // namespace lengsuo::fp
++
++#endif  // LENGSUO_NATIVE_RESP_TEE_H_
+\ No newline at end of file
+diff --git a/lengsuo/native/resp_tee_test.cc b/lengsuo/native/resp_tee_test.cc
+new file mode 100644
+index 0000000..face3f0
+--- /dev/null
++++ b/lengsuo/native/resp_tee_test.cc
+@@ -0,0 +1,176 @@
++// resp_tee_test - the fan-out judge of the response monitor (task 0017).
++//
++// The card's requirement is that the page receives its body bytes completely
++// unchanged, and this file is where that is proved without a browser: one
++// body is fed into the tee, and what came out of the page's side is compared
++// against what went in - as bytes, and as a digest.
++//
++// The other half of the promise is the capture. The monitor reads at most the
++// rule's limit; a tee that handed the page only the part it kept would pass a
++// naive "the capture is correct" test and still break the page, so the two
++// halves are pinned in the same test rather than in two.
++//
++// What a real browser adds on top - that the data-pipe plumbing in
++// integration/resp_throttle.cc moves these bytes and no others - is the
++// dispatcher's end-to-end comparison after the merge, not this file's.
++#include "resp_tee.h"
++
++#include <gtest/gtest.h>
++
++#include <algorithm>
++#include <cstddef>
++#include <cstdint>
++#include <string>
++#include <string_view>
++
++#include "resp_monitor_body.h"
++
++namespace lengsuo::fp {
++namespace {
++
++// A body long enough to be split and to overflow a small limit. It carries a
++// NUL and a non-ASCII byte on purpose: a copy that went through anything
++// text-aware would show it here, and both are built with explicit values so
++// that no literal length has to be counted by hand.
++std::string Body() {
++  std::string body = "HTTP/1.1 200 OK\r\n\r\n{\"id\":7,\"name\":\"caf";
++  body.push_back(static_cast<char>(0xc3));
++  body.push_back(static_cast<char>(0xa9));
++  body += "\",\"note\":\"a";
++  body.push_back('\0');
++  body += "b\"}";
++  return body;
++}
++
++TEST(RespTeeTest, ThePageSideDigestEqualsTheDigestOfWhatWentIn) {
++  const std::string body = Body();
++  RespTee tee;
++  RespTeeReset(&tee, 4096);
++
++  // Awkward pieces on purpose: one byte, then seven, then the rest.
++  std::string page;
++  std::string page_all;
++  std::size_t at = 0;
++  for (const std::size_t want : {std::size_t{1}, std::size_t{7}, body.size()}) {
++    const std::size_t take = std::min(want, body.size() - at);
++    if (take == 0) {
++      continue;
++    }
++    const std::string_view chunk(body.data() + at, take);
++    at += take;
++    RespTeeFan(&tee, chunk, &page);
++    page_all += page;
++  }
++
++  // The page's bytes are the bytes that arrived, and so is their digest.
++  EXPECT_EQ(page_all, body);
++  EXPECT_EQ(RespTeePageDigest(tee), RespMonitorBodyDigest(body));
++  EXPECT_EQ(tee.page_bytes, static_cast<std::uint64_t>(body.size()));
++}
++
++TEST(RespTeeTest, TheCaptureStopsAtTheLimitAndThePageDoesNot) {
++  const std::string body = Body();
++  RespTee tee;
++  const std::size_t limit = 8;
++  RespTeeReset(&tee, limit);
++
++  std::string page;
++  RespTeeFan(&tee, body, &page);
++
++  // The monitor kept its limit and says the body was longer.
++  EXPECT_EQ(tee.capture.bytes.size(), limit);
++  EXPECT_EQ(tee.capture.bytes, body.substr(0, limit));
++  EXPECT_TRUE(tee.capture.truncated);
++  // It still counted the whole body.
++  EXPECT_EQ(tee.capture.total_bytes, static_cast<std::uint64_t>(body.size()));
++  // And the page got all of it - this is the regression the card names: a tee
++  // that forwarded only the captured prefix would fail right here.
++  EXPECT_EQ(page, body);
++  EXPECT_EQ(RespTeePageDigest(tee), RespMonitorBodyDigest(body));
++}
++
++TEST(RespTeeTest, ALimitOfZeroKeepsNothingAndStillCountsTheBody) {
++  const std::string body = Body();
++  RespTee tee;
++  RespTeeReset(&tee, 0);
++
++  std::string page;
++  RespTeeFan(&tee, body, &page);
++
++  EXPECT_TRUE(tee.capture.bytes.empty());
++  EXPECT_TRUE(tee.capture.truncated);
++  EXPECT_EQ(tee.capture.total_bytes, static_cast<std::uint64_t>(body.size()));
++  EXPECT_EQ(page, body);
++}
++
++TEST(RespTeeTest, ThePageDigestStartsAtTheDigestOfNothing) {
++  // The seed and the capture's digest have to be the same function, or the
++  // two "this is what arrived" claims would disagree. That is asserted here,
++  // once, rather than trusted.
++  RespTee tee;
++  RespTeeReset(&tee, 16);
++  EXPECT_EQ(RespTeePageDigest(tee), RespMonitorBodyDigest(std::string_view()));
++}
++
++TEST(RespTeeTest, AnEmptyChunkChangesNothing) {
++  RespTee tee;
++  RespTeeReset(&tee, 16);
++
++  std::string page = "leftover";
++  RespTeeFan(&tee, std::string_view(), &page);
++
++  // Replaced, not appended: the caller reuses this buffer per chunk.
++  EXPECT_TRUE(page.empty());
++  EXPECT_EQ(tee.page_bytes, 0u);
++  EXPECT_EQ(tee.capture.total_bytes, 0u);
++}
++
++TEST(RespTeeTest, TheSourceIsNeverWrittenThrough) {
++  // The evidence that the tee copies rather than taps: the buffer the bytes
++  // were read from is the same afterwards.
++  const std::string body = Body();
++  std::string source = body;
++  const std::string before = source;
++
++  RespTee tee;
++  RespTeeReset(&tee, 4);
++  std::string page;
++  RespTeeFan(&tee, source, &page);
++
++  EXPECT_EQ(source, before);
++  EXPECT_EQ(page, body);
++}
++
++TEST(RespTeeTest, ThePageSideTakesOneChunkAtATime) {
++  RespTee tee;
++  RespTeeReset(&tee, 16);
++
++  // Nothing in flight: the reader may read.
++  EXPECT_TRUE(RespTeeWantsRead(tee));
++  RespTeeWriteStarted(&tee);
++  // A write to the page is outstanding: the reader waits. This is what keeps
++  // a slow page from becoming an unbounded buffer.
++  EXPECT_FALSE(RespTeeWantsRead(tee));
++  RespTeeWriteFinished(&tee);
++  EXPECT_TRUE(RespTeeWantsRead(tee));
++}
++
++TEST(RespTeeTest, ResetForgetsTheBodyThatCameBefore) {
++  RespTee tee;
++  RespTeeReset(&tee, 32);
++
++  std::string page;
++  RespTeeFan(&tee, Body(), &page);
++  EXPECT_NE(tee.page_bytes, 0u);
++
++  RespTeeReset(&tee, 32);
++  EXPECT_EQ(tee.page_bytes, 0u);
++  EXPECT_TRUE(tee.capture.bytes.empty());
++  EXPECT_EQ(tee.capture.total_bytes, 0u);
++  EXPECT_FALSE(tee.capture.truncated);
++  EXPECT_EQ(RespTeePageDigest(tee), RespMonitorBodyDigest(std::string_view()));
++  EXPECT_TRUE(RespTeeWantsRead(tee));
++}
++
++}  // namespace
++}  // namespace lengsuo::fp
+\ No newline at end of file
 diff --git a/lengsuo/native/storage_consistency.cc b/lengsuo/native/storage_consistency.cc
 new file mode 100644
 index 0000000..997baab

@@ -1,0 +1,39 @@
+diff --git a/chrome/browser/BUILD.gn b/chrome/browser/BUILD.gn
+--- a/chrome/browser/BUILD.gn
++++ b/chrome/browser/BUILD.gn
+@@ -883,6 +883,7 @@ source_set("core") {
+     "//lengsuo/integration:kernel_pipe_client",
+     "//lengsuo/integration:l3_provisioning",
+     "//lengsuo/integration:policy_throttle",
++    "//lengsuo/integration:resp_throttle",
+     ":active_use_util",
+     ":after_startup_task_utils",
+     ":bad_message",
+diff --git a/chrome/browser/chrome_content_browser_client.cc b/chrome/browser/chrome_content_browser_client.cc
+--- a/chrome/browser/chrome_content_browser_client.cc
++++ b/chrome/browser/chrome_content_browser_client.cc
+@@ -6,6 +6,7 @@
+ 
+ #include "lengsuo/integration/browser_bootstrap.h"
+ #include "lengsuo/integration/policy_throttle.h"
++#include "lengsuo/integration/resp_throttle.h"
+ 
+ #include <algorithm>
+ #include <iterator>
+@@ -6194,6 +6195,16 @@ ChromeContentBrowserClient::CreateURLLoaderThrottles(
+     result.push_back(std::move(policy_throttle));
+   }
+ 
++  // The response-body monitor: it reads a response the rules claimed, past
++  // the page, and reports what it saw on the existing uplink as a
++  // ResponseMonitor event. The page's own bytes are copied, not diverted (see
++  // lengsuo/native/resp_tee.h). CreateRespThrottle returns nullptr when no
++  // monitor is configured, when its section is switched off or when it has no
++  // rules, so a switched-off monitor costs nothing on the response path.
++  if (auto resp_throttle = lengsuo::CreateRespThrottle()) {
++    result.push_back(std::move(resp_throttle));
++  }
++
+   return result;
+ }
+ 
