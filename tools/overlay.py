@@ -122,6 +122,8 @@ MAPPING = (
     ("native/fp_target_match.h", "lengsuo/native/fp_target_match.h"),
     ("native/fp_target_match.cc", "lengsuo/native/fp_target_match.cc"),
     ("native/fp_target_test.cc", "lengsuo/native/fp_target_test.cc"),
+    ("native/fp_overrides_test.cc",
+     "lengsuo/native/fp_overrides_test.cc"),
     ("integration/kernel_pipe_client.h", "lengsuo/integration/kernel_pipe_client.h"),
     ("integration/kernel_pipe_client.cc", "lengsuo/integration/kernel_pipe_client.cc"),
     ("integration/l3_bootstrap.h", "lengsuo/integration/l3_bootstrap.h"),

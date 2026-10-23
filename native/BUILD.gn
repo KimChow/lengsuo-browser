@@ -15,19 +15,36 @@ source_set("profile_catalog") {
   public_deps = [ ":profile_wire" ]
 }
 
+# The pure pixel algorithm, on its own. It is a leaf: it includes nothing of
+# ours and it is what the sampling layer needs, so the sampling layer does not
+# have to reach through the injection state below.
+source_set("canvas_noise_algorithm") {
+  sources = [
+    "canvas_noise.cc",
+    "canvas_noise.h",
+  ]
+}
+
+# The renderer-side injection state: the apply entry point, the fingerprint
+# overrides and the font tables. It also reads the per-URL target table, which
+# is why it depends on :fp_target; the sampling layer reaches this target's
+# algorithm through :canvas_noise_algorithm instead, so the dependency graph
+# stays acyclic.
 source_set("canvas_noise") {
   sources = [
     "canvas_apply.cc",
     "canvas_apply.h",
-    "canvas_noise.cc",
     "fp_overrides.cc",
     "fp_overrides.h",
     "font_family_traits.cc",
     "font_family_traits.h",
     "font_metrics.cc",
     "font_metrics.h",
-    "canvas_noise.h",
     "product_brand.h",
+  ]
+  public_deps = [
+    ":canvas_noise_algorithm",
+    ":fp_target",
   ]
 }
 
@@ -328,7 +345,7 @@ source_set("policy_report") {
 #   fp_target      the table of target values and the URL targeting
 #
 # fp_sampling reuses the canvas noise the kernel already had, so it
-# depends on :canvas_noise and on nothing else. fp_target reads the
+# depends on :canvas_noise_algorithm and on nothing else. fp_target reads the
 # ConfigBundle, so it depends on the JSON reader; the glob form of the
 # URL selection reuses the profile layer's matcher, so it depends on
 # :profile_bundle too.
@@ -337,7 +354,7 @@ source_set("fp_sampling") {
     "fp_sampling.cc",
     "fp_sampling.h",
   ]
-  public_deps = [ ":canvas_noise" ]
+  public_deps = [ ":canvas_noise_algorithm" ]
 }
 
 source_set("fp_converge") {

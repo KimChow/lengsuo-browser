@@ -2255,10 +2255,10 @@ index 0000000..3bd62d6
 +#endif
 diff --git a/lengsuo/native/BUILD.gn b/lengsuo/native/BUILD.gn
 new file mode 100644
-index 0000000..97dbdfd
+index 0000000..c3015aa
 --- /dev/null
 +++ b/lengsuo/native/BUILD.gn
-@@ -0,0 +1,363 @@
+@@ -0,0 +1,380 @@
 +# Decoder source sets. Chromium integration evidence lives in VERIFICATION.md.
 +source_set("profile_wire") {
 +  sources = [
@@ -2276,19 +2276,36 @@ index 0000000..97dbdfd
 +  public_deps = [ ":profile_wire" ]
 +}
 +
++# The pure pixel algorithm, on its own. It is a leaf: it includes nothing of
++# ours and it is what the sampling layer needs, so the sampling layer does not
++# have to reach through the injection state below.
++source_set("canvas_noise_algorithm") {
++  sources = [
++    "canvas_noise.cc",
++    "canvas_noise.h",
++  ]
++}
++
++# The renderer-side injection state: the apply entry point, the fingerprint
++# overrides and the font tables. It also reads the per-URL target table, which
++# is why it depends on :fp_target; the sampling layer reaches this target's
++# algorithm through :canvas_noise_algorithm instead, so the dependency graph
++# stays acyclic.
 +source_set("canvas_noise") {
 +  sources = [
 +    "canvas_apply.cc",
 +    "canvas_apply.h",
-+    "canvas_noise.cc",
 +    "fp_overrides.cc",
 +    "fp_overrides.h",
 +    "font_family_traits.cc",
 +    "font_family_traits.h",
 +    "font_metrics.cc",
 +    "font_metrics.h",
-+    "canvas_noise.h",
 +    "product_brand.h",
++  ]
++  public_deps = [
++    ":canvas_noise_algorithm",
++    ":fp_target",
 +  ]
 +}
 +
@@ -2589,7 +2606,7 @@ index 0000000..97dbdfd
 +#   fp_target      the table of target values and the URL targeting
 +#
 +# fp_sampling reuses the canvas noise the kernel already had, so it
-+# depends on :canvas_noise and on nothing else. fp_target reads the
++# depends on :canvas_noise_algorithm and on nothing else. fp_target reads the
 +# ConfigBundle, so it depends on the JSON reader; the glob form of the
 +# URL selection reuses the profile layer's matcher, so it depends on
 +# :profile_bundle too.
@@ -2598,7 +2615,7 @@ index 0000000..97dbdfd
 +    "fp_sampling.cc",
 +    "fp_sampling.h",
 +  ]
-+  public_deps = [ ":canvas_noise" ]
++  public_deps = [ ":canvas_noise_algorithm" ]
 +}
 +
 +source_set("fp_converge") {
@@ -3017,10 +3034,10 @@ index 0000000..80d1a6e
 +#endif  // LENGSUO_NATIVE_ACTION_TABLE_H_
 diff --git a/lengsuo/native/action_table_test.cc b/lengsuo/native/action_table_test.cc
 new file mode 100644
-index 0000000..f27c294
+index 0000000..2a47580
 --- /dev/null
 +++ b/lengsuo/native/action_table_test.cc
-@@ -0,0 +1,424 @@
+@@ -0,0 +1,426 @@
 +// action_table_test - the uplink action table (task Q).
 +//
 +// The table is structural, so the tests are structural too: a payload that
@@ -3084,18 +3101,20 @@ index 0000000..f27c294
 +
 +TEST(ActionTable, NamesListsEveryActionInOrder) {
 +  const std::vector<std::string> names = ActionTable::Get().Names();
-+  ASSERT_EQ(names.size(), 5u);
++  ASSERT_EQ(names.size(), 6u);
 +  for (const std::string& name : names) {
 +    EXPECT_TRUE(ActionTable::Get().Knows(name));
 +  }
 +  // The order is fixed so the client's mirror can compare lists. The four
-+  // contract actions keep their places; the policy event was appended.
++  // contract actions keep their places; the two new ones were appended in the
++  // order the two rounds merged in: the response monitor first, then the
++  // access policy's event.
 +  EXPECT_EQ(names[0], kActionCanvasSample);
 +  EXPECT_EQ(names[1], kActionWebGLSample);
 +  EXPECT_EQ(names[2], kActionPageEvent);
 +  EXPECT_EQ(names[3], kActionHeartbeat);
 +  EXPECT_EQ(names[4], kActionResponseMonitor);
-+  EXPECT_EQ(names[4], kActionPolicyEvent);
++  EXPECT_EQ(names[5], kActionPolicyEvent);
 +}
 +
 +TEST(ActionTable, FindReturnsNullForAnUnknownName) {
@@ -5793,10 +5812,10 @@ index 0000000..e907c4b
 +}  // namespace lengsuo::fp
 diff --git a/lengsuo/native/fp_overrides.cc b/lengsuo/native/fp_overrides.cc
 new file mode 100644
-index 0000000..29fe2f3
+index 0000000..959fc59
 --- /dev/null
 +++ b/lengsuo/native/fp_overrides.cc
-@@ -0,0 +1,400 @@
+@@ -0,0 +1,479 @@
 +// fp_overrides - renderer-side fingerprint override state.
 +//
 +// --lengsuo-managed-fp=<seed>:<canvas>:<audio>:<rects>:<fonts>:<gpu>:<ua>:
@@ -5811,11 +5830,15 @@ index 0000000..29fe2f3
 +#include <cstdint>
 +#include <cstring>
 +#include <span>
++#include <string>
 +#include <string_view>
 +#include <utility>
 +
 +#include "font_family_traits.h"
 +#include "font_metrics.h"
++#include "fp_sampling.h"
++#include "fp_target.h"
++#include "fp_target_match.h"
 +
 +namespace lengsuo::fp {
 +namespace {
@@ -5942,6 +5965,112 @@ index 0000000..29fe2f3
 +    result *= 2;
 +  }
 +  return result;
++}
++
++// The installed table of per-URL target values. Function-local static for the
++// same reason as the font traits below: no exit-time destructor.
++FpTargetTable& TargetTableStorage() {
++  static FpTargetTable table;
++  return table;
++}
++
++// The capability-cap bias of one seed. Factored out of WebGLParamBias so the
++// profile-derived seed and a per-URL target seed share one implementation and
++// one allow-list; only the seed differs.
++std::int32_t BiasWithSeed(std::uint64_t seed,
++                          std::uint32_t pname,
++                          std::int32_t original) {
++  // Allow-list: only informational MAX_* capability caps form the WebGL
++  // fingerprint surface. State params (ACTIVE_TEXTURE, DEPTH_FUNC,
++  // CURRENT_PROGRAM, VIEWPORT, SCISSOR_BOX, ...) must pass through untouched
++  // or pages break. Values are Khronos GL enums; this translation unit does
++  // not include the GL headers.
++  switch (pname) {
++    case 0x0D33:  // GL_MAX_TEXTURE_SIZE
++    case 0x8073:  // GL_MAX_3D_TEXTURE_SIZE (WebGL2)
++    case 0x84E8:  // GL_MAX_RENDERBUFFER_SIZE
++    case 0x851C:  // GL_MAX_CUBE_MAP_TEXTURE_SIZE
++    case 0x8869:  // GL_MAX_VERTEX_ATTRIBS
++    case 0x8872:  // GL_MAX_TEXTURE_IMAGE_UNITS
++    case 0x88FF:  // GL_MAX_ARRAY_TEXTURE_LAYERS (WebGL2)
++    case 0x8B4C:  // GL_MAX_VERTEX_TEXTURE_IMAGE_UNITS
++    case 0x8B4D:  // GL_MAX_COMBINED_TEXTURE_IMAGE_UNITS
++    case 0x8D57:  // GL_MAX_SAMPLES
++    case 0x8D6B:  // GL_MAX_ELEMENT_INDEX (WebGL2)
++    case 0x8DFB:  // GL_MAX_VERTEX_UNIFORM_VECTORS
++    case 0x8DFC:  // GL_MAX_VARYING_VECTORS
++    case 0x8DFD:  // GL_MAX_FRAGMENT_UNIFORM_VECTORS
++      break;
++    default:
++      return original;
++  }
++  if (original <= 0) {
++    return original;
++  }
++  // Mix the cap value in so two profiles can share one dimension while still
++  // advertising different limits.
++  const std::uint64_t mixed =
++      Mix(seed ^ (static_cast<std::uint64_t>(pname) << 24) ^
++          static_cast<std::uint64_t>(original));
++  // Report a value a real driver could actually report.
++  //
++  // Drivers do not hand back arbitrary integers here; the caps people look at
++  // (texture size, renderbuffer size, uniform/varying counts) come from a small
++  // set of shapes: powers of two, the *_BITS fields stepping by 1, and a handful
++  // of architecture constants. 6364 is not one of them — a randomised number in
++  // that range is more distinctive than the unmodified driver value, which is
++  // the opposite of what this override is for.
++  //
++  // Never advertise more than the driver supports: a page that trusts a higher
++  // cap would allocate a texture/shader that cannot exist and fail at run time.
++  // So the candidate set is filtered to <= original, and the step count is
++  // measured on that filtered set to keep the distribution uniform.
++  //
++  // The driver's own value stays a candidate. That is deliberate and it is the
++  // honest outcome: on a machine with a real GPU the driver value is already a
++  // true measurement, and lowering it only makes sense as "this profile is the
++  // next tier down" - which also has to change the renderer string. Until the
++  // server sends per-tier parameter tables, most profiles therefore keep the
++  // driver value, and this dimension carries almost no entropy. That is the
++  // correct trade: a plausible value beats a perturbed one.
++  std::int32_t candidates[16];
++  std::size_t count = 0;
++  const auto add_candidate = [&](std::int64_t value) {
++    if (value <= 0 || value > original || count >= 16) {
++      return;
++    }
++    for (std::size_t i = 0; i < count; ++i) {
++      if (candidates[i] == value) {
++        return;
++      }
++    }
++    candidates[count++] = static_cast<std::int32_t>(value);
++  };
++  // The driver's own value is always a candidate: leaving a cap untouched is
++  // the most plausible outcome of all.
++  add_candidate(original);
++  // Powers of two at and below the driver value, down to three steps.
++  for (int shift = 0; shift <= 3; ++shift) {
++    const std::int64_t step = PowerOfTwoAtMost(original) >> shift;
++    if (step > 0) {
++      add_candidate(step);
++    }
++  }
++  // Real cards commonly report these exact values.
++  for (std::int64_t common : {16, 24, 30, 31, 32, 48, 60, 64, 96, 128, 256}) {
++    add_candidate(common);
++  }
++  // Stay within half the driver value: one real tier down at most. A larger
++  // drop would contradict the renderer string the profile advertises (a card
++  // claiming 32K textures does not report 4K).
++  const std::int64_t bound = original > 8 ? original / 2 : 1;
++  const std::int64_t floor_value = original - bound;
++  if (count == 0) {
++    return original;
++  }
++  const std::int32_t pick =
++      candidates[static_cast<std::size_t>(mixed % count)];
++  return pick >= floor_value ? pick : original;
 +}
 +}  // namespace
 +
@@ -6103,106 +6232,75 @@ index 0000000..29fe2f3
 +  if (g_webgl_params == 0) {
 +    return original;
 +  }
-+  // Allow-list: only informational MAX_* capability caps form the WebGL
-+  // fingerprint surface. State params (ACTIVE_TEXTURE, DEPTH_FUNC,
-+  // CURRENT_PROGRAM, VIEWPORT, SCISSOR_BOX, ...) must pass through untouched
-+  // or pages break. Values are Khronos GL enums; this translation unit does
-+  // not include the GL headers.
-+  switch (pname) {
-+    case 0x0D33:  // GL_MAX_TEXTURE_SIZE
-+    case 0x8073:  // GL_MAX_3D_TEXTURE_SIZE (WebGL2)
-+    case 0x84E8:  // GL_MAX_RENDERBUFFER_SIZE
-+    case 0x851C:  // GL_MAX_CUBE_MAP_TEXTURE_SIZE
-+    case 0x8869:  // GL_MAX_VERTEX_ATTRIBS
-+    case 0x8872:  // GL_MAX_TEXTURE_IMAGE_UNITS
-+    case 0x88FF:  // GL_MAX_ARRAY_TEXTURE_LAYERS (WebGL2)
-+    case 0x8B4C:  // GL_MAX_VERTEX_TEXTURE_IMAGE_UNITS
-+    case 0x8B4D:  // GL_MAX_COMBINED_TEXTURE_IMAGE_UNITS
-+    case 0x8D57:  // GL_MAX_SAMPLES
-+    case 0x8D6B:  // GL_MAX_ELEMENT_INDEX (WebGL2)
-+    case 0x8DFB:  // GL_MAX_VERTEX_UNIFORM_VECTORS
-+    case 0x8DFC:  // GL_MAX_VARYING_VECTORS
-+    case 0x8DFD:  // GL_MAX_FRAGMENT_UNIFORM_VECTORS
-+      break;
-+    default:
-+      return original;
-+  }
-+  if (original <= 0) {
-+    return original;
-+  }
-+  // Mix the cap value in so two profiles can share one dimension while still
-+  // advertising different limits.
-+  const std::uint64_t mixed =
-+      Mix(WebGLParamsSeed() ^ (static_cast<std::uint64_t>(pname) << 24) ^
-+          static_cast<std::uint64_t>(original));
-+  // Report a value a real driver could actually report.
-+  //
-+  // Drivers do not hand back arbitrary integers here; the caps people look at
-+  // (texture size, renderbuffer size, uniform/varying counts) come from a small
-+  // set of shapes: powers of two, the *_BITS fields stepping by 1, and a handful
-+  // of architecture constants. 6364 is not one of them — a randomised number in
-+  // that range is more distinctive than the unmodified driver value, which is
-+  // the opposite of what this override is for.
-+  //
-+  // Never advertise more than the driver supports: a page that trusts a higher
-+  // cap would allocate a texture/shader that cannot exist and fail at run time.
-+  // So the candidate set is filtered to <= original, and the step count is
-+  // measured on that filtered set to keep the distribution uniform.
-+  //
-+  // The driver's own value stays a candidate. That is deliberate and it is the
-+  // honest outcome: on a machine with a real GPU the driver value is already a
-+  // true measurement, and lowering it only makes sense as "this profile is the
-+  // next tier down" - which also has to change the renderer string. Until the
-+  // server sends per-tier parameter tables, most profiles therefore keep the
-+  // driver value, and this dimension carries almost no entropy. That is the
-+  // correct trade: a plausible value beats a perturbed one.
-+  std::int32_t candidates[16];
-+  std::size_t count = 0;
-+  const auto add_candidate = [&](std::int64_t value) {
-+    if (value <= 0 || value > original || count >= 16) {
-+      return;
-+    }
-+    for (std::size_t i = 0; i < count; ++i) {
-+      if (candidates[i] == value) {
-+        return;
-+      }
-+    }
-+    candidates[count++] = static_cast<std::int32_t>(value);
-+  };
-+  // The driver's own value is always a candidate: leaving a cap untouched is
-+  // the most plausible outcome of all.
-+  add_candidate(original);
-+  // Powers of two at and below the driver value, down to three steps.
-+  for (int shift = 0; shift <= 3; ++shift) {
-+    const std::int64_t step = PowerOfTwoAtMost(original) >> shift;
-+    if (step > 0) {
-+      add_candidate(step);
++  return BiasWithSeed(WebGLParamsSeed(), pname, original);
++}
++
++// --- Per-URL target values (task T3 wiring) ---
++
++bool SetFpTargetsFromBundle(std::string_view bundle_json) {
++  FpTargetTable table;
++  std::string error;
++  // A bundle without the `fp_target` section is not an error: it installs an
++  // empty table, which is the "nothing is targeted" state. A malformed bundle
++  // fails the same way but installs nothing at all, so a bad configuration can
++  // never leave half of a previous one behind.
++  const bool ok = ParseFpTargetConfig(bundle_json, &table, &error);
++  TargetTableStorage() = std::move(table);
++  return ok;
++}
++
++bool HasFpTargets(FpDimension dimension) {
++  for (const FpTarget& target : TargetTableStorage().targets) {
++    if (target.dimension == dimension) {
++      return true;
 +    }
 +  }
-+  // Real cards commonly report these exact values.
-+  for (std::int64_t common : {16, 24, 30, 31, 32, 48, 60, 64, 96, 128, 256}) {
-+    add_candidate(common);
++  return false;
++}
++
++const FpTarget* FpTargetForUrl(std::string_view url, FpDimension dimension) {
++  // No page URL means no target: an empty pattern is the default of its
++  // dimension, but it must not be read as "the URL we could not get".
++  if (url.empty()) {
++    return nullptr;
 +  }
-+  // Stay within half the driver value: one real tier down at most. A larger
-+  // drop would contradict the renderer string the profile advertises (a card
-+  // claiming 32K textures does not report 4K).
-+  const std::int64_t bound = original > 8 ? original / 2 : 1;
-+  const std::int64_t floor_value = original - bound;
-+  if (count == 0) {
-+    return original;
++  return SelectFpTarget(TargetTableStorage(), url, dimension);
++}
++
++bool FpTargetSeedForUrl(std::string_view url,
++                        FpDimension dimension,
++                        std::uint64_t* seed) {
++  if (seed == nullptr) {
++    return false;
 +  }
-+  const std::int32_t pick =
-+      candidates[static_cast<std::size_t>(mixed % count)];
-+  return pick >= floor_value ? pick : original;
++  const FpTarget* target = FpTargetForUrl(url, dimension);
++  if (target == nullptr || target->skip) {
++    return false;
++  }
++  *seed = AttemptSeed(TargetSeed(target->target_hash, SamplingSpecOf(*target)),
++                      0);
++  return true;
++}
++
++std::int32_t WebGLParamBiasForUrl(std::string_view url,
++                                  std::uint32_t pname,
++                                  std::int32_t original) {
++  std::uint64_t seed = 0;
++  if (!FpTargetSeedForUrl(url, FpDimension::kWebgl, &seed)) {
++    // No target governs this URL, or the target says not to perturb it: the
++    // profile-derived value, unchanged, is the answer.
++    return WebGLParamBias(pname, original);
++  }
++  return BiasWithSeed(seed, pname, original);
 +}
 +
 +}  // namespace lengsuo::fp
 diff --git a/lengsuo/native/fp_overrides.h b/lengsuo/native/fp_overrides.h
 new file mode 100644
-index 0000000..40b59d2
+index 0000000..7660656
 --- /dev/null
 +++ b/lengsuo/native/fp_overrides.h
-@@ -0,0 +1,56 @@
+@@ -0,0 +1,100 @@
 +// fp_overrides - renderer-side fingerprint override state.
 +// One switch carries everything: --lengsuo-managed-fp=<seed-hex>:<a>:<c>:<r>:<f>:<g>:<u>:<w>
 +// (slots: audio, canvas, rects, fonts, gpu, ua, webgl). Absent => all disabled,
@@ -6214,6 +6312,7 @@ index 0000000..40b59d2
 +
 +#include "font_family_traits.h"
 +#include "font_metrics.h"
++#include "fp_target.h"
 +namespace lengsuo::fp {
 +// Two switches, both optional and both absent by default:
 +//   --lengsuo-managed-fp=<seed-hex>:<a>:<c>:<r>:<f>:<g>:<u>:<w>:<vendor>:
@@ -6244,6 +6343,49 @@ index 0000000..40b59d2
 +// returns 0 when the webgl slot is off. Applied inside GetIntParameter.
 +std::int32_t WebGLParamBias(std::uint32_t pname, std::int32_t original);
 +
++// --- Per-URL target values (task T3 wiring) ---
++//
++// What a dimension must report is not the same everywhere: the platform can
++// name a target per URL, and the table of those targets arrives in the
++// `fp_target` section of the frozen configuration bundle (native/fp_target.h).
++// Installing it here is what turns the profile-wide perturbation above into a
++// per-URL one. It is the only entry that reads that section, so there is no
++// second channel and no second parser.
++//
++// A bundle without the section installs an empty table, and then every
++// accessor below returns exactly what it returned before this entry existed,
++// byte for byte: nothing is sampled, compared or reported.
++//
++// A target that governs a URL takes precedence over the profile's slot for
++// that dimension. The slot is the fallback for the URLs no target names, which
++// is what "no target value => the existing behaviour" means here.
++bool SetFpTargetsFromBundle(std::string_view bundle_json);
++
++// True when the installed table can govern `dimension` at all. Callers use it
++// to skip building a page URL when no target can apply.
++bool HasFpTargets(FpDimension dimension);
++
++// The target that governs `url` in `dimension`, or nullptr when none does. The
++// most specific entry wins, and an entry whose pattern is empty is the default
++// of its dimension. An empty `url` never matches: the caller had no page URL,
++// so nothing is targeted and the native value stays.
++const FpTarget* FpTargetForUrl(std::string_view url, FpDimension dimension);
++
++// The perturbation seed the target governing `url` asks for: attempt 0 of its
++// convergence sequence (native/fp_sampling.h), the seed ApplyTargetNoise uses.
++// Returns false and leaves `*seed` alone when no target governs the URL, or
++// when the governing target says it must not be perturbed at all.
++bool FpTargetSeedForUrl(std::string_view url,
++                        FpDimension dimension,
++                        std::uint64_t* seed);
++
++// Slot 7 again, per URL: the capability-cap bias for the target that governs
++// `url`, restricted to the same allow-list. Byte-identical to
++// WebGLParamBias(pname, original) when no target governs the URL.
++std::int32_t WebGLParamBiasForUrl(std::string_view url,
++                                  std::uint32_t pname,
++                                  std::int32_t original);
++
 +// Font dimension: the parsed traits, or a default (not-installed) value until a
 +// valid payload arrives. Callers must treat !installed as "this profile says
 +// nothing about fonts" and keep the native measurement. The seed used for the
@@ -6259,6 +6401,279 @@ index 0000000..40b59d2
 +float PerturbGlyphAdvance(float advance);
 +}  // namespace lengsuo::fp
 +#endif
+diff --git a/lengsuo/native/fp_overrides_test.cc b/lengsuo/native/fp_overrides_test.cc
+new file mode 100644
+index 0000000..771888d
+--- /dev/null
++++ b/lengsuo/native/fp_overrides_test.cc
+@@ -0,0 +1,266 @@
++// fp_overrides_test - the per-URL target value entry (task 0019).
++//
++// The three questions the card asks of this entry:
++//
++//   * no target governs the page  => the value the renderer produced before
++//     this entry existed, byte for byte,
++//   * the same target and the same sampling geometry => the same bytes,
++//   * several targets match one URL => the most specific one wins.
++//
++// The tests drive the entry directly, because nothing in the tree calls it
++// yet; see docs/l3-reports/task-T3-wiring.md for the driver question.
++#include "fp_overrides.h"
++
++#include <cstdint>
++#include <string>
++#include <string_view>
++#include <vector>
++
++#include "fp_sampling.h"
++#include "fp_target.h"
++#include "fp_target_match.h"
++#include "gtest/gtest.h"
++
++namespace lengsuo::fp {
++namespace {
++
++// A profile with the webgl slot ON (field 7 is the slot, field 0 the seed).
++constexpr char kProfileWebglOn[] =
++    "1234abcd:0:0:0:0:0:0:7:Vendor:Renderer:8:16";
++// The same profile with the webgl slot OFF.
++constexpr char kProfileWebglOff[] =
++    "1234abcd:0:0:0:0:0:0:0:Vendor:Renderer:8:16";
++
++// A bundle with a canvas default, a webgl entry for one host and a webgl
++// catch-all that says "do not perturb".
++constexpr char kBundle[] = R"({
++  "fp_target": {
++    "similarity": 8,
++    "targets": [
++      {"dimension": "canvas", "target_hash": "aa11", "width": 64,
++       "length": 64},
++      {"dimension": "webgl", "url_regex": "^https://a\\.test/.*",
++       "target_hash": "bb22", "width": 128, "length": 128},
++      {"dimension": "webgl", "url_regex": ".*", "target_hash": "cc33",
++       "width": 128, "length": 128, "skip": true}
++    ]
++  }
++})";
++
++constexpr char kBundleCanvasOnly[] = R"({
++  "fp_target": {"targets": [
++    {"dimension": "canvas", "target_hash": "aa11", "width": 32,
++     "length": 32}
++  ]}
++})";
++
++constexpr char kBundleNoSection[] = R"({"some_other_section": {"x": 1}})";
++
++// The capability caps this dimension is allowed to touch, and a spread of
++// driver values to run them against.
++constexpr std::uint32_t kCapPnames[] = {
++    0x0D33, 0x8073, 0x84E8, 0x851C, 0x8869, 0x8872, 0x88FF,
++    0x8B4C, 0x8B4D, 0x8D57, 0x8D6B, 0x8DFB, 0x8DFC, 0x8DFD,
++};
++constexpr std::int32_t kDriverValues[] = {
++    1,   2,    3,    7,    16,   24,  31,
++    32,  63,   64,   96,   128,  256, 512,
++    1024, 2048, 4096, 16384,
++};
++
++constexpr std::string_view kGovernedUrl = "https://a.test/page";
++constexpr std::string_view kUngovernedUrl = "https://other.test/page";
++
++// A buffer of RGBA8 pixels at the geometry of the webgl target above.
++std::vector<std::uint8_t> PixelBuffer(std::uint32_t side) {
++  std::vector<std::uint8_t> pixels(
++      static_cast<std::size_t>(side) * side * 4);
++  for (std::size_t i = 0; i < pixels.size(); ++i) {
++    pixels[i] = static_cast<std::uint8_t>((i * 37 + 11) % 251);
++  }
++  return pixels;
++}
++
++TEST(FpOverridesTarget, NoSectionInstallsNothing) {
++  InitFromSwitch(kProfileWebglOn);
++  ASSERT_TRUE(SetFpTargetsFromBundle(kBundleNoSection));
++
++  EXPECT_FALSE(HasFpTargets(FpDimension::kCanvas));
++  EXPECT_FALSE(HasFpTargets(FpDimension::kWebgl));
++  EXPECT_EQ(FpTargetForUrl(kGovernedUrl, FpDimension::kCanvas), nullptr);
++  EXPECT_EQ(FpTargetForUrl(kGovernedUrl, FpDimension::kWebgl), nullptr);
++  std::uint64_t seed = 7;
++  EXPECT_FALSE(FpTargetSeedForUrl(kGovernedUrl, FpDimension::kCanvas, &seed));
++  EXPECT_EQ(seed, 7u);
++}
++
++// The regression guard: with no target governing the page, the URL-aware exit
++// is the existing profile exit, value for value.
++TEST(FpOverridesTarget, NoTargetIsByteIdenticalToProfileBias) {
++  InitFromSwitch(kProfileWebglOn);
++  ASSERT_TRUE(SetFpTargetsFromBundle(kBundleNoSection));
++
++  for (const std::uint32_t pname : kCapPnames) {
++    for (const std::int32_t original : kDriverValues) {
++      const std::int32_t profile = WebGLParamBias(pname, original);
++      EXPECT_EQ(WebGLParamBiasForUrl(kGovernedUrl, pname, original), profile)
++          << "pname=" << pname << " original=" << original;
++      EXPECT_EQ(WebGLParamBiasForUrl(kUngovernedUrl, pname, original), profile);
++      EXPECT_EQ(WebGLParamBiasForUrl(std::string_view(), pname, original),
++                profile);
++    }
++  }
++}
++
++// A malformed bundle must never install half a table, and must never keep the
++// previous one.
++TEST(FpOverridesTarget, MalformedBundleFailsClosed) {
++  ASSERT_TRUE(SetFpTargetsFromBundle(kBundle));
++  ASSERT_NE(FpTargetForUrl(kGovernedUrl, FpDimension::kWebgl), nullptr);
++
++  EXPECT_FALSE(SetFpTargetsFromBundle("{not json"));
++  EXPECT_EQ(FpTargetForUrl(kGovernedUrl, FpDimension::kWebgl), nullptr);
++  EXPECT_FALSE(HasFpTargets(FpDimension::kWebgl));
++
++  // A section that is present but not an object is malformed too.
++  EXPECT_FALSE(SetFpTargetsFromBundle(R"({"fp_target": 5})"));
++  EXPECT_FALSE(HasFpTargets(FpDimension::kWebgl));
++
++  // A malformed entry inside a readable section is dropped, and it does not
++  // take the entries around it down.
++  ASSERT_TRUE(SetFpTargetsFromBundle(R"({"fp_target": {"targets": [
++    {"dimension": "webgl", "url_regex": ".*", "target_hash": "dd44",
++     "width": 8, "length": 8},
++    {"dimension": "webgl", "url_regex": ".*"}
++  ]}})"));
++  const FpTarget* target = FpTargetForUrl(kUngovernedUrl, FpDimension::kWebgl);
++  ASSERT_NE(target, nullptr);
++  EXPECT_EQ(target->target_hash, "dd44");
++}
++
++// The most specific pattern wins; a target whose pattern is empty is the
++// default of its dimension.
++TEST(FpOverridesTarget, MostSpecificTargetWins) {
++  ASSERT_TRUE(SetFpTargetsFromBundle(kBundle));
++
++  const FpTarget* governed = FpTargetForUrl(kGovernedUrl, FpDimension::kWebgl);
++  ASSERT_NE(governed, nullptr);
++  EXPECT_EQ(governed->target_hash, "bb22");
++  EXPECT_FALSE(governed->skip);
++
++  const FpTarget* ungoverned =
++      FpTargetForUrl(kUngovernedUrl, FpDimension::kWebgl);
++  ASSERT_NE(ungoverned, nullptr);
++  EXPECT_EQ(ungoverned->target_hash, "cc33");
++  EXPECT_TRUE(ungoverned->skip);
++
++  // The canvas entry carries no pattern at all, so it is the canvas default
++  // and matches every URL of that dimension.
++  const FpTarget* canvas = FpTargetForUrl(kUngovernedUrl, FpDimension::kCanvas);
++  ASSERT_NE(canvas, nullptr);
++  EXPECT_EQ(canvas->target_hash, "aa11");
++}
++
++// A target that says "do not perturb" leaves the profile value untouched.
++TEST(FpOverridesTarget, SkippedTargetKeepsProfileValue) {
++  InitFromSwitch(kProfileWebglOn);
++  ASSERT_TRUE(SetFpTargetsFromBundle(kBundle));
++
++  std::uint64_t seed = 0;
++  EXPECT_FALSE(FpTargetSeedForUrl(kUngovernedUrl, FpDimension::kWebgl, &seed));
++  for (const std::uint32_t pname : kCapPnames) {
++    for (const std::int32_t original : kDriverValues) {
++      EXPECT_EQ(WebGLParamBiasForUrl(kUngovernedUrl, pname, original),
++                WebGLParamBias(pname, original));
++    }
++  }
++}
++
++// The same target at the same geometry is the same bytes: that is the property
++// the whole convergence loop rests on.
++TEST(FpOverridesTarget, SameTargetAndGeometryGiveSameBytes) {
++  ASSERT_TRUE(SetFpTargetsFromBundle(kBundle));
++
++  std::uint64_t first = 0;
++  std::uint64_t second = 0;
++  ASSERT_TRUE(FpTargetSeedForUrl(kGovernedUrl, FpDimension::kWebgl, &first));
++  ASSERT_TRUE(FpTargetSeedForUrl(kGovernedUrl, FpDimension::kWebgl, &second));
++  EXPECT_EQ(first, second);
++
++  constexpr std::uint32_t kSide = 128;
++  constexpr std::uint64_t kStride = kSide * 4;
++  const std::vector<std::uint8_t> src = PixelBuffer(kSide);
++  std::vector<std::uint8_t> a(src.size());
++  std::vector<std::uint8_t> b(src.size());
++  std::vector<std::uint8_t> c(src.size());
++  ASSERT_TRUE(
++      ApplySeedNoise(first, src, a, kSide, kSide, kStride));
++  ASSERT_TRUE(
++      ApplySeedNoise(second, src, b, kSide, kSide, kStride));
++  EXPECT_EQ(a, b);
++
++  // And it is the seed the target pipeline itself uses.
++  FpSamplingSpec spec;
++  spec.width = kSide;
++  spec.length = kSide;
++  const FpTarget* target = FpTargetForUrl(kGovernedUrl, FpDimension::kWebgl);
++  ASSERT_NE(target, nullptr);
++  EXPECT_TRUE(SameSamplingSpec(spec, SamplingSpecOf(*target)));
++  ASSERT_TRUE(ApplyTargetNoise(target->target_hash, spec, src, c, kSide, kSide,
++                               kStride));
++  EXPECT_EQ(a, c);
++}
++
++// No page URL means no target, even when a default entry would match anything.
++TEST(FpOverridesTarget, EmptyUrlNeverMatches) {
++  InitFromSwitch(kProfileWebglOn);
++  ASSERT_TRUE(SetFpTargetsFromBundle(kBundle));
++
++  EXPECT_EQ(FpTargetForUrl(std::string_view(), FpDimension::kCanvas), nullptr);
++  EXPECT_EQ(FpTargetForUrl(std::string_view(), FpDimension::kWebgl), nullptr);
++  std::uint64_t seed = 0;
++  EXPECT_FALSE(FpTargetSeedForUrl(std::string_view(), FpDimension::kCanvas,
++                                  &seed));
++  EXPECT_EQ(WebGLParamBiasForUrl(std::string_view(), 0x0D33, 4096),
++            WebGLParamBias(0x0D33, 4096));
++}
++
++// The dimensions do not leak into each other.
++TEST(FpOverridesTarget, DimensionsAreSeparate) {
++  ASSERT_TRUE(SetFpTargetsFromBundle(kBundleCanvasOnly));
++
++  EXPECT_TRUE(HasFpTargets(FpDimension::kCanvas));
++  EXPECT_FALSE(HasFpTargets(FpDimension::kWebgl));
++  EXPECT_NE(FpTargetForUrl(kGovernedUrl, FpDimension::kCanvas), nullptr);
++  EXPECT_EQ(FpTargetForUrl(kGovernedUrl, FpDimension::kWebgl), nullptr);
++
++  std::uint64_t seed = 0;
++  EXPECT_FALSE(FpTargetSeedForUrl(kGovernedUrl, FpDimension::kWebgl, &seed));
++  EXPECT_TRUE(FpTargetSeedForUrl(kGovernedUrl, FpDimension::kCanvas, &seed));
++}
++
++// A governing target drives the value even when the profile left that
++// dimension native, and the value it reports is still a plausible cap: present,
++// and never above what the driver said.
++TEST(FpOverridesTarget, TargetGovernsWhenProfileSlotIsOff) {
++  InitFromSwitch(kProfileWebglOff);
++  ASSERT_TRUE(SetFpTargetsFromBundle(kBundle));
++  ASSERT_EQ(WebGLParamBias(0x0D33, 4096), 4096) << "slot must be off";
++
++  bool moved = false;
++  for (const std::uint32_t pname : kCapPnames) {
++    for (const std::int32_t original : kDriverValues) {
++      const std::int32_t value =
++          WebGLParamBiasForUrl(kGovernedUrl, pname, original);
++      ASSERT_GT(value, 0);
++      ASSERT_LE(value, original);
++      if (value != original) {
++        moved = true;
++      }
++    }
++  }
++  EXPECT_TRUE(moved) << "the target seed never reached the cap selection";
++}
++
++}  // namespace
++}  // namespace lengsuo::fp
+\ No newline at end of file
 diff --git a/lengsuo/native/fp_sampling.cc b/lengsuo/native/fp_sampling.cc
 new file mode 100644
 index 0000000..616c6dd

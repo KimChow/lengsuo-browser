@@ -9,6 +9,7 @@
 
 #include "font_family_traits.h"
 #include "font_metrics.h"
+#include "fp_target.h"
 namespace lengsuo::fp {
 // Two switches, both optional and both absent by default:
 //   --lengsuo-managed-fp=<seed-hex>:<a>:<c>:<r>:<f>:<g>:<u>:<w>:<vendor>:
@@ -38,6 +39,49 @@ std::uint64_t WebGLParamsSeed();
 // Deterministic bias for GLenum-typed int parameters (MAX_*, *_BITS...);
 // returns 0 when the webgl slot is off. Applied inside GetIntParameter.
 std::int32_t WebGLParamBias(std::uint32_t pname, std::int32_t original);
+
+// --- Per-URL target values (task T3 wiring) ---
+//
+// What a dimension must report is not the same everywhere: the platform can
+// name a target per URL, and the table of those targets arrives in the
+// `fp_target` section of the frozen configuration bundle (native/fp_target.h).
+// Installing it here is what turns the profile-wide perturbation above into a
+// per-URL one. It is the only entry that reads that section, so there is no
+// second channel and no second parser.
+//
+// A bundle without the section installs an empty table, and then every
+// accessor below returns exactly what it returned before this entry existed,
+// byte for byte: nothing is sampled, compared or reported.
+//
+// A target that governs a URL takes precedence over the profile's slot for
+// that dimension. The slot is the fallback for the URLs no target names, which
+// is what "no target value => the existing behaviour" means here.
+bool SetFpTargetsFromBundle(std::string_view bundle_json);
+
+// True when the installed table can govern `dimension` at all. Callers use it
+// to skip building a page URL when no target can apply.
+bool HasFpTargets(FpDimension dimension);
+
+// The target that governs `url` in `dimension`, or nullptr when none does. The
+// most specific entry wins, and an entry whose pattern is empty is the default
+// of its dimension. An empty `url` never matches: the caller had no page URL,
+// so nothing is targeted and the native value stays.
+const FpTarget* FpTargetForUrl(std::string_view url, FpDimension dimension);
+
+// The perturbation seed the target governing `url` asks for: attempt 0 of its
+// convergence sequence (native/fp_sampling.h), the seed ApplyTargetNoise uses.
+// Returns false and leaves `*seed` alone when no target governs the URL, or
+// when the governing target says it must not be perturbed at all.
+bool FpTargetSeedForUrl(std::string_view url,
+                        FpDimension dimension,
+                        std::uint64_t* seed);
+
+// Slot 7 again, per URL: the capability-cap bias for the target that governs
+// `url`, restricted to the same allow-list. Byte-identical to
+// WebGLParamBias(pname, original) when no target governs the URL.
+std::int32_t WebGLParamBiasForUrl(std::string_view url,
+                                  std::uint32_t pname,
+                                  std::int32_t original);
 
 // Font dimension: the parsed traits, or a default (not-installed) value until a
 // valid payload arrives. Callers must treat !installed as "this profile says
