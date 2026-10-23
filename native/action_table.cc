@@ -61,6 +61,11 @@ ActionTable::ActionTable() {
   schemas_.push_back(ActionSchema{
       kActionHeartbeat,
       {String("from"), String("action"), Integer("ts_unix")}});
+  schemas_.push_back(ActionSchema{
+      kActionResponseMonitor,
+      {String("from"), String("action"), String("rule_id"), String("url"),
+       Integer("status"), String("content_type"), Integer("body_bytes"),
+       Boolean("truncated"), String(kActionBodyField, /*optional=*/true)}});
 }
 
 const ActionTable& ActionTable::Get() {

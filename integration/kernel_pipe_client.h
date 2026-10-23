@@ -121,7 +121,11 @@ class KernelPipeClient {
                          int64_t now_unix);
 
   // The process's pipe client, or nullptr when the pipe was not requested.
-  static const KernelPipeClient* Get();
+  //
+  // The pointer is not const: the uplink is the only way out of the browser
+  // and it is the caller's job to use it. The client itself is a process
+  // singleton, so there is one of it and everybody gets the same one.
+  static KernelPipeClient* Get();
 
   // Reads the pipe name off a command line. Returns an empty string when
   // the switch is absent.

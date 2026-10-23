@@ -397,7 +397,7 @@ KernelPipeClient* g_client = nullptr;
 }  // namespace
 
 // static
-const KernelPipeClient* KernelPipeClient::Get() {
+KernelPipeClient* KernelPipeClient::Get() {
   return g_client;
 }
 

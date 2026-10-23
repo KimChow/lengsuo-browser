@@ -60,7 +60,7 @@ TEST(ActionTable, KnowsTheFourContractActions) {
 
 TEST(ActionTable, NamesListsEveryActionInOrder) {
   const std::vector<std::string> names = ActionTable::Get().Names();
-  ASSERT_EQ(names.size(), 4u);
+  ASSERT_EQ(names.size(), 5u);
   for (const std::string& name : names) {
     EXPECT_TRUE(ActionTable::Get().Knows(name));
   }
@@ -69,6 +69,7 @@ TEST(ActionTable, NamesListsEveryActionInOrder) {
   EXPECT_EQ(names[1], kActionWebGLSample);
   EXPECT_EQ(names[2], kActionPageEvent);
   EXPECT_EQ(names[3], kActionHeartbeat);
+  EXPECT_EQ(names[4], kActionResponseMonitor);
 }
 
 TEST(ActionTable, FindReturnsNullForAnUnknownName) {
@@ -287,6 +288,73 @@ TEST(ActionValidate, RejectsAnOversizedPayload) {
       ValidateActionPayload(table, kActionPageEvent, huge, policy);
   EXPECT_FALSE(result.ok);
   EXPECT_EQ(result.reason, ActionRejectReason::kPayloadTooLarge);
+}
+
+TEST(ActionTable, KnowsTheResponseMonitorAction) {
+  const ActionTable& table = ActionTable::Get();
+  EXPECT_TRUE(table.Knows(kActionResponseMonitor));
+  const ActionSchema* schema = table.Find(kActionResponseMonitor);
+  ASSERT_NE(schema, nullptr);
+  EXPECT_EQ(schema->action, kActionResponseMonitor);
+}
+
+TEST(ActionValidate, TheBodyFieldIsOptional) {
+  const ActionTable& table = ActionTable::Get();
+  const ActionSchema* schema = table.Find(kActionResponseMonitor);
+  ASSERT_NE(schema, nullptr);
+  const ActionField* body = nullptr;
+  for (const ActionField& field : schema->fields) {
+    if (field.name == kActionBodyField) {
+      body = &field;
+    }
+  }
+  ASSERT_NE(body, nullptr);
+  EXPECT_EQ(body->kind, FieldKind::kString);
+  // Optional: whether the body is carried is the collector's decision, made
+  // by the rule that asked for it.
+  EXPECT_TRUE(body->optional);
+}
+
+TEST(ActionValidate, AResponseMonitorPayloadWithABodyIsAccepted) {
+  const ActionTable& table = ActionTable::Get();
+  const ActionCollectorPolicy policy;
+  const char kWithBody[] =
+      R"({"from":"browser","action":"ResponseMonitor","rule_id":"r1",)"
+      R"("url":"https://example.test/a","status":200,)"
+      R"("content_type":"text/plain","body_bytes":3,"truncated":false,)"
+      R"("body":"abc"})";
+  const ActionValidation result =
+      ValidateActionPayload(table, kActionResponseMonitor, kWithBody, policy);
+  EXPECT_TRUE(result.ok);
+  EXPECT_EQ(result.reason, ActionRejectReason::kNone);
+}
+
+TEST(ActionValidate, AResponseMonitorPayloadWithoutABodyIsAccepted) {
+  const ActionTable& table = ActionTable::Get();
+  const ActionCollectorPolicy policy;
+  const char kNoBody[] =
+      R"({"from":"browser","action":"ResponseMonitor","rule_id":"r1",)"
+      R"("url":"https://example.test/a","status":200,)"
+      R"("content_type":"text/plain","body_bytes":0,"truncated":false})";
+  const ActionValidation result =
+      ValidateActionPayload(table, kActionResponseMonitor, kNoBody, policy);
+  EXPECT_TRUE(result.ok);
+  EXPECT_EQ(result.reason, ActionRejectReason::kNone);
+}
+
+TEST(ActionValidate, AResponseMonitorBodyMustBeAString) {
+  const ActionTable& table = ActionTable::Get();
+  const ActionCollectorPolicy policy;
+  const char kNumericBody[] =
+      R"({"from":"browser","action":"ResponseMonitor","rule_id":"r1",)"
+      R"("url":"https://example.test/a","status":200,)"
+      R"("content_type":"text/plain","body_bytes":3,"truncated":false,)"
+      R"("body":123})";
+  const ActionValidation result =
+      ValidateActionPayload(table, kActionResponseMonitor, kNumericBody, policy);
+  EXPECT_FALSE(result.ok);
+  EXPECT_EQ(result.reason, ActionRejectReason::kWrongType);
+  EXPECT_EQ(result.field, kActionBodyField);
 }
 
 TEST(ActionValidate, TheActionOutParameterIsOnlyWrittenOnSuccess) {
