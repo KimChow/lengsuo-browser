@@ -193,6 +193,49 @@ class PatchApplyTests(unittest.TestCase):
                          "deps = [\n  \"//lengsuo/native:canvas_noise\",\n"
                          "  \"//base\",\n  \"//lengsuo/native:l3_runtime\",\n]\n")
 
+    def test_the_locked_sequence_decides_the_order_not_the_alphabet(self):
+        """The lock's array is the sequence; applying by name order is a bug.
+
+        0017 quotes the registration line 0018 adds, yet "0017" sorts *before*
+        "0018" -- so a tool that applies by name order runs 0017 first on a
+        clean tree and the series never replays. That is what happened on the
+        real build tree: "Patch does not apply cleanly: 0017-resp-monitor.patch",
+        with not one patch applied. The 0016-vs-0007 shape is the same, and it
+        sorts the right way, which is why the defect stayed hidden until 0017
+        was appended to baseline.json after 0019.
+
+        This fixture puts the alphabet the wrong way round: the patch that
+        quotes an added line is named 0001 and the patch that adds it is named
+        0002, and the lock declares 0002 first.
+        """
+        self.write_patch("0001-fixture-modify.patch", DEPEND_ON_ADDED_DEP_PATCH)
+        self.write_patch("0002-fixture-create.patch", ADD_DEP_PATCH)
+        self.lock["patches"] = [
+            {"path": "patches/0002-fixture-create.patch",
+             "sha256": self.digest("0002-fixture-create.patch")},
+            {"path": "patches/0001-fixture-modify.patch",
+             "sha256": self.digest("0001-fixture-modify.patch")},
+        ]
+        (self.source / "content").mkdir()
+        (self.source / "content/renderer.gni").write_text(
+            "deps = [\n  \"//base\",\n]\n")
+        self.git("add", ".")
+        self.git("commit", "-qm", "fixture renderer gni")
+        self.git("tag", "-f", "155.0.1.2")
+        self.lock["chromium_revision"] = self.git("rev-parse", "HEAD").strip()
+        self.lock["deps_sha256"] = hashlib.sha256(
+            (self.source / "DEPS").read_bytes()).hexdigest()
+        result = self.run_tool(True)
+        self.assertEqual(result["status"], "applied", result.get("error"))
+        # The report follows the locked sequence too, so a reviewer reads the
+        # order the tree was built in.
+        self.assertEqual([entry["path"] for entry in result["patches"]],
+                         ["patches/0002-fixture-create.patch",
+                          "patches/0001-fixture-modify.patch"])
+        self.assertEqual((self.source / "content/renderer.gni").read_text(),
+                         "deps = [\n  \"//lengsuo/native:canvas_noise\",\n"
+                         "  \"//base\",\n  \"//lengsuo/native:l3_runtime\",\n]\n")
+
     def test_a_series_that_stops_early_leaves_no_edits_behind(self):
         """A patch that refuses must not leave the earlier ones applied.
 

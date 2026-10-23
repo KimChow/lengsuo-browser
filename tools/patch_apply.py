@@ -24,6 +24,22 @@ def _declared_names(lock):
     return sorted(Path(entry["path"]).name for entry in entries)
 
 
+def _series_order(lock):
+    """The patch names in the order the lock declares the series.
+
+    The lock's array is the reviewed *sequence*, not a set: a later entry may
+    quote a line an earlier one added. 0016 quotes the dep line that
+    0007-canvas-readback adds, and 0017 quotes the registration 0018 adds while
+    sorting *before* it. Applying by name order puts 0017 first on a clean tree
+    and the series never replays -- which is exactly what happened when 0017
+    was appended to baseline.json after 0019.
+
+    tools/rebuild/replay_overlay_patches.sh replays the same series "in
+    declared order"; this is that rule, and the lock states it.
+    """
+    return [Path(entry["path"]).name for entry in lock["patches"]]
+
+
 def _actual_names(repository):
     directory = Path(repository) / "patches"
     if not directory.is_dir():
@@ -92,6 +108,7 @@ def execute(source, repository, lock, apply=False):
         source = Path(source).absolute()
         repository = Path(repository).absolute()
         declared = _declared_names(lock)
+        ordered = _series_order(lock)
         if declared != _actual_names(repository):
             raise PatchApplyError(
                 "Baseline patch list does not match patches/ directory")
@@ -108,10 +125,10 @@ def execute(source, repository, lock, apply=False):
         # applies the reviewed baseline patch sequence to a clean tree.
         if all(_apply_stream(source, _read_patch(repository, name),
                              reverse=True, check_only=True) == 0
-               for name in declared):
+               for name in reversed(ordered)):
             receipt["patches"] = [{"path": f"patches/{name}",
                                    "action": "already-applied"}
-                                  for name in declared]
+                                  for name in ordered]
             receipt["status"] = "applied"
             receipt["upstream_tree_modified"] = True
             return receipt
@@ -133,7 +150,7 @@ def execute(source, repository, lock, apply=False):
         applied = []
         untracked_before = _untracked_paths(source)
         try:
-            for name in declared:
+            for name in ordered:
                 if _apply_stream(source, _read_patch(repository, name)) != 0:
                     raise PatchApplyError(
                         f"Patch does not apply cleanly: {name}")
