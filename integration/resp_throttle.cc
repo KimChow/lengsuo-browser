@@ -74,6 +74,7 @@
 #include "base/strings/string_view_util.h"
 #include "base/task/sequenced_task_runner.h"
 #include "lengsuo/integration/kernel_pipe_client.h"
+#include "lengsuo/native/ptr_exclusion.h"
 #include "mojo/public/cpp/bindings/pending_receiver.h"
 #include "mojo/public/cpp/bindings/pending_remote.h"
 #include "mojo/public/cpp/system/data_pipe.h"
@@ -148,9 +149,13 @@ class RespThrottle : public blink::URLLoaderThrottle {
   // would be a lie.
   void AbandonBody();
 
-  fp::RespMonitorState* const state_;
+  // The monitor's state lives for the process (SharedRespMonitorState); this
+  // is a view of it, not an owner, and it is not a raw_ptr because the type is
+  // the kernel's own. Same narrow annotation as the native layer's non-owning
+  // views.
+  LENGSUO_RAW_PTR_EXCLUSION fp::RespMonitorState* const state_;
   // What the decision was for this response, and the facts the report needs.
-  fp::RespMonitorOutcome outcome_;
+  RespMonitorOutcome outcome_;
   std::string initiator_scheme_;
   std::string url_;
   std::string content_type_;

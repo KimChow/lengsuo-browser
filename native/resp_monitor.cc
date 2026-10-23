@@ -1,6 +1,6 @@
 #include "resp_monitor.h"
 
-#include <regex>
+#include "policy_match.h"
 #include <utility>
 
 namespace lengsuo::fp {
@@ -14,9 +14,10 @@ void RespMonitorSetRules(RespMonitorState* state,
   if (config.enabled) {
     for (const RespMonitorRule& rule : config.rules) {
       // A rule that says it is off never reaches the config's rule list, so
-      // everything here is on. A rule without a matcher is not usable and is
-      // dropped.
-      if (rule.matcher != nullptr) {
+      // everything here is on. A rule whose pattern the kernel's matcher
+      // cannot evaluate is not usable and is dropped. The configuration layer
+      // drops those already; this is the gate on the rule as it is installed.
+      if (IsValidRespMonitorUrlRegex(rule.url_regex)) {
         state->rules.push_back(rule);
       }
     }
@@ -80,11 +81,7 @@ const RespMonitorRule* MatchRespMonitorRule(RespMonitorState* state,
     if (state->disabled_rules.count(rule.id) != 0) {
       continue;
     }
-    if (rule.matcher == nullptr) {
-      continue;
-    }
-    if (!std::regex_search(request.url.cbegin(), request.url.cend(),
-                           *rule.matcher)) {
+    if (!SearchUrlPattern(rule.url_regex, request.url)) {
       continue;
     }
     if (!rule.content_type.empty() && rule.content_type != normalized) {

@@ -24,16 +24,14 @@ RespMonitorRequest PageRequest(const std::string& url) {
   return request;
 }
 
-// Builds one rule from its text. The pattern is compiled here so that a rule
-// with a broken pattern is never installed.
+// Builds one rule from its text. The pattern is kept as written and is
+// evaluated by the kernel's matcher when a response is checked.
 RespMonitorRule MakeRule(const std::string& id,
                           const std::string& pattern,
                           std::uint64_t max_count) {
   RespMonitorRule rule;
   rule.id = id;
   rule.url_regex = pattern;
-  rule.matcher =
-      std::make_shared<const std::regex>(pattern, kRespMonitorRegexGrammar);
   rule.max_count = max_count;
   return rule;
 }

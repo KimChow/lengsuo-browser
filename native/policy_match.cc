@@ -634,6 +634,32 @@ bool MatchUrlPattern(std::string_view pattern, std::string_view url) {
   return MatchNode(*root, 0, matcher, finish);
 }
 
+bool SearchUrlPattern(std::string_view pattern, std::string_view url) {
+  NodePtr root;
+  if (!ParsePattern(pattern, &root)) {
+    return false;
+  }
+  Matcher matcher;
+  matcher.text = url;
+  // Any end is an end: the pattern has to describe a run of the URL, not the
+  // whole of it.
+  Continuation finish = [](std::size_t) { return true; };
+  // One step budget for every start position rather than one for each. This
+  // runs on the browser's UI thread, once per response that a rule claims, so
+  // the work a single search may do has to be bounded by a number that does
+  // not grow with the URL's length. The budget is the one a whole-URL match
+  // already gets.
+  for (std::size_t start = 0; start <= url.size(); ++start) {
+    if (MatchNode(*root, start, matcher, finish)) {
+      return true;
+    }
+    if (matcher.exhausted) {
+      return false;
+    }
+  }
+  return false;
+}
+
 bool IsValidUrlPattern(std::string_view pattern) {
   NodePtr root;
   return ParsePattern(pattern, &root);

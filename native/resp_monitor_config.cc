@@ -5,6 +5,7 @@
 #include <utility>
 
 #include "kernel_pipe_json.h"
+#include "policy_match.h"
 
 namespace lengsuo::fp {
 namespace {
@@ -213,13 +214,9 @@ bool ReadRule(const JsonObject& object,
     *skipped = true;
     return false;
   }
-  std::shared_ptr<const std::regex> matcher;
-  try {
-    matcher = std::make_shared<const std::regex>(url_regex,
-                                                 kRespMonitorRegexGrammar);
-  } catch (const std::regex_error&) {
-    // The pattern does not compile. The rule is dropped and counted; the
-    // rest of the configuration is untouched.
+  if (!IsValidRespMonitorUrlRegex(url_regex)) {
+    // The pattern is outside the language the kernel's matcher evaluates. The
+    // rule is dropped and counted; the rest of the configuration is untouched.
     *skipped = true;
     return false;
   }
@@ -237,7 +234,6 @@ bool ReadRule(const JsonObject& object,
   RespMonitorRule rule;
   rule.id = std::move(id);
   rule.url_regex = std::move(url_regex);
-  rule.matcher = std::move(matcher);
 
   if (object.Has("content_type")) {
     std::string content_type;
@@ -310,13 +306,7 @@ std::string NormalizeRespMonitorContentType(std::string_view value) {
 }
 
 bool IsValidRespMonitorUrlRegex(std::string_view pattern) {
-  try {
-    const std::regex probe{std::string(pattern), kRespMonitorRegexGrammar};
-    (void)probe;
-  } catch (const std::regex_error&) {
-    return false;
-  }
-  return true;
+  return IsValidUrlPattern(pattern);
 }
 
 bool FindRespMonitorSection(std::string_view bundle_json,

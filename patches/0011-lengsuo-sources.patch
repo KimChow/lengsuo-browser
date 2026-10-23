@@ -2811,10 +2811,10 @@ index 0000000..3bd62d6
 +#endif
 diff --git a/lengsuo/integration/resp_throttle.cc b/lengsuo/integration/resp_throttle.cc
 new file mode 100644
-index 0000000..dbc868f
+index 0000000..720b3ba
 --- /dev/null
 +++ b/lengsuo/integration/resp_throttle.cc
-@@ -0,0 +1,410 @@
+@@ -0,0 +1,415 @@
 +// resp_throttle - the Chromium half (task 0017, the T1 wiring).
 +//
 +// The pure half of the decision is inline in resp_throttle.h, because
@@ -2891,6 +2891,7 @@ index 0000000..dbc868f
 +#include "base/strings/string_view_util.h"
 +#include "base/task/sequenced_task_runner.h"
 +#include "lengsuo/integration/kernel_pipe_client.h"
++#include "lengsuo/native/ptr_exclusion.h"
 +#include "mojo/public/cpp/bindings/pending_receiver.h"
 +#include "mojo/public/cpp/bindings/pending_remote.h"
 +#include "mojo/public/cpp/system/data_pipe.h"
@@ -2965,9 +2966,13 @@ index 0000000..dbc868f
 +  // would be a lie.
 +  void AbandonBody();
 +
-+  fp::RespMonitorState* const state_;
++  // The monitor's state lives for the process (SharedRespMonitorState); this
++  // is a view of it, not an owner, and it is not a raw_ptr because the type is
++  // the kernel's own. Same narrow annotation as the native layer's non-owning
++  // views.
++  LENGSUO_RAW_PTR_EXCLUSION fp::RespMonitorState* const state_;
 +  // What the decision was for this response, and the facts the report needs.
-+  fp::RespMonitorOutcome outcome_;
++  RespMonitorOutcome outcome_;
 +  std::string initiator_scheme_;
 +  std::string url_;
 +  std::string content_type_;
@@ -3891,10 +3896,10 @@ index 0000000..9565004
 \ No newline at end of file
 diff --git a/lengsuo/native/BUILD.gn b/lengsuo/native/BUILD.gn
 new file mode 100644
-index 0000000..554b1a9
+index 0000000..b7bb59c
 --- /dev/null
 +++ b/lengsuo/native/BUILD.gn
-@@ -0,0 +1,396 @@
+@@ -0,0 +1,404 @@
 +# Decoder source sets. Chromium integration evidence lives in VERIFICATION.md.
 +source_set("profile_wire") {
 +  sources = [
@@ -4146,7 +4151,12 @@ index 0000000..554b1a9
 +    "resp_monitor_config.cc",
 +    "resp_monitor_config.h",
 +  ]
-+  public_deps = [ ":kernel_pipe_json" ]
++  # The rules are validated against the kernel's URL matcher, so this target
++  # carries the matcher rather than a regular expression engine of its own.
++  public_deps = [
++    ":kernel_pipe_json",
++    ":policy_match",
++  ]
 +}
 +
 +# The response monitor's body capture: a tee that copies the first bytes of a
@@ -4179,8 +4189,11 @@ index 0000000..554b1a9
 +    "resp_monitor.cc",
 +    "resp_monitor.h",
 +  ]
++  # The matching is the kernel's, not a second engine: the response monitor and
++  # the access policy read URL patterns the same way.
 +  public_deps = [
 +    ":kernel_pipe_json",
++    ":policy_match",
 +    ":resp_monitor_config",
 +  ]
 +}
@@ -16075,10 +16088,10 @@ index 0000000..28bbda3
 +}  // namespace lengsuo::fp
 diff --git a/lengsuo/native/policy_match.cc b/lengsuo/native/policy_match.cc
 new file mode 100644
-index 0000000..84a0843
+index 0000000..d3bc32a
 --- /dev/null
 +++ b/lengsuo/native/policy_match.cc
-@@ -0,0 +1,646 @@
+@@ -0,0 +1,672 @@
 +#include "policy_match.h"
 +
 +#include <algorithm>
@@ -16715,6 +16728,32 @@ index 0000000..84a0843
 +  return MatchNode(*root, 0, matcher, finish);
 +}
 +
++bool SearchUrlPattern(std::string_view pattern, std::string_view url) {
++  NodePtr root;
++  if (!ParsePattern(pattern, &root)) {
++    return false;
++  }
++  Matcher matcher;
++  matcher.text = url;
++  // Any end is an end: the pattern has to describe a run of the URL, not the
++  // whole of it.
++  Continuation finish = [](std::size_t) { return true; };
++  // One step budget for every start position rather than one for each. This
++  // runs on the browser's UI thread, once per response that a rule claims, so
++  // the work a single search may do has to be bounded by a number that does
++  // not grow with the URL's length. The budget is the one a whole-URL match
++  // already gets.
++  for (std::size_t start = 0; start <= url.size(); ++start) {
++    if (MatchNode(*root, start, matcher, finish)) {
++      return true;
++    }
++    if (matcher.exhausted) {
++      return false;
++    }
++  }
++  return false;
++}
++
 +bool IsValidUrlPattern(std::string_view pattern) {
 +  NodePtr root;
 +  return ParsePattern(pattern, &root);
@@ -16727,10 +16766,10 @@ index 0000000..84a0843
 +}  // namespace lengsuo::fp
 diff --git a/lengsuo/native/policy_match.h b/lengsuo/native/policy_match.h
 new file mode 100644
-index 0000000..446be21
+index 0000000..2373b5e
 --- /dev/null
 +++ b/lengsuo/native/policy_match.h
-@@ -0,0 +1,78 @@
+@@ -0,0 +1,92 @@
 +// policy_match - matching a request against the access policy (task T2).
 +//
 +// The policy matches a request in two different ways, and the two are kept
@@ -16800,6 +16839,20 @@ index 0000000..446be21
 +// True when the pattern is a regular expression the matcher can evaluate.
 +bool IsValidUrlPattern(std::string_view pattern);
 +
++// Matches `pattern` against a run of `url`, anywhere in it.
++//
++// The same language and the same engine as MatchUrlPattern; the difference is
++// where the match may begin and end. MatchUrlPattern requires the pattern to
++// describe the whole URL, and this one succeeds when the pattern describes a
++// part of it. `^` still means the start of the whole URL and `$` its end, so a
++// pattern that anchors itself stays anchored, and a pattern that does not is a
++// pattern about a part of the URL.
++//
++// This is the convention the response monitor's rules are written in: they
++// name an endpoint or a prefix, not a whole address. It replaces
++// std::regex_search, which the browser cannot use at all - see above.
++bool SearchUrlPattern(std::string_view pattern, std::string_view url);
++
 +// Matches a host pattern against a host.
 +//
 +// The pattern is a glob - '*' matches any run of bytes, '?' matches one -
@@ -16811,15 +16864,20 @@ index 0000000..446be21
 +#endif  // LENGSUO_NATIVE_POLICY_MATCH_H_
 diff --git a/lengsuo/native/policy_match_test.cc b/lengsuo/native/policy_match_test.cc
 new file mode 100644
-index 0000000..7f94c0a
+index 0000000..480266f
 --- /dev/null
 +++ b/lengsuo/native/policy_match_test.cc
-@@ -0,0 +1,167 @@
+@@ -0,0 +1,218 @@
 +// policy_match_test - matching a request against the access policy (T2).
 +//
-+// Two matchers are tested here and they are deliberately different:
++// Three entry points are tested here and the differences between them are
++// deliberate:
 +//
 +//   * the URL matcher is a regular expression over the whole URL;
++//   * the searcher reads the same expression over a part of the URL. It is the
++//     convention the response monitor's rules are written in, and it is what
++//     std::regex_search used to be - see SearchUrlPattern in policy_match.h
++//     for why std::regex cannot be used at all;
 +//   * the host matcher is the glob the profile sync rules already use.
 +//
 +// The tests that matter most are the ones about the edges: a pattern that
@@ -16980,6 +17038,52 @@ index 0000000..7f94c0a
 +  EXPECT_FALSE(MatchUrlPattern("*.example.test", "a.example.test"));
 +}
 +
++TEST(PolicyMatch, TheSearcherFindsAPatternInsideTheUrl) {
++  // The response monitor's rules name an endpoint or a prefix, not a whole
++  // address, so its entry point is the searcher: the same language and the
++  // same engine as the whole-URL matcher, and only the beginning and the end
++  // of the match are free.
++  EXPECT_TRUE(SearchUrlPattern("example\\.test", "https://example.test/a"));
++  EXPECT_FALSE(SearchUrlPattern("example\\.test", "https://other.test/a"));
++  // The whole-URL matcher says the opposite about the same pattern, which is
++  // the whole point of having the two.
++  EXPECT_FALSE(MatchUrlPattern("example\\.test", "https://example.test/a"));
++}
++TEST(PolicyMatch, TheSearcherKeepsTheAnchors) {
++  // '^' is still the start of the whole URL and '$' its end, so a pattern that
++  // pins itself down stays pinned down under the searcher.
++  EXPECT_TRUE(SearchUrlPattern("^https://a\\.test/", "https://a.test/b"));
++  EXPECT_FALSE(SearchUrlPattern("^https://a\\.test/", "http://a.test/b"));
++  EXPECT_TRUE(SearchUrlPattern("/b$", "https://a.test/b"));
++  EXPECT_FALSE(SearchUrlPattern("/b$", "https://a.test/b/c"));
++}
++TEST(PolicyMatch, TheSearcherRejectsWhatTheParserRejects) {
++  // One parser, so a pattern the whole-URL matcher refuses is refused here
++  // too, and a refused pattern matches nothing rather than a part.
++  EXPECT_FALSE(IsValidUrlPattern("([unclosed"));
++  EXPECT_FALSE(SearchUrlPattern("([unclosed", "https://example.test/a"));
++  EXPECT_FALSE(SearchUrlPattern("*bad", "https://example.test/a"));
++}
++TEST(PolicyMatch, TheSearcherAndTheMatcherAgreeOnAWholeUrlPattern) {
++  // A pattern that describes the whole URL matches both ways, so the two entry
++  // points differ only in where the match may begin and end.
++  EXPECT_TRUE(MatchUrlPattern("https://example\\.test/a",
++                              "https://example.test/a"));
++  EXPECT_TRUE(SearchUrlPattern("https://example\\.test/a",
++                               "https://example.test/a"));
++  EXPECT_TRUE(SearchUrlPattern(".*", "https://example.test/a"));
++  // The searcher is the looser of the two, and that loosening is the whole
++  // difference: the same pattern also matches a URL that merely starts with
++  // what it describes. A rule that wants the whole URL has to say so itself,
++  // and the response monitor is the layer where that matters.
++  EXPECT_FALSE(MatchUrlPattern("https://example\\.test/a",
++                               "https://example.test/a/b"));
++  EXPECT_TRUE(SearchUrlPattern("https://example\\.test/a",
++                               "https://example.test/a/b"));
++  // An empty pattern matches the empty run at position zero, which is what
++  // std::regex_search did with it as well.
++  EXPECT_TRUE(SearchUrlPattern("", "x"));
++}
 +}  // namespace
 +}  // namespace lengsuo::fp
 diff --git a/lengsuo/native/policy_report.cc b/lengsuo/native/policy_report.cc
@@ -19262,13 +19366,13 @@ index 0000000..bcf4745
 \ No newline at end of file
 diff --git a/lengsuo/native/resp_monitor.cc b/lengsuo/native/resp_monitor.cc
 new file mode 100644
-index 0000000..f95b9d7
+index 0000000..91aca92
 --- /dev/null
 +++ b/lengsuo/native/resp_monitor.cc
-@@ -0,0 +1,126 @@
+@@ -0,0 +1,123 @@
 +#include "resp_monitor.h"
 +
-+#include <regex>
++#include "policy_match.h"
 +#include <utility>
 +
 +namespace lengsuo::fp {
@@ -19282,9 +19386,10 @@ index 0000000..f95b9d7
 +  if (config.enabled) {
 +    for (const RespMonitorRule& rule : config.rules) {
 +      // A rule that says it is off never reaches the config's rule list, so
-+      // everything here is on. A rule without a matcher is not usable and is
-+      // dropped.
-+      if (rule.matcher != nullptr) {
++      // everything here is on. A rule whose pattern the kernel's matcher
++      // cannot evaluate is not usable and is dropped. The configuration layer
++      // drops those already; this is the gate on the rule as it is installed.
++      if (IsValidRespMonitorUrlRegex(rule.url_regex)) {
 +        state->rules.push_back(rule);
 +      }
 +    }
@@ -19348,11 +19453,7 @@ index 0000000..f95b9d7
 +    if (state->disabled_rules.count(rule.id) != 0) {
 +      continue;
 +    }
-+    if (rule.matcher == nullptr) {
-+      continue;
-+    }
-+    if (!std::regex_search(request.url.cbegin(), request.url.cend(),
-+                           *rule.matcher)) {
++    if (!SearchUrlPattern(rule.url_regex, request.url)) {
 +      continue;
 +    }
 +    if (!rule.content_type.empty() && rule.content_type != normalized) {
@@ -19781,10 +19882,10 @@ index 0000000..543fa73
 +}  // namespace lengsuo::fp
 diff --git a/lengsuo/native/resp_monitor_config.cc b/lengsuo/native/resp_monitor_config.cc
 new file mode 100644
-index 0000000..c2f32b3
+index 0000000..87a285a
 --- /dev/null
 +++ b/lengsuo/native/resp_monitor_config.cc
-@@ -0,0 +1,420 @@
+@@ -0,0 +1,410 @@
 +#include "resp_monitor_config.h"
 +
 +#include <algorithm>
@@ -19792,6 +19893,7 @@ index 0000000..c2f32b3
 +#include <utility>
 +
 +#include "kernel_pipe_json.h"
++#include "policy_match.h"
 +
 +namespace lengsuo::fp {
 +namespace {
@@ -20000,13 +20102,9 @@ index 0000000..c2f32b3
 +    *skipped = true;
 +    return false;
 +  }
-+  std::shared_ptr<const std::regex> matcher;
-+  try {
-+    matcher = std::make_shared<const std::regex>(url_regex,
-+                                                 kRespMonitorRegexGrammar);
-+  } catch (const std::regex_error&) {
-+    // The pattern does not compile. The rule is dropped and counted; the
-+    // rest of the configuration is untouched.
++  if (!IsValidRespMonitorUrlRegex(url_regex)) {
++    // The pattern is outside the language the kernel's matcher evaluates. The
++    // rule is dropped and counted; the rest of the configuration is untouched.
 +    *skipped = true;
 +    return false;
 +  }
@@ -20024,7 +20122,6 @@ index 0000000..c2f32b3
 +  RespMonitorRule rule;
 +  rule.id = std::move(id);
 +  rule.url_regex = std::move(url_regex);
-+  rule.matcher = std::move(matcher);
 +
 +  if (object.Has("content_type")) {
 +    std::string content_type;
@@ -20097,13 +20194,7 @@ index 0000000..c2f32b3
 +}
 +
 +bool IsValidRespMonitorUrlRegex(std::string_view pattern) {
-+  try {
-+    const std::regex probe{std::string(pattern), kRespMonitorRegexGrammar};
-+    (void)probe;
-+  } catch (const std::regex_error&) {
-+    return false;
-+  }
-+  return true;
++  return IsValidUrlPattern(pattern);
 +}
 +
 +bool FindRespMonitorSection(std::string_view bundle_json,
@@ -20207,10 +20298,10 @@ index 0000000..c2f32b3
 +}  // namespace lengsuo::fp
 diff --git a/lengsuo/native/resp_monitor_config.h b/lengsuo/native/resp_monitor_config.h
 new file mode 100644
-index 0000000..41e933e
+index 0000000..1dabf26
 --- /dev/null
 +++ b/lengsuo/native/resp_monitor_config.h
-@@ -0,0 +1,138 @@
+@@ -0,0 +1,137 @@
 +// resp_monitor_config - the rule set of the response-body monitor (task T1).
 +//
 +// The rules arrive in the ConfigBundle's `response_monitor` section, which is
@@ -20254,7 +20345,6 @@ index 0000000..41e933e
 +#include <cstddef>
 +#include <cstdint>
 +#include <memory>
-+#include <regex>
 +#include <string>
 +#include <string_view>
 +#include <vector>
@@ -20278,14 +20368,14 @@ index 0000000..41e933e
 +// How many hits one rule allows for one URL when it does not say.
 +inline constexpr std::uint64_t kRespMonitorDefaultMaxCount = 1;
 +
-+// The grammar a rule's regular expression is written in. ECMAScript, not
-+// POSIX: the configuration comes from the runner, and ECMAScript is the
-+// grammar the wire contract's examples are written in. A rule that does not
-+// compile under this grammar is dropped.
-+inline constexpr std::regex::flag_type kRespMonitorRegexGrammar =
-+    std::regex::ECMAScript;
-+
-+// True when `pattern` compiles under kRespMonitorRegexGrammar.
++// True when `pattern` is a URL pattern the kernel's matcher can evaluate.
++//
++// The rules are written in the kernel's own pattern language, not in
++// std::regex: the browser is built without exceptions, and std::regex's
++// constructor throws on a pattern it cannot read, so one bad pattern would
++// take the browser down instead of taking one rule out. The language is the
++// one native/policy_match.h states, and the same one the access policy's URL
++// rules are written in. A rule whose pattern is not in it is dropped.
 +bool IsValidRespMonitorUrlRegex(std::string_view pattern);
 +
 +// The media type of a Content-Type header, without its parameters and in
@@ -20297,9 +20387,9 @@ index 0000000..41e933e
 +struct RespMonitorRule {
 +  std::string id;
 +  std::string url_regex;
-+  // The compiled matcher. Never null: a rule whose pattern did not compile
-+  // is dropped while parsing and never reaches the monitor.
-+  std::shared_ptr<const std::regex> matcher;
++  // Kept as it was written, and evaluated by the kernel's matcher when a
++  // response is checked. A rule whose pattern the matcher cannot evaluate is
++  // dropped while parsing and never reaches the monitor.
 +  // The media type the response must have. Empty means "any". Parameters
 +  // (`; charset=...`) are stripped before the comparison.
 +  std::string content_type;
@@ -20351,7 +20441,7 @@ index 0000000..41e933e
 +#endif  // LENGSUO_NATIVE_RESP_MONITOR_CONFIG_H_
 diff --git a/lengsuo/native/resp_monitor_config_test.cc b/lengsuo/native/resp_monitor_config_test.cc
 new file mode 100644
-index 0000000..c3ae40c
+index 0000000..2d57f9c
 --- /dev/null
 +++ b/lengsuo/native/resp_monitor_config_test.cc
 @@ -0,0 +1,218 @@
@@ -20395,7 +20485,7 @@ index 0000000..c3ae40c
 +  EXPECT_EQ(rule.id, "r1");
 +  EXPECT_EQ(rule.url_regex, "^https://example\\.test/a");
 +  EXPECT_EQ(rule.max_count, 2u);
-+  EXPECT_TRUE(rule.matcher != nullptr);
++  EXPECT_TRUE(IsValidRespMonitorUrlRegex(rule.url_regex));
 +  // A rule that says nothing about the content type matches every one.
 +  EXPECT_TRUE(rule.content_type.empty());
 +  // The body is not carried unless the configuration asks for it.
@@ -21075,10 +21165,10 @@ index 0000000..678a8b6
 +}  // namespace lengsuo::fp
 diff --git a/lengsuo/native/resp_monitor_test.cc b/lengsuo/native/resp_monitor_test.cc
 new file mode 100644
-index 0000000..1c33fbe
+index 0000000..c77172e
 --- /dev/null
 +++ b/lengsuo/native/resp_monitor_test.cc
-@@ -0,0 +1,258 @@
+@@ -0,0 +1,256 @@
 +// resp_monitor_test - the matching and the counting (task T1).
 +//
 +// Three questions decide whether a response is watched: may it be looked at
@@ -21105,16 +21195,14 @@ index 0000000..1c33fbe
 +  return request;
 +}
 +
-+// Builds one rule from its text. The pattern is compiled here so that a rule
-+// with a broken pattern is never installed.
++// Builds one rule from its text. The pattern is kept as written and is
++// evaluated by the kernel's matcher when a response is checked.
 +RespMonitorRule MakeRule(const std::string& id,
 +                          const std::string& pattern,
 +                          std::uint64_t max_count) {
 +  RespMonitorRule rule;
 +  rule.id = id;
 +  rule.url_regex = pattern;
-+  rule.matcher =
-+      std::make_shared<const std::regex>(pattern, kRespMonitorRegexGrammar);
 +  rule.max_count = max_count;
 +  return rule;
 +}

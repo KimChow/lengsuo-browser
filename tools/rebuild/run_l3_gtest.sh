@@ -89,9 +89,9 @@ TARGETS=(
   "machine_facts|native/machine_facts.cc native/kernel_pipe_keys.cc native/kernel_pipe_frame.cc"
   "l3_envelope|native/l3_envelope.cc"
   "l3_envelope_session|native/l3_envelope_session.cc native/l3_envelope.cc native/kernel_pipe_keys.cc native/kernel_pipe_frame.cc"
-  "resp_monitor_config|native/resp_monitor_config.cc native/kernel_pipe_json.cc"
+  "resp_monitor_config|native/resp_monitor_config.cc native/kernel_pipe_json.cc native/policy_match.cc native/profile_bundle.cc"
   "resp_monitor_body|native/resp_monitor_body.cc"
-  "resp_monitor|native/resp_monitor.cc native/resp_monitor_config.cc native/kernel_pipe_json.cc"
+  "resp_monitor|native/resp_monitor.cc native/resp_monitor_config.cc native/kernel_pipe_json.cc native/policy_match.cc native/profile_bundle.cc"
   "resp_monitor_report|native/resp_monitor_report.cc native/action_table.cc native/kernel_pipe_json.cc"
   # The access policy (task T2). The layers are listed the way they depend
   # on each other: the matchers come first because the rules need the URL
@@ -117,7 +117,7 @@ TARGETS=(
   # policy_throttle, only the pure half is compiled here: the header decides,
   # and the URLLoaderThrottle in the .cc is Chromium's type and only ever
   # links in a real build.
-  "resp_throttle|native/resp_monitor.cc native/resp_monitor_config.cc native/kernel_pipe_json.cc native/resp_monitor_body.cc native/resp_tee.cc native/resp_monitor_report.cc native/action_table.cc"
+  "resp_throttle|native/resp_monitor.cc native/resp_monitor_config.cc native/kernel_pipe_json.cc native/resp_monitor_body.cc native/resp_tee.cc native/resp_monitor_report.cc native/action_table.cc native/policy_match.cc native/profile_bundle.cc"
 )
 
 FAILED=()

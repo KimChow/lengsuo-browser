@@ -67,6 +67,20 @@ bool MatchUrlPattern(std::string_view pattern, std::string_view url);
 // True when the pattern is a regular expression the matcher can evaluate.
 bool IsValidUrlPattern(std::string_view pattern);
 
+// Matches `pattern` against a run of `url`, anywhere in it.
+//
+// The same language and the same engine as MatchUrlPattern; the difference is
+// where the match may begin and end. MatchUrlPattern requires the pattern to
+// describe the whole URL, and this one succeeds when the pattern describes a
+// part of it. `^` still means the start of the whole URL and `$` its end, so a
+// pattern that anchors itself stays anchored, and a pattern that does not is a
+// pattern about a part of the URL.
+//
+// This is the convention the response monitor's rules are written in: they
+// name an endpoint or a prefix, not a whole address. It replaces
+// std::regex_search, which the browser cannot use at all - see above.
+bool SearchUrlPattern(std::string_view pattern, std::string_view url);
+
 // Matches a host pattern against a host.
 //
 // The pattern is a glob - '*' matches any run of bytes, '?' matches one -

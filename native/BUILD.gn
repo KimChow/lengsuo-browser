@@ -249,7 +249,12 @@ source_set("resp_monitor_config") {
     "resp_monitor_config.cc",
     "resp_monitor_config.h",
   ]
-  public_deps = [ ":kernel_pipe_json" ]
+  # The rules are validated against the kernel's URL matcher, so this target
+  # carries the matcher rather than a regular expression engine of its own.
+  public_deps = [
+    ":kernel_pipe_json",
+    ":policy_match",
+  ]
 }
 
 # The response monitor's body capture: a tee that copies the first bytes of a
@@ -282,8 +287,11 @@ source_set("resp_monitor") {
     "resp_monitor.cc",
     "resp_monitor.h",
   ]
+  # The matching is the kernel's, not a second engine: the response monitor and
+  # the access policy read URL patterns the same way.
   public_deps = [
     ":kernel_pipe_json",
+    ":policy_match",
     ":resp_monitor_config",
   ]
 }

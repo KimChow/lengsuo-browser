@@ -41,7 +41,6 @@
 #include <cstddef>
 #include <cstdint>
 #include <memory>
-#include <regex>
 #include <string>
 #include <string_view>
 #include <vector>
@@ -65,14 +64,14 @@ inline constexpr std::size_t kRespMonitorMaxBodyBytesCeiling = 64 * 1024;
 // How many hits one rule allows for one URL when it does not say.
 inline constexpr std::uint64_t kRespMonitorDefaultMaxCount = 1;
 
-// The grammar a rule's regular expression is written in. ECMAScript, not
-// POSIX: the configuration comes from the runner, and ECMAScript is the
-// grammar the wire contract's examples are written in. A rule that does not
-// compile under this grammar is dropped.
-inline constexpr std::regex::flag_type kRespMonitorRegexGrammar =
-    std::regex::ECMAScript;
-
-// True when `pattern` compiles under kRespMonitorRegexGrammar.
+// True when `pattern` is a URL pattern the kernel's matcher can evaluate.
+//
+// The rules are written in the kernel's own pattern language, not in
+// std::regex: the browser is built without exceptions, and std::regex's
+// constructor throws on a pattern it cannot read, so one bad pattern would
+// take the browser down instead of taking one rule out. The language is the
+// one native/policy_match.h states, and the same one the access policy's URL
+// rules are written in. A rule whose pattern is not in it is dropped.
 bool IsValidRespMonitorUrlRegex(std::string_view pattern);
 
 // The media type of a Content-Type header, without its parameters and in
@@ -84,9 +83,9 @@ std::string NormalizeRespMonitorContentType(std::string_view value);
 struct RespMonitorRule {
   std::string id;
   std::string url_regex;
-  // The compiled matcher. Never null: a rule whose pattern did not compile
-  // is dropped while parsing and never reaches the monitor.
-  std::shared_ptr<const std::regex> matcher;
+  // Kept as it was written, and evaluated by the kernel's matcher when a
+  // response is checked. A rule whose pattern the matcher cannot evaluate is
+  // dropped while parsing and never reaches the monitor.
   // The media type the response must have. Empty means "any". Parameters
   // (`; charset=...`) are stripped before the comparison.
   std::string content_type;

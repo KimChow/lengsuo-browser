@@ -38,7 +38,7 @@ TEST(RespMonitorConfig, ParsesAWholeRule) {
   EXPECT_EQ(rule.id, "r1");
   EXPECT_EQ(rule.url_regex, "^https://example\\.test/a");
   EXPECT_EQ(rule.max_count, 2u);
-  EXPECT_TRUE(rule.matcher != nullptr);
+  EXPECT_TRUE(IsValidRespMonitorUrlRegex(rule.url_regex));
   // A rule that says nothing about the content type matches every one.
   EXPECT_TRUE(rule.content_type.empty());
   // The body is not carried unless the configuration asks for it.

@@ -1,8 +1,13 @@
 // policy_match_test - matching a request against the access policy (T2).
 //
-// Two matchers are tested here and they are deliberately different:
+// Three entry points are tested here and the differences between them are
+// deliberate:
 //
 //   * the URL matcher is a regular expression over the whole URL;
+//   * the searcher reads the same expression over a part of the URL. It is the
+//     convention the response monitor's rules are written in, and it is what
+//     std::regex_search used to be - see SearchUrlPattern in policy_match.h
+//     for why std::regex cannot be used at all;
 //   * the host matcher is the glob the profile sync rules already use.
 //
 // The tests that matter most are the ones about the edges: a pattern that
@@ -163,5 +168,51 @@ TEST(PolicyMatch, AHostPatternIsNotAUrlPattern) {
   EXPECT_FALSE(MatchUrlPattern("*.example.test", "a.example.test"));
 }
 
+TEST(PolicyMatch, TheSearcherFindsAPatternInsideTheUrl) {
+  // The response monitor's rules name an endpoint or a prefix, not a whole
+  // address, so its entry point is the searcher: the same language and the
+  // same engine as the whole-URL matcher, and only the beginning and the end
+  // of the match are free.
+  EXPECT_TRUE(SearchUrlPattern("example\\.test", "https://example.test/a"));
+  EXPECT_FALSE(SearchUrlPattern("example\\.test", "https://other.test/a"));
+  // The whole-URL matcher says the opposite about the same pattern, which is
+  // the whole point of having the two.
+  EXPECT_FALSE(MatchUrlPattern("example\\.test", "https://example.test/a"));
+}
+TEST(PolicyMatch, TheSearcherKeepsTheAnchors) {
+  // '^' is still the start of the whole URL and '$' its end, so a pattern that
+  // pins itself down stays pinned down under the searcher.
+  EXPECT_TRUE(SearchUrlPattern("^https://a\\.test/", "https://a.test/b"));
+  EXPECT_FALSE(SearchUrlPattern("^https://a\\.test/", "http://a.test/b"));
+  EXPECT_TRUE(SearchUrlPattern("/b$", "https://a.test/b"));
+  EXPECT_FALSE(SearchUrlPattern("/b$", "https://a.test/b/c"));
+}
+TEST(PolicyMatch, TheSearcherRejectsWhatTheParserRejects) {
+  // One parser, so a pattern the whole-URL matcher refuses is refused here
+  // too, and a refused pattern matches nothing rather than a part.
+  EXPECT_FALSE(IsValidUrlPattern("([unclosed"));
+  EXPECT_FALSE(SearchUrlPattern("([unclosed", "https://example.test/a"));
+  EXPECT_FALSE(SearchUrlPattern("*bad", "https://example.test/a"));
+}
+TEST(PolicyMatch, TheSearcherAndTheMatcherAgreeOnAWholeUrlPattern) {
+  // A pattern that describes the whole URL matches both ways, so the two entry
+  // points differ only in where the match may begin and end.
+  EXPECT_TRUE(MatchUrlPattern("https://example\\.test/a",
+                              "https://example.test/a"));
+  EXPECT_TRUE(SearchUrlPattern("https://example\\.test/a",
+                               "https://example.test/a"));
+  EXPECT_TRUE(SearchUrlPattern(".*", "https://example.test/a"));
+  // The searcher is the looser of the two, and that loosening is the whole
+  // difference: the same pattern also matches a URL that merely starts with
+  // what it describes. A rule that wants the whole URL has to say so itself,
+  // and the response monitor is the layer where that matters.
+  EXPECT_FALSE(MatchUrlPattern("https://example\\.test/a",
+                               "https://example.test/a/b"));
+  EXPECT_TRUE(SearchUrlPattern("https://example\\.test/a",
+                               "https://example.test/a/b"));
+  // An empty pattern matches the empty run at position zero, which is what
+  // std::regex_search did with it as well.
+  EXPECT_TRUE(SearchUrlPattern("", "x"));
+}
 }  // namespace
 }  // namespace lengsuo::fp
