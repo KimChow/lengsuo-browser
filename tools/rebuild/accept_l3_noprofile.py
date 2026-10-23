@@ -145,8 +145,13 @@ def main() -> int:
     print("launching without --lengsuo-l3-wire ...")
     try:
         with RendererCmdlineWatcher(profile) as watcher:
+            # 300 s, not 120: this host is shared with other lines, and a
+            # load spike (load average 67 on 32 cores, measured 2026-10-24)
+            # pushes a healthy run past 120 s. The browser finished normally
+            # in 130 s on that run and produced the right DOM, so 120 s turned
+            # a pass into a false failure. The bound only has to catch a hang.
             done = subprocess.run(cmd, capture_output=True, text=True,
-                                  timeout=120)
+                                  timeout=300)
     except subprocess.TimeoutExpired:
         print("browser timed out")
         return 2
