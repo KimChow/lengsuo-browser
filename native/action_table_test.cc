@@ -61,18 +61,20 @@ TEST(ActionTable, KnowsTheFourContractActions) {
 
 TEST(ActionTable, NamesListsEveryActionInOrder) {
   const std::vector<std::string> names = ActionTable::Get().Names();
-  ASSERT_EQ(names.size(), 5u);
+  ASSERT_EQ(names.size(), 6u);
   for (const std::string& name : names) {
     EXPECT_TRUE(ActionTable::Get().Knows(name));
   }
   // The order is fixed so the client's mirror can compare lists. The four
-  // contract actions keep their places; the policy event was appended.
+  // contract actions keep their places; the two new ones were appended in the
+  // order the two rounds merged in: the response monitor first, then the
+  // access policy's event.
   EXPECT_EQ(names[0], kActionCanvasSample);
   EXPECT_EQ(names[1], kActionWebGLSample);
   EXPECT_EQ(names[2], kActionPageEvent);
   EXPECT_EQ(names[3], kActionHeartbeat);
   EXPECT_EQ(names[4], kActionResponseMonitor);
-  EXPECT_EQ(names[4], kActionPolicyEvent);
+  EXPECT_EQ(names[5], kActionPolicyEvent);
 }
 
 TEST(ActionTable, FindReturnsNullForAnUnknownName) {
