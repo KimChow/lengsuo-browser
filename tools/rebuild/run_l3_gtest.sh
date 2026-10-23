@@ -109,6 +109,15 @@ TARGETS=(
   # The per-URL target entry (task 0019). It sits on top of the profile
   # perturbation, which owns the font tables, so those come along.
   "fp_overrides|native/fp_overrides.cc native/fp_target.cc native/fp_target_match.cc native/fp_sampling.cc native/canvas_noise.cc native/kernel_pipe_json.cc native/profile_bundle.cc native/font_family_traits.cc native/font_metrics.cc"
+  # The response monitor's fan-out tee (task 0017). The judge the card names
+  # lives here: what came out of the page's side is the bytes that went in.
+  # It needs the capture it fills.
+  "resp_tee|native/resp_tee.cc native/resp_monitor_body.cc"
+  # The response monitor's response-path driver (task 0017). As with
+  # policy_throttle, only the pure half is compiled here: the header decides,
+  # and the URLLoaderThrottle in the .cc is Chromium's type and only ever
+  # links in a real build.
+  "resp_throttle|native/resp_monitor.cc native/resp_monitor_config.cc native/kernel_pipe_json.cc native/resp_monitor_body.cc native/resp_tee.cc native/resp_monitor_report.cc native/action_table.cc"
 )
 
 FAILED=()
@@ -122,6 +131,7 @@ for spec in "${TARGETS[@]}"; do
     l3_bootstrap) srcs=("$REPO/integration/l3_bootstrap_test.cc") ;;
     l3_provisioning) srcs=("$REPO/integration/l3_provisioning_impl_test.cc") ;;
     policy_throttle) srcs=("$REPO/integration/policy_throttle_test.cc") ;;
+    resp_throttle) srcs=("$REPO/integration/resp_throttle_test.cc") ;;
   esac
   for s in $extra; do srcs+=("$REPO/$s"); done
 
