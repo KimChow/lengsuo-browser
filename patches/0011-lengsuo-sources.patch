@@ -3475,31 +3475,28 @@ index 0000000..ee7ac9f
 \ No newline at end of file
 diff --git a/lengsuo/integration/resp_throttle_test.cc b/lengsuo/integration/resp_throttle_test.cc
 new file mode 100644
-index 0000000..2411bd2
+index 0000000..9565004
 --- /dev/null
 +++ b/lengsuo/integration/resp_throttle_test.cc
-@@ -0,0 +1,426 @@
+@@ -0,0 +1,395 @@
 +// resp_throttle_test - what the response path does with a decision (task 0017).
 +//
 +// The class that talks to Chromium (RespThrottle) cannot be compiled here: a
 +// plain g++ has no blink::URLLoaderThrottle, no mojo, no data pipes. What is
-+// compiled here is everything the throttle decides and everything the
-+// throttle hands on, which is the part that can be wrong silently:
-+//
-+//   * which responses the rules claim, and which they leave alone;
-+//   * when a rule has said all it has to say about one URL;
-+//   * what leaves the browser on the uplink, and what must never leave it.
++// compiled here is everything the throttle decides and everything it hands
++// on, which is the part that can be wrong silently: which responses the rules
++// claim, when a rule has said all it had to say about one URL, and what
++// leaves the browser on the uplink.
 +//
 +// The page's bytes are the one thing this feature may not touch. That is
-+// judged in native/resp_tee_test.cc, where the body is fed through the tee and
-+// compared byte for byte; the last test here re-proves it across the whole
-+// decision path - decide, then fan - so the two halves cannot drift apart.
++// judged in native/resp_tee_test.cc, byte for byte; the first test here
++// re-proves it across the whole decision path - decide, then fan - so the two
++// halves cannot drift apart.
 +//
-+// What is NOT covered here, and cannot be: that the data-pipe plumbing in
++// NOT covered here, and cannot be: that the data-pipe plumbing in
 +// resp_throttle.cc moves these bytes and no others. That is a claim about two
 +// mojo pipes and a watcher, and it is the dispatcher's end-to-end comparison
-+// after the merge. Saying so out loud is cheaper than a test that pretends to
-+// have checked it.
++// after the merge.
 +#include "lengsuo/integration/resp_throttle.h"
 +
 +#include <gtest/gtest.h>
@@ -3593,30 +3590,22 @@ index 0000000..2411bd2
 +  EXPECT_TRUE(report.body.empty());
 +}
 +
-+TEST(RespThrottleTest, ARuleWithACountOfOneStopsAfterTheFirstHitOnThatUrl) {
-+  fp::RespMonitorState state = Installed(kJsonSection);
-+
-+  EXPECT_TRUE(DecideRespMonitor(&state, Request("https://api.test/a"),
-+                                "application/json", std::string())
-+                  .monitor);
-+  // The same rule, the same URL: it has said what it had to say.
-+  EXPECT_FALSE(DecideRespMonitor(&state, Request("https://api.test/a"),
-+                                 "application/json", std::string())
-+                   .monitor);
-+  // A different URL is still watched. The ceiling is per rule and per URL.
-+  EXPECT_TRUE(DecideRespMonitor(&state, Request("https://api.test/b"),
-+                                "application/json", std::string())
-+                  .monitor);
-+}
-+
-+TEST(RespThrottleTest, MountingTheSameRulesAgainDoesNotRenewTheAllowance) {
-+  // The configuration is pushed down once per storage partition, so the same
-+  // rules arrive several times. The native layer keeps the counters of the
-+  // rules that stay, and this pins that the monitor's decision follows.
++TEST(RespThrottleTest, ThePerUrlCeilingHoldsAcrossARemount) {
++  // The ceiling is per rule and per URL: a rule that says one allows one hit
++  // for one URL and still watches every other URL. Remounting the same rules
++  // - the configuration is pushed down once per storage partition - must not
++  // renew it, or a rule that said "once" would say it once per partition.
 +  const fp::RespMonitorConfig config = ConfigFrom(kJsonSection);
 +  fp::RespMonitorState state;
 +  fp::RespMonitorSetRules(&state, config);
++
 +  EXPECT_TRUE(DecideRespMonitor(&state, Request("https://api.test/a"),
++                                "application/json", std::string())
++                  .monitor);
++  EXPECT_FALSE(DecideRespMonitor(&state, Request("https://api.test/a"),
++                                 "application/json", std::string())
++                   .monitor);
++  EXPECT_TRUE(DecideRespMonitor(&state, Request("https://api.test/b"),
 +                                "application/json", std::string())
 +                  .monitor);
 +
@@ -3658,28 +3647,8 @@ index 0000000..2411bd2
 +}
 +
 +TEST(RespThrottleTest, ACompressedBodyIsLeftAloneAndSpendsNoHit) {
-+  fp::RespMonitorState state = Installed(kJsonSection);
-+  const fp::RespMonitorRequest request = Request("https://api.test/v1");
-+
-+  // The monitor does not decompress, so it does not read a body that is still
-+  // content-encoded.
-+  EXPECT_FALSE(DecideRespMonitor(&state, request, "application/json", "gzip")
-+                   .monitor);
-+  EXPECT_FALSE(
-+      DecideRespMonitor(&state, request, "application/json", "br").monitor);
-+  // `identity` is not an encoding in any useful sense, and a list is read as
-+  // a list.
-+  EXPECT_TRUE(DecideRespMonitor(&state, request, "application/json",
-+                                "identity")
-+                  .monitor);
-+  // The guard runs before the match, so the skipped response spent no hit:
-+  // this URL still had its one.
-+  EXPECT_FALSE(DecideRespMonitor(&state, request, "application/json",
-+                                 std::string())
-+                   .monitor);
-+}
-+
-+TEST(RespThrottleTest, AHeaderThatOnlyNamesIdentityIsNotAnEncoding) {
++  // The guard itself: an absent header and `identity` are "decoded", a list
++  // is read as a list, and anything else means the body is not readable.
 +  EXPECT_TRUE(RespMonitorMayReadBody(std::string()));
 +  EXPECT_TRUE(RespMonitorMayReadBody("identity"));
 +  EXPECT_TRUE(RespMonitorMayReadBody("  identity  "));
@@ -3687,6 +3656,21 @@ index 0000000..2411bd2
 +  EXPECT_FALSE(RespMonitorMayReadBody("gzip"));
 +  EXPECT_FALSE(RespMonitorMayReadBody("IDENTITY, gzip"));
 +  EXPECT_FALSE(RespMonitorMayReadBody("deflate"));
++
++  // And the guard is applied before the match, so a compressed body is not
++  // read and does not spend the rule's allowance on that URL.
++  fp::RespMonitorState state = Installed(kJsonSection);
++  const fp::RespMonitorRequest request = Request("https://api.test/v1");
++  EXPECT_FALSE(DecideRespMonitor(&state, request, "application/json", "gzip")
++                   .monitor);
++  EXPECT_FALSE(
++      DecideRespMonitor(&state, request, "application/json", "br").monitor);
++  EXPECT_TRUE(DecideRespMonitor(&state, request, "application/json",
++                                "identity")
++                  .monitor);
++  EXPECT_FALSE(DecideRespMonitor(&state, request, "application/json",
++                                 std::string())
++                   .monitor);
 +}
 +
 +TEST(RespThrottleTest, ARuleWithAnUncompilableRegexIsDroppedAndNotFatal) {
@@ -3858,32 +3842,17 @@ index 0000000..2411bd2
 +  }
 +  // The body was not asked for and did not travel.
 +  EXPECT_EQ(payload.find("\"body\""), std::string::npos);
-+}
 +
-+TEST(RespThrottleTest, TheMonitoredResponsesPayloadPassesTheActionTable) {
-+  // The payload the throttle enqueues has to satisfy the action the pipe
-+  // files it under, or EnqueueEvent rejects it and the observation is lost.
-+  fp::RespMonitorState state = Installed(kJsonSection);
-+  const RespMonitorOutcome outcome = DecideRespMonitor(
-+      &state, Request("https://api.test/v1"), "application/json",
-+      std::string());
-+  ASSERT_TRUE(outcome.monitor);
-+  fp::RespTee tee;
-+  fp::RespTeeReset(&tee, outcome.capture_limit);
-+  std::string page;
-+  fp::RespTeeFan(&tee, "{\"n\":1}", &page);
-+
-+  const fp::RespMonitorReport report =
-+      BuildRespMonitorReport(outcome, "https://api.test/v1", 200,
-+                             "application/json", tee);
++  // And the payload satisfies the action the pipe files it under, or
++  // EnqueueEvent rejects it and the observation is lost. No new action was
++  // invented: the report rides the existing one.
 +  const fp::ActionCollectorPolicy collector;
 +  std::string action;
 +  const fp::ActionValidation validation = fp::ValidateActionPayload(
-+      fp::ActionTable::Get(), fp::kActionResponseMonitor,
-+      fp::BuildRespMonitorActionPayload(report), collector, &action);
++      fp::ActionTable::Get(), fp::kActionResponseMonitor, payload, collector,
++      &action);
 +  EXPECT_TRUE(validation.ok);
 +  EXPECT_EQ(action, fp::kActionResponseMonitor);
-+  // No new action was invented: the report rides the existing one.
 +  EXPECT_TRUE(fp::ActionTable::Get().Knows(fp::kActionResponseMonitor));
 +}
 +
