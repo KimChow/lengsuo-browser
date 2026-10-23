@@ -2195,7 +2195,7 @@ index 0000000..226c891
 +}
 diff --git a/lengsuo/integration/policy_throttle.cc b/lengsuo/integration/policy_throttle.cc
 new file mode 100644
-index 0000000..a25ca83
+index 0000000..5151e85
 --- /dev/null
 +++ b/lengsuo/integration/policy_throttle.cc
 @@ -0,0 +1,121 @@
@@ -2228,7 +2228,7 @@ index 0000000..a25ca83
 +#include <utility>
 +
 +#include "lengsuo/integration/kernel_pipe_client.h"
-+#include "net/base/net_error_list.h"
++#include "net/base/net_errors.h"
 +#include "services/network/public/cpp/resource_request.h"
 +#include "third_party/blink/public/common/loader/url_loader_throttle.h"
 +
@@ -2781,10 +2781,10 @@ index 0000000..3bd62d6
 +#endif
 diff --git a/lengsuo/native/BUILD.gn b/lengsuo/native/BUILD.gn
 new file mode 100644
-index 0000000..768f93b
+index 0000000..e46d84b
 --- /dev/null
 +++ b/lengsuo/native/BUILD.gn
-@@ -0,0 +1,382 @@
+@@ -0,0 +1,383 @@
 +# Decoder source sets. Chromium integration evidence lives in VERIFICATION.md.
 +source_set("profile_wire") {
 +  sources = [
@@ -3086,6 +3086,7 @@ index 0000000..768f93b
 +  sources = [
 +    "policy_rules.cc",
 +    "policy_rules.h",
++    "ptr_exclusion.h",
 +  ]
 +  public_deps = [ ":policy_match" ]
 +}
@@ -16051,10 +16052,10 @@ index 0000000..6e78b98
 +#endif  // LENGSUO_NATIVE_POLICY_REPORT_H_
 diff --git a/lengsuo/native/policy_rules.cc b/lengsuo/native/policy_rules.cc
 new file mode 100644
-index 0000000..7302885
+index 0000000..b869d81
 --- /dev/null
 +++ b/lengsuo/native/policy_rules.cc
-@@ -0,0 +1,310 @@
+@@ -0,0 +1,312 @@
 +#include "policy_rules.h"
 +
 +#include <algorithm>
@@ -16063,6 +16064,7 @@ index 0000000..7302885
 +
 +#include "kernel_pipe_json.h"
 +#include "policy_match.h"
++#include "ptr_exclusion.h"
 +
 +namespace lengsuo::fp {
 +namespace {
@@ -16283,7 +16285,8 @@ index 0000000..7302885
 +  }
 +  struct Entry {
 +    const char* key;
-+    FramePolicyLists* lists;
++    // A view into the caller's parsed lists, not an owning field.
++    LENGSUO_RAW_PTR_EXCLUSION FramePolicyLists* lists;
 +  };
 +  const Entry entries[] = {{"main_frame", main_frame}, {"sub_frame", sub_frame}};
 +  for (const Entry& entry : entries) {
