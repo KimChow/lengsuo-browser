@@ -76,6 +76,10 @@ brief_for_task() {
         M0)  echo "cc-task-brief-l3h.md" ;;
         M)   echo "cc-task-brief-l3d.md" ;;
         T1|T2|T3) echo "cc-task-brief-l3g.md" ;;
+        # The seventh round is the wiring of the sixth round's native layers
+        # (the ruling of 2026-10-24 picked the interception layer per card).
+        # The three cards are named after the upstream patch each one adds.
+        0017|0018|0019) echo "cc-task-brief-l3i.md" ;;
         *)   echo "cc-task-brief-l3b.md" ;;
     esac
 }

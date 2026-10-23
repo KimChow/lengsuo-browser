@@ -75,7 +75,7 @@ def _task_to_brief():
     pass while the dispatcher quietly sent that card to an older brief.
     """
     return _resolve_briefs(["O", "N", "Q", "R", "M", "M0", "I", "J", "K", "L",
-                            "T1", "T2", "T3"])
+                            "T1", "T2", "T3", "0017", "0018", "0019"])
 
 
 class DispatchBriefTests(unittest.TestCase):
@@ -164,6 +164,35 @@ class DispatchBriefTests(unittest.TestCase):
                 self.assertNotIn(mapping.get(task),
                                  ("cc-task-brief-l3.md",
                                   "cc-task-brief-l3b.md"))
+
+    def test_seventh_round_tasks_use_the_wiring_brief(self):
+        """0017/0018/0019 wire the sixth round's native layers to the runtime.
+
+        The sixth round's brief asks for the native layers to be written from
+        scratch; those are already merged. Dispatching a wiring card against
+        it would burn the card rewriting finished work -- and worse, it would
+        not say which interception layer the ruling picked. So the mapping is
+        pinned to the wiring brief, and the wiring brief must carry a section
+        per card (the dispatcher refuses a brief without one).
+        """
+        mapping = _task_to_brief()
+        for task in ("0017", "0018", "0019"):
+            with self.subTest(task=task):
+                self.assertEqual(mapping.get(task),
+                                 "cc-task-brief-l3i.md")
+                self.assertNotIn(mapping.get(task),
+                                 ("cc-task-brief-l3g.md",
+                                  "cc-task-brief-l3b.md"))
+
+    @_skip_without_docs
+    def test_seventh_round_brief_has_a_section_for_every_mapped_task(self):
+        mapping = _task_to_brief()
+        text = (DOCS / "cc-task-brief-l3i.md").read_text(encoding="utf-8")
+        for task in ("0017", "0018", "0019"):
+            if mapping.get(task) != "cc-task-brief-l3i.md":
+                continue
+            with self.subTest(task=task):
+                self.assertRegex(text, r"(?m)^## 任务 %s[：: ]" % task)
 
     def test_n_does_not_point_at_the_third_round_brief(self):
         """N moved to the fifth round; the third round would redo finished work.
